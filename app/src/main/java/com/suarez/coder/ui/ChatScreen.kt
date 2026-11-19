@@ -258,7 +258,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     }
                 }
 
-                AnimatedVisibility(
+                androidx.compose.animation.AnimatedVisibility(
                     visible = showScrollToBottom,
                     enter = fadeIn() + scaleIn(),
                     exit = fadeOut() + scaleOut(),
