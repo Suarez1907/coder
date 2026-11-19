@@ -34,8 +34,8 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = colors) {
                 var showSettings by rememberSaveable { mutableStateOf(needsSetup()) }
                 if (showSettings) {
-                    BackHandler { showSettings = false; vm.refreshLabel() }
-                    SettingsScreen(vm) { showSettings = false; vm.refreshLabel() }
+                    BackHandler { showSettings = false; vm.refreshSettings() }
+                    SettingsScreen(vm) { showSettings = false; vm.refreshSettings() }
                 } else {
                     ChatScreen(vm, onOpenSettings = { showSettings = true })
                 }

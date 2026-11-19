@@ -1,5 +1,6 @@
 package com.suarez.coder.llm
 
+import com.suarez.coder.data.Provider
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -10,6 +11,11 @@ data class ToolCall(
     /** Gemini "thoughtSignature" that must be sent back unchanged. */
     val signature: String? = null,
 )
+
+/** Token usage of one API call. [input] includes [cached]; [output] excludes [thoughts]. */
+data class Usage(val input: Long = 0, val output: Long = 0, val cached: Long = 0, val thoughts: Long = 0) {
+    operator fun plus(o: Usage) = Usage(input + o.input, output + o.output, cached + o.cached, thoughts + o.thoughts)
+}
 
 sealed class ChatMessage {
     data class User(val text: String) : ChatMessage()
@@ -29,27 +35,85 @@ sealed class ChatMessage {
         val isError: Boolean = false,
     ) : ChatMessage()
 
-    /** Shown in the chat only; never sent to the model. */
-    data class Notice(val text: String) : ChatMessage()
+    /** Shown in the chat only; never sent to the model. [detail] is expandable. */
+    data class Notice(val text: String, val detail: String? = null, val isError: Boolean = false) : ChatMessage()
+
+    /** Cost bookkeeping for one API call (or cache storage); never sent to the model. */
+    data class UsageRecord(
+        val model: String,
+        val role: String,
+        val usage: Usage,
+        val extraCostUsd: Double = 0.0,
+        val label: String = "",
+    ) : ChatMessage()
+
+    /** Summary of every model-visible message before it. */
+    data class Summary(val text: String) : ChatMessage()
 }
 
 data class ToolSpec(val name: String, val description: String, val parameters: JSONObject)
 
+data class CallOptions(
+    val thinkingLevel: String? = null,
+    /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
+    val cachedContent: String? = null,
+)
+
+data class LlmResponse(val message: ChatMessage.Assistant, val usage: Usage)
+
 interface LlmClient {
-    suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>): ChatMessage.Assistant
+    val model: String
+    suspend fun complete(
+        system: String,
+        history: List<ChatMessage>,
+        tools: List<ToolSpec>,
+        options: CallOptions = CallOptions(),
+    ): LlmResponse
+
+    /** Exact input token count when the provider offers it, otherwise null. */
+    suspend fun countTokens(system: String, history: List<ChatMessage>, tools: List<ToolSpec>): Long? = null
+
     suspend fun listModels(): List<String>
 }
 
 class LlmException(message: String) : Exception(message)
 
+/** A cached-content reference was rejected (expired, deleted, wrong model). */
+class CacheRejectedException(message: String) : Exception(message)
+
+/** "provider/model", e.g. gemini/gemini-2.5-pro. */
+data class ModelRef(val provider: Provider, val model: String) {
+    val key: String get() = "${provider.name.lowercase()}/$model"
+    val label: String get() = "${provider.label} · $model"
+
+    companion object {
+        fun parse(s: String): ModelRef? {
+            val p = s.substringBefore('/', "").uppercase()
+            val m = s.substringAfter('/', "").trim()
+            val provider = Provider.entries.firstOrNull { it.name == p } ?: return null
+            return if (m.isBlank()) null else ModelRef(provider, m)
+        }
+    }
+}
+
 object MessageJson {
+    private fun usageJson(u: Usage) = JSONObject().put("i", u.input).put("o", u.output).put("c", u.cached).put("th", u.thoughts)
+    private fun usageFrom(o: JSONObject?) = if (o == null) Usage() else
+        Usage(o.optLong("i"), o.optLong("o"), o.optLong("c"), o.optLong("th"))
+
     fun toJson(list: List<ChatMessage>): String {
         val arr = JSONArray()
         for (m in list) {
             val o = JSONObject()
             when (m) {
                 is ChatMessage.User -> o.put("t", "user").put("text", m.text)
-                is ChatMessage.Notice -> o.put("t", "notice").put("text", m.text)
+                is ChatMessage.Notice -> {
+                    o.put("t", "notice").put("text", m.text).put("err", m.isError)
+                    m.detail?.let { o.put("detail", it) }
+                }
+                is ChatMessage.Summary -> o.put("t", "summary").put("text", m.text)
+                is ChatMessage.UsageRecord -> o.put("t", "usage").put("model", m.model).put("role", m.role)
+                    .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label)
                 is ChatMessage.ToolResult -> o.put("t", "tool").put("id", m.callId).put("name", m.name)
                     .put("content", m.content).put("err", m.isError)
                 is ChatMessage.Assistant -> {
@@ -77,7 +141,10 @@ object MessageJson {
             val o = arr.getJSONObject(i)
             out += when (o.getString("t")) {
                 "user" -> ChatMessage.User(o.getString("text"))
-                "notice" -> ChatMessage.Notice(o.getString("text"))
+                "notice" -> ChatMessage.Notice(o.getString("text"), if (o.has("detail")) o.getString("detail") else null, o.optBoolean("err"))
+                "summary" -> ChatMessage.Summary(o.getString("text"))
+                "usage" -> ChatMessage.UsageRecord(o.optString("model"), o.optString("role"), usageFrom(o.optJSONObject("u")),
+                    o.optDouble("extra", 0.0), o.optString("label"))
                 "tool" -> ChatMessage.ToolResult(o.getString("id"), o.getString("name"), o.getString("content"), o.optBoolean("err"))
                 else -> {
                     val calls = o.optJSONArray("calls") ?: JSONArray()

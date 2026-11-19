@@ -56,23 +56,30 @@ class GitHub(private val token: () -> String) {
         }.ifBlank { "(Hiç repo yok)" }
     }
 
-    suspend fun tree(repo: String, ref: String?): String {
+    data class TreeEntry(val path: String, val size: Long)
+
+    /** Returns (branch, blobs) or null if the repository is empty. */
+    suspend fun treeEntries(repo: String, ref: String?): Pair<String, List<TreeEntry>>? {
         val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val r = call("GET", "/repos/$repo/git/trees/${enc(branch)}?recursive=1")
-        if (r.code == 409) return "(Repo boş, henüz commit yok)"
+        if (r.code == 409) return null
         if (r.code !in 200..299) throw ToolException("GitHub -> ${r.code}: ${r.body.take(500)}")
-        val o = JSONObject(r.body)
-        val arr = o.getJSONArray("tree")
-        val lines = ArrayList<String>()
+        val arr = JSONObject(r.body).getJSONArray("tree")
+        val out = ArrayList<TreeEntry>()
         for (i in 0 until arr.length()) {
             val e = arr.getJSONObject(i)
-            if (e.getString("type") == "blob") lines += "${e.getString("path")} (${e.optLong("size")} B)"
+            if (e.getString("type") == "blob") out += TreeEntry(e.getString("path"), e.optLong("size"))
         }
-        val limit = 2000
-        val head = "Branch: $branch, ${lines.size} dosya\n"
-        return head + lines.take(limit).joinToString("\n") +
-            (if (lines.size > limit) "\n... (${lines.size - limit} dosya daha)" else "") +
-            (if (o.optBoolean("truncated")) "\n(GitHub listeyi kısalttı)" else "")
+        return branch to out
+    }
+
+    suspend fun tree(repo: String, ref: String?, filter: (TreeEntry) -> Boolean = { true }): String {
+        val (branch, all) = treeEntries(repo, ref) ?: return "(Repo boş, henüz commit yok)"
+        val lines = all.filter(filter).map { "${it.path} (${it.size} B)" }
+        val hidden = all.size - lines.size
+        val limit = 1500
+        val head = "Branch: $branch, ${lines.size} dosya" + (if (hidden > 0) " ($hidden dosya filtrelendi: build/bağımlılık/binary/.gitignore)" else "") + "\n"
+        return head + lines.take(limit).joinToString("\n") + (if (lines.size > limit) "\n... (${lines.size - limit} dosya daha)" else "")
     }
 
     suspend fun readFileRaw(repo: String, path: String, ref: String?): String? {

@@ -11,10 +11,10 @@ class OpenAiCompatClient(
     private val name: String,
     private val baseUrl: String,
     private val apiKey: String,
-    private val model: String,
+    override val model: String,
 ) : LlmClient {
 
-    override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>): ChatMessage.Assistant {
+    override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
         if (apiKey.isBlank()) throw LlmException("$name API anahtarı girilmemiş. Ayarlar'dan ekleyin.")
         val body = JSONObject()
             .put("model", model)
@@ -34,7 +34,15 @@ class OpenAiCompatClient(
             .build()
         val res = Http.execute(req)
         if (res.code !in 200..299) throw LlmException("$name hatası (${res.code}): ${errorMessage(res.body)}")
-        return parse(JSONObject(res.body))
+        val json = JSONObject(res.body)
+        val u = json.optJSONObject("usage")
+        // prompt_tokens includes cache hits; completion_tokens already includes reasoning tokens.
+        val usage = if (u == null) Usage() else Usage(
+            input = u.optLong("prompt_tokens"),
+            output = u.optLong("completion_tokens"),
+            cached = u.optLong("prompt_cache_hit_tokens", u.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L),
+        )
+        return LlmResponse(parse(json), usage)
     }
 
     private fun errorMessage(body: String): String =
@@ -46,7 +54,6 @@ class OpenAiCompatClient(
         val lastUser = history.indexOfLast { it is ChatMessage.User }
         history.forEachIndexed { index, m ->
             when (m) {
-                is ChatMessage.Notice -> Unit
                 is ChatMessage.User -> out.put(JSONObject().put("role", "user").put("content", m.text))
                 is ChatMessage.Assistant -> {
                     val o = JSONObject().put("role", "assistant").put("content", m.text)
@@ -66,6 +73,7 @@ class OpenAiCompatClient(
                     JSONObject().put("role", "tool").put("tool_call_id", m.callId)
                         .put("content", if (m.isError) "ERROR: ${m.content}" else m.content)
                 )
+                else -> Unit
             }
         }
         return out

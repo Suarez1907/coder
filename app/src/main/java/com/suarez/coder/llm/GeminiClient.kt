@@ -4,38 +4,153 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
 import java.util.UUID
 
-class GeminiClient(private val apiKey: String, private val model: String) : LlmClient {
+class GeminiClient(private val apiKey: String, override val model: String) : LlmClient {
     private val base = "https://generativelanguage.googleapis.com/v1beta"
 
-    override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>): ChatMessage.Assistant {
+    data class CacheInfo(val name: String, val expireAtMillis: Long, val tokens: Long)
+
+    /** The cache would be below the model's minimum size. */
+    class CacheTooSmallException(message: String) : Exception(message)
+
+    companion object {
+        /** Models that rejected our thinkingConfig; we stop sending it to them. */
+        private val noThinkingConfig = HashSet<String>()
+
+        fun isLegacyThinking(model: String) = Regex("gemini-(1|2)\\.").containsMatchIn(model.lowercase())
+    }
+
+    private fun checkKey() {
         if (apiKey.isBlank()) throw LlmException("Gemini API anahtarı girilmemiş. Ayarlar'dan ekleyin.")
-        val body = JSONObject()
-            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
-            .put("contents", buildContents(history))
-        if (tools.isNotEmpty()) {
-            val decls = JSONArray()
-            tools.forEach {
-                val d = JSONObject().put("name", it.name).put("description", it.description)
-                // Gemini rejects OBJECT schemas with empty properties, so omit parameters for no-arg tools.
-                if ((it.parameters.optJSONObject("properties")?.length() ?: 0) > 0) d.put("parameters", it.parameters)
-                decls.put(d)
-            }
-            body.put("tools", JSONArray().put(JSONObject().put("functionDeclarations", decls)))
-        }
-        val req = Request.Builder()
-            .url("$base/models/$model:generateContent")
-            .header("x-goog-api-key", apiKey)
-            .post(body.toString().toRequestBody(Http.JSON))
-            .build()
-        val res = Http.execute(req)
-        if (res.code !in 200..299) throw LlmException("Gemini hatası (${res.code}): ${errorMessage(res.body)}")
-        return parse(JSONObject(res.body))
     }
 
     private fun errorMessage(body: String): String =
         runCatching { JSONObject(body).getJSONObject("error").getString("message") }.getOrDefault(body.take(500))
+
+    private suspend fun send(method: String, path: String, body: JSONObject?): Http.Result {
+        val rb = body?.toString()?.toRequestBody(Http.JSON)
+        val req = Request.Builder().url("$base/$path").header("x-goog-api-key", apiKey).method(method, rb).build()
+        return Http.execute(req)
+    }
+
+    /** Gemini 3+ takes thinkingLevel; 2.x models take a token budget. */
+    fun thinkingConfig(level: String?): JSONObject? {
+        if (level.isNullOrBlank() || model in noThinkingConfig) return null
+        val m = model.lowercase()
+        if (!isLegacyThinking(m)) return JSONObject().put("thinkingLevel", level)
+        if (!m.contains("2.5")) return null // older models do not think
+        val budget = when (level) {
+            "low" -> if (m.contains("pro")) 1024 else 512
+            "medium" -> 8192
+            else -> -1 // dynamic
+        }
+        return JSONObject().put("thinkingBudget", budget)
+    }
+
+    fun systemJson(system: String) = JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system)))
+
+    fun toolsJson(tools: List<ToolSpec>): JSONArray? {
+        if (tools.isEmpty()) return null
+        val decls = JSONArray()
+        tools.forEach {
+            val d = JSONObject().put("name", it.name).put("description", it.description)
+            // Gemini rejects OBJECT schemas with empty properties, so omit parameters for no-arg tools.
+            if ((it.parameters.optJSONObject("properties")?.length() ?: 0) > 0) d.put("parameters", it.parameters)
+            decls.put(d)
+        }
+        return JSONArray().put(JSONObject().put("functionDeclarations", decls))
+    }
+
+    private fun requestBody(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions, withThinking: Boolean): JSONObject {
+        val body = JSONObject().put("contents", buildContents(history))
+        if (options.cachedContent != null) {
+            body.put("cachedContent", options.cachedContent)
+        } else {
+            body.put("systemInstruction", systemJson(system))
+            toolsJson(tools)?.let { body.put("tools", it) }
+        }
+        if (withThinking) thinkingConfig(options.thinkingLevel)?.let {
+            body.put("generationConfig", JSONObject().put("thinkingConfig", it))
+        }
+        return body
+    }
+
+    override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
+        checkKey()
+        var res = send("POST", "models/$model:generateContent", requestBody(system, history, tools, options, true))
+        if (res.code == 400 && options.thinkingLevel != null && errorMessage(res.body).contains("think", ignoreCase = true)) {
+            // This model does not accept our thinking setting: remember and retry without it.
+            noThinkingConfig += model
+            res = send("POST", "models/$model:generateContent", requestBody(system, history, tools, options, false))
+        }
+        if (options.cachedContent != null && res.code in setOf(400, 403, 404) &&
+            errorMessage(res.body).contains("cach", ignoreCase = true)
+        ) throw CacheRejectedException(errorMessage(res.body))
+        if (res.code !in 200..299) throw LlmException("Gemini hatası (${res.code}): ${errorMessage(res.body)}")
+        val json = JSONObject(res.body)
+        return LlmResponse(parse(json), parseUsage(json.optJSONObject("usageMetadata")))
+    }
+
+    private fun parseUsage(u: JSONObject?): Usage {
+        if (u == null) return Usage()
+        return Usage(
+            input = u.optLong("promptTokenCount") + u.optLong("toolUsePromptTokenCount"),
+            output = u.optLong("candidatesTokenCount"),
+            cached = u.optLong("cachedContentTokenCount"),
+            thoughts = u.optLong("thoughtsTokenCount"),
+        )
+    }
+
+    override suspend fun countTokens(system: String, history: List<ChatMessage>, tools: List<ToolSpec>): Long? {
+        checkKey()
+        val inner = JSONObject().put("model", "models/$model").put("contents", buildContents(history))
+            .put("systemInstruction", systemJson(system))
+        toolsJson(tools)?.let { inner.put("tools", it) }
+        val res = send("POST", "models/$model:countTokens", JSONObject().put("generateContentRequest", inner))
+        if (res.code !in 200..299) throw LlmException("countTokens hatası (${res.code}): ${errorMessage(res.body)}")
+        return JSONObject(res.body).optLong("totalTokens")
+    }
+
+    // ---- Explicit context caching ----
+
+    suspend fun createCache(system: String, tools: List<ToolSpec>, ttlSeconds: Long): CacheInfo {
+        checkKey()
+        val body = JSONObject()
+            .put("model", "models/$model")
+            .put("displayName", "coder-${UUID.randomUUID().toString().take(6)}")
+            .put("systemInstruction", systemJson(system))
+            .put("ttl", "${ttlSeconds}s")
+        toolsJson(tools)?.let { body.put("tools", it) }
+        val res = send("POST", "cachedContents", body)
+        if (res.code !in 200..299) {
+            val msg = errorMessage(res.body)
+            if (res.code == 400 && (msg.contains("too small", true) || msg.contains("min", true) && msg.contains("token", true))) {
+                throw CacheTooSmallException(msg)
+            }
+            throw LlmException("Önbellek oluşturulamadı (${res.code}): $msg")
+        }
+        return parseCache(JSONObject(res.body))
+    }
+
+    suspend fun extendCache(name: String, ttlSeconds: Long): CacheInfo {
+        val res = send("PATCH", "$name?updateMask=ttl", JSONObject().put("ttl", "${ttlSeconds}s"))
+        if (res.code !in 200..299) throw LlmException("Önbellek uzatılamadı (${res.code}): ${errorMessage(res.body)}")
+        return parseCache(JSONObject(res.body))
+    }
+
+    suspend fun deleteCache(name: String) {
+        runCatching { send("DELETE", name, null) }
+    }
+
+    private fun parseCache(o: JSONObject): CacheInfo {
+        val expire = runCatching { Instant.parse(o.getString("expireTime")).toEpochMilli() }.getOrDefault(System.currentTimeMillis() + 60_000)
+        val tokens = o.optJSONObject("usageMetadata")?.optLong("totalTokenCount") ?: 0L
+        return CacheInfo(o.getString("name"), expire, tokens)
+    }
+
+    // ---- Message conversion ----
 
     private fun buildContents(history: List<ChatMessage>): JSONArray {
         val contents = JSONArray()
@@ -46,7 +161,6 @@ class GeminiClient(private val apiKey: String, private val model: String) : LlmC
         }
         for (m in history) {
             when (m) {
-                is ChatMessage.Notice -> Unit
                 is ChatMessage.User -> {
                     flush()
                     contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", m.text))))
@@ -76,6 +190,7 @@ class GeminiClient(private val apiKey: String, private val model: String) : LlmC
                     val arr = pendingResponses ?: JSONArray().also { pendingResponses = it }
                     arr.put(JSONObject().put("functionResponse", fr))
                 }
+                else -> Unit
             }
         }
         flush()
@@ -111,22 +226,14 @@ class GeminiClient(private val apiKey: String, private val model: String) : LlmC
             }
         }
         if (text.isEmpty() && calls.isEmpty()) {
-            val finish = cand.optString("finishReason")
-            text.append("(Model boş yanıt döndü: $finish)")
+            text.append("(Model boş yanıt döndü: ${cand.optString("finishReason")})")
         }
-        return ChatMessage.Assistant(
-            text = text.toString(),
-            toolCalls = calls,
-            reasoning = thoughts.toString().ifBlank { null },
-            textSignature = textSig,
-            model = model,
-        )
+        return ChatMessage.Assistant(text.toString(), calls, thoughts.toString().ifBlank { null }, textSig, model)
     }
 
     override suspend fun listModels(): List<String> {
-        if (apiKey.isBlank()) throw LlmException("Önce Gemini API anahtarını girin.")
-        val req = Request.Builder().url("$base/models?pageSize=200").header("x-goog-api-key", apiKey).get().build()
-        val res = Http.execute(req)
+        checkKey()
+        val res = send("GET", "models?pageSize=200", null)
         if (res.code !in 200..299) throw LlmException("Gemini hatası (${res.code}): ${errorMessage(res.body)}")
         val arr = JSONObject(res.body).optJSONArray("models") ?: return emptyList()
         return (0 until arr.length()).map { arr.getJSONObject(it) }
@@ -135,7 +242,7 @@ class GeminiClient(private val apiKey: String, private val model: String) : LlmC
                 (0 until methods.length()).any { methods.getString(it) == "generateContent" }
             }
             .map { it.getString("name").removePrefix("models/") }
-            .filter { it.startsWith("gemini") }
+            .filter { it.startsWith("gemini") && !it.contains("tts") && !it.contains("image") && !it.contains("embedding") }
             .sortedDescending()
     }
 }

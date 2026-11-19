@@ -48,6 +48,9 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -69,4 +72,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jsoup:jsoup:1.18.1")
+
+    testImplementation("junit:junit:4.13.2")
+    // Real org.json on the JVM test classpath (Android's version is only a stub there).
+    testImplementation("org.json:json:20240303")
 }
