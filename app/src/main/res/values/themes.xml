@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Coder" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/ic_bg</item>
+    </style>
+    <color name="ic_bg">#FF101418</color>
+</resources>
