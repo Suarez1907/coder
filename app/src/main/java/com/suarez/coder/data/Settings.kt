@@ -7,6 +7,8 @@ import androidx.security.crypto.MasterKeys
 
 enum class Provider(val label: String) { GEMINI("Gemini"), DEEPSEEK("DeepSeek") }
 
+enum class ThemeMode(val label: String) { SYSTEM("Sistem"), LIGHT("Açık"), DARK("Koyu") }
+
 /** Stores API keys and preferences, encrypted on the device. */
 class Settings(context: Context) {
     private val prefs: SharedPreferences = try {
@@ -126,6 +128,16 @@ class Settings(context: Context) {
     var modelCatalog: List<String>
         get() = str("model_catalog").lines().filter { it.isNotBlank() }
         set(v) = put("model_catalog", v.distinct().joinToString("\n"))
+
+    // ---- Theme & Appearance ----
+
+    var themeMode: ThemeMode
+        get() = runCatching { ThemeMode.valueOf(str("theme_mode", ThemeMode.SYSTEM.name)) }.getOrDefault(ThemeMode.SYSTEM)
+        set(v) = put("theme_mode", v.name)
+
+    var dynamicColor: Boolean
+        get() = bool("dynamic_color", true)
+        set(v) = putBool("dynamic_color", v)
 
     // ---- Smart routing (Gemini Decision 1) ----
 

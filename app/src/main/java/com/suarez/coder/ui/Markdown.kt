@@ -1,21 +1,36 @@
 package com.suarez.coder.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -25,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 
 private sealed class Block {
     data class Text(val text: String) : Block()
@@ -58,7 +74,7 @@ private fun splitBlocks(md: String): List<Block> {
     return out
 }
 
-private fun inline(text: String, codeColor: androidx.compose.ui.graphics.Color): AnnotatedString = buildAnnotatedString {
+private fun inline(text: String, codeColor: Color, codeBg: Color): AnnotatedString = buildAnnotatedString {
     val lines = text.split("\n")
     lines.forEachIndexed { li, raw ->
         var line = raw
@@ -77,7 +93,15 @@ private fun inline(text: String, codeColor: androidx.compose.ui.graphics.Color):
                 }
                 line[i] == '`' && line.indexOf('`', i + 1) > 0 -> {
                     val end = line.indexOf('`', i + 1)
-                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace, color = codeColor)) { append(line.substring(i + 1, end)) }
+                    withStyle(
+                        SpanStyle(
+                            fontFamily = FontFamily.Monospace,
+                            color = codeColor,
+                            background = codeBg,
+                        ),
+                    ) {
+                        append(line.substring(i + 1, end))
+                    }
                     i = end + 1
                 }
                 else -> { append(line[i]); i++ }
@@ -90,33 +114,82 @@ private fun inline(text: String, codeColor: androidx.compose.ui.graphics.Color):
 
 @Composable
 fun MarkdownText(md: String, modifier: Modifier = Modifier) {
-    val clipboard = LocalClipboardManager.current
-    val codeColor = MaterialTheme.colorScheme.secondary
+    val codeColor = MaterialTheme.colorScheme.primary
+    val codeBg = MaterialTheme.colorScheme.surfaceContainerHighest
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         for (b in splitBlocks(md)) {
             when (b) {
-                is Block.Text -> SelectionContainer { Text(inline(b.text, codeColor), style = MaterialTheme.typography.bodyMedium) }
-                is Block.Code -> Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column {
-                        Row(Modifier.fillMaxWidth().padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(b.lang.ifBlank { "kod" }, style = MaterialTheme.typography.labelSmall)
-                            TextButton(onClick = { clipboard.setText(AnnotatedString(b.code)) }) { Text("Kopyala") }
-                        }
-                        SelectionContainer {
-                            Text(
-                                b.code,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.sp,
-                                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
-                            )
-                        }
-                    }
+                is Block.Text -> SelectionContainer {
+                    Text(inline(b.text, codeColor, codeBg), style = MaterialTheme.typography.bodyMedium)
                 }
+                is Block.Code -> CodeBlock(lang = b.lang, code = b.code)
+            }
+        }
+    }
+}
+
+@Composable
+fun CodeBlock(lang: String, code: String, modifier: Modifier = Modifier) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2000L)
+            copied = false
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = lang.ifBlank { "code" },
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(code))
+                        copied = true
+                    },
+                ) {
+                    Icon(
+                        imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = if (copied) "Kopyalandı" else "Kopyala",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            SelectionContainer {
+                Text(
+                    text = code,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(12.dp),
+                )
             }
         }
     }
