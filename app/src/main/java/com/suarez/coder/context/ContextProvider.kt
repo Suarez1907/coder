@@ -13,11 +13,19 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
 
     fun invalidate() = memo.clear()
 
-    suspend fun load(): Loaded? {
-        val repo = settings.contextRepo.ifBlank { settings.defaultRepo }
-        val files = settings.contextFiles
+    val repo: String get() = settings.contextRepo.ifBlank { settings.defaultRepo }
+    val ref: String? get() = settings.contextRef.ifBlank { null }
+    val hasManualFiles: Boolean get() = settings.contextFiles.isNotEmpty()
+
+    /** The user's pinned files. */
+    suspend fun load(): Loaded? = load(repo, ref, settings.contextFiles, "Kullanıcının seçtiği")
+
+    /** Files picked automatically for one request. */
+    suspend fun loadAuto(repo: String, ref: String?, files: List<String>): Loaded? =
+        load(repo, ref, files, "Akıllı dosya seçicinin (Decision 1) bu istek için seçtiği")
+
+    private suspend fun load(repo: String, ref: String?, files: List<String>, who: String): Loaded? {
         if (repo.isBlank() || files.isEmpty()) return null
-        val ref = settings.contextRef.ifBlank { null }
         val sb = StringBuilder()
         val skipped = ArrayList<String>()
         var count = 0
@@ -31,7 +39,7 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
             count++
         }
         if (count == 0) return null
-        val header = "Kullanıcının seçtiği bağlam dosyaları (repo: $repo${ref?.let { ", ref: $it" } ?: ""}). " +
+        val header = "$who bağlam dosyaları (repo: $repo${ref?.let { ", ref: $it" } ?: ""}). " +
             "Bunlar zaten elinde; tekrar okuma. Commit sonrası değişmiş olabilirler.\n\n"
         return Loaded(header + sb.toString(), count, sb.length, skipped)
     }

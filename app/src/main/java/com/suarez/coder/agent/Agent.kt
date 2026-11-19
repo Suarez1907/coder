@@ -5,6 +5,10 @@ import com.suarez.coder.context.HistoryPruner
 import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.decision.DecisionClient
+import com.suarez.coder.decision.Route
+import com.suarez.coder.decision.RoutingDecision
+import com.suarez.coder.decision.SmartRouter
 import com.suarez.coder.llm.CacheRejectedException
 import com.suarez.coder.llm.CallOptions
 import com.suarez.coder.llm.ChatMessage
@@ -20,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /** What the agent needs from the screen. */
 interface AgentUi {
@@ -34,6 +39,13 @@ class Agent(val settings: Settings) {
     val context = ContextProvider(settings, tools.github)
     private val cache = GeminiCacheManager(settings)
     private var budgetApprovedUpTo = 0.0
+    private val router = SmartRouter(
+        tools.github,
+        listFiles = { repo, ref -> tools.filteredTree(repo, ref) },
+        decide = { input, questions ->
+            DecisionClient(settings.geminiKey, settings.decisionModel, settings.decisionTimeoutMs).decide(input, questions)
+        },
+    )
 
     init {
         tools.onRepoChanged = { context.invalidate() }
@@ -48,6 +60,7 @@ class Agent(val settings: Settings) {
             "editor" -> "Uygulayıcı"
             "summary" -> "Özet"
             "cache" -> "Önbellek"
+            "decision" -> "Karar"
             else -> "Ajan"
         }
     }
@@ -193,21 +206,105 @@ class Agent(val settings: Settings) {
         return resp.message
     }
 
+    fun questionSystem(ctx: String?) = agentSystem(ctx) +
+        "\nThis request needs no code change: answer it, using read-only tools if needed. Do not modify the repository.\n"
+
     // ---- Entry point ----
 
-    suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi) {
+    /** [override] forces a route for this request (e.g. the user re-runs it in Architect mode). */
+    suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, override: Route? = null) {
         maybeSummarize(history, ui)
         val start = history.size
         try {
-            if (settings.architectMode) ArchitectEditor(this).run(history, ui)
-            else {
-                val ctx = context.load()?.text
-                agentLoop(history, ui, singleRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null)
+            val request = history.lastOrNull { it is ChatMessage.User } as? ChatMessage.User
+            var route: Route? = override
+            var autoCtx: String? = null
+            if (override != null) {
+                history += ChatMessage.RouteInfo("↻ Kullanıcı kararı geçersiz kıldı → Mimar Modu (${architectRef().model} + ${editorRef().model})",
+                    null, override.name, false)
+                ui.update()
+            } else if (settings.smartRouting && request != null) {
+                val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) }
+                val d = router.route(request.text, recentContext(history), repo, context.ref, context.hasManualFiles)
+                if (d.fallbackReason == null) {
+                    history += ChatMessage.UsageRecord(settings.decisionModel, "decision", Usage(input = d.inputTokens))
+                    route = d.route
+                    if (d.selected.isNotEmpty() && d.repo != null) {
+                        autoCtx = context.loadAuto(d.repo, d.ref, d.selected.map { it.path })?.text
+                    }
+                }
+                history += routeInfo(d)
+                ui.update()
+            }
+            val ctx = autoCtx ?: context.load()?.text
+            when (route) {
+                Route.COMPLEX_ARCHITECT -> ArchitectEditor(this).run(history, ui, ctx)
+                Route.SIMPLE_EDIT ->
+                    agentLoop(history, ui, editorRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null)
+                Route.QUESTION_ONLY ->
+                    agentLoop(history, ui, editorRef(), "agent", questionSystem(ctx),
+                        tools.readOnlySpecs.filter { it.name != "submit_plan" }, readOnly = true, stopTool = null)
+                null ->
+                    if (settings.architectMode) ArchitectEditor(this).run(history, ui, ctx)
+                    else agentLoop(history, ui, singleRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null)
             }
         } finally {
             usageSummary(history, start)?.let { history += it }
             ui.update()
         }
+    }
+
+    /** The previous exchange as plain text, so follow-ups like "devam et" can be classified. */
+    private fun recentContext(history: List<ChatMessage>): String? {
+        val lastUser = history.indexOfLast { it is ChatMessage.User }
+        if (lastUser <= 0) return null
+        val prevAnswer = history.subList(0, lastUser).lastOrNull { it is ChatMessage.Assistant && it.text.isNotBlank() } as? ChatMessage.Assistant
+        val prevUser = history.subList(0, lastUser).lastOrNull { it is ChatMessage.User } as? ChatMessage.User
+        if (prevAnswer == null && prevUser == null) return null
+        return buildString {
+            prevUser?.let { append("User: ").append(it.text.take(300)).append('\n') }
+            prevAnswer?.let { append("Assistant: ").append(HistoryPruner.stripCodeBlocks(it.text).take(500)) }
+        }
+    }
+
+    private fun pct(v: Double) = "%${(v * 100).roundToInt()}"
+
+    private fun manualModeLabel() =
+        if (settings.architectMode) "Mimar Modu (${architectRef().model} + ${editorRef().model})" else singleRef().model
+
+    fun routeInfo(d: RoutingDecision): ChatMessage.RouteInfo {
+        if (d.fallbackReason != null) {
+            return ChatMessage.RouteInfo(
+                "Decision 1 kullanılamadı (${d.fallbackReason.take(80)}) → manuel seçim: ${manualModeLabel()}",
+                null, "MANUAL", !settings.architectMode,
+            )
+        }
+        val mode = when (d.route) {
+            Route.SIMPLE_EDIT -> "Hızlı Mod (${editorRef().model}, ${pct(d.confidence)} güven)"
+            Route.QUESTION_ONLY -> "Soru Modu (${editorRef().model}, ${pct(d.confidence)} güven)"
+            Route.COMPLEX_ARCHITECT ->
+                if (d.upgraded && d.rawRoute == Route.SIMPLE_EDIT) "Mimar Modu (basit düzenleme ${pct(d.confidence)} < %75, yükseltildi)"
+                else if (d.upgraded) "Mimar Modu (karar okunamadı, güvenli seçim)"
+                else "Mimar Modu (${architectRef().model} + ${editorRef().model}, ${pct(d.confidence)} güven)"
+        }
+        val files = when {
+            d.manualFiles -> "📎 manuel dosyalar korundu"
+            d.totalFiles > 0 -> "${d.selected.size}/${d.totalFiles} dosya seçildi"
+            else -> null
+        }
+        val text = listOfNotNull("Decision 1 → $mode", files, "${d.latencyMs} ms").joinToString(" • ")
+        val detail = buildString {
+            if (d.routeProbabilities.isNotEmpty()) {
+                append("Sınıflandırma olasılıkları:\n")
+                d.routeProbabilities.entries.sortedByDescending { it.value }.forEach { append("  ${it.key}: ${pct(it.value)}\n") }
+            }
+            if (d.selected.isNotEmpty()) {
+                append("\nBağlama eklenen dosyalar (evet olasılığı):\n")
+                d.selected.forEach { append("  ${it.path}: ${pct(it.yes)}\n") }
+            } else if (!d.manualFiles && d.totalFiles > 0) append("\nEşik (%60) üzerinde dosya yok; otomatik bağlam eklenmedi.\n")
+            append("\nKarar çağrısı: ${d.inputTokens} giriş token, 0 çıkış token.")
+        }
+        return ChatMessage.RouteInfo(text, detail, d.route.name, d.route != Route.COMPLEX_ARCHITECT)
     }
 
     private fun usageSummary(history: List<ChatMessage>, from: Int): ChatMessage.Notice? {

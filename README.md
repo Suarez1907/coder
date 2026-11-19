@@ -27,6 +27,13 @@ GitHub Actions sonuçlarını kontrol eder ve internette arama yapıp sayfa okuy
 - **Seçici bağlam:** `node_modules`, `.git`, `build`, `dist`, lock dosyaları, binary/görseller ve `.gitignore` her zaman dışarıda; "📎 Bağlam" ile yalnızca seçilen dosyalar eklenir.
 - **Bütçe koruyucu:** Üst üste 3 başarısız denemede ve oturum maliyeti eşiği (varsayılan $1) aşılınca onay istenir.
 
+- **Akıllı Yönlendirme (Decision 1):** Açıkken her istek önce Gemini Decisions API'ye (`POST v1beta/decisions`, `gemini-decision-1`)
+  tek çağrıda gider. Bir `choice` sorusu görevi sınıflandırır: `SIMPLE_EDIT` → Uygulayıcı modeliyle hızlı mod, `COMPLEX_ARCHITECT` → Mimar/Uygulayıcı,
+  `QUESTION_ONLY` → kod değiştirmeden yanıt. `SIMPLE_EDIT` güveni 0.75'in altındaysa Mimar'a yükseltilir.
+  Aynı çağrıda filtrelenmiş her dosya için bir `noul` (evet/hayır) sorusu sorulur; evet ve güveni 0.60'ın üstündeki en fazla 8 dosya bağlama eklenir.
+  📎 ile sabitlenmiş dosyalar varsa onlar korunur. Hata, kota veya zaman aşımında (varsayılan 2 sn) manuel seçime dönülür.
+  Karar çubuğundan istek tek dokunuşla Mimar Modu'nda yeniden çalıştırılabilir. Karar çağrıları maliyette "Karar" kalemi olarak görünür ($0.10 / 1M giriş).
+
 `SavingsSimulationTest` 5 turluk örnek bir oturumda modele giden girdinin eski yönteme göre ~%70 küçüldüğünü ölçer
 (çıktı tarafında tam dosya yerine diff yazılması ve önbellek indirimi buna ek kazançtır).
 

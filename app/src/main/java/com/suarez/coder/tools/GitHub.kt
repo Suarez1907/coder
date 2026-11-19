@@ -56,7 +56,7 @@ class GitHub(private val token: () -> String) {
         }.ifBlank { "(Hiç repo yok)" }
     }
 
-    data class TreeEntry(val path: String, val size: Long)
+    data class TreeEntry(val path: String, val size: Long, val sha: String = "")
 
     /** Returns (branch, blobs) or null if the repository is empty. */
     suspend fun treeEntries(repo: String, ref: String?): Pair<String, List<TreeEntry>>? {
@@ -68,7 +68,7 @@ class GitHub(private val token: () -> String) {
         val out = ArrayList<TreeEntry>()
         for (i in 0 until arr.length()) {
             val e = arr.getJSONObject(i)
-            if (e.getString("type") == "blob") out += TreeEntry(e.getString("path"), e.optLong("size"))
+            if (e.getString("type") == "blob") out += TreeEntry(e.getString("path"), e.optLong("size"), e.optString("sha"))
         }
         return branch to out
     }

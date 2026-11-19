@@ -47,6 +47,9 @@ sealed class ChatMessage {
         val label: String = "",
     ) : ChatMessage()
 
+    /** Smart-routing decision shown as an info bar; never sent to the model. */
+    data class RouteInfo(val text: String, val detail: String?, val route: String, val canOverride: Boolean) : ChatMessage()
+
     /** Summary of every model-visible message before it. */
     data class Summary(val text: String) : ChatMessage()
 }
@@ -112,6 +115,10 @@ object MessageJson {
                     m.detail?.let { o.put("detail", it) }
                 }
                 is ChatMessage.Summary -> o.put("t", "summary").put("text", m.text)
+                is ChatMessage.RouteInfo -> {
+                    o.put("t", "route").put("text", m.text).put("route", m.route).put("ov", m.canOverride)
+                    m.detail?.let { o.put("detail", it) }
+                }
                 is ChatMessage.UsageRecord -> o.put("t", "usage").put("model", m.model).put("role", m.role)
                     .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label)
                 is ChatMessage.ToolResult -> o.put("t", "tool").put("id", m.callId).put("name", m.name)
@@ -143,6 +150,8 @@ object MessageJson {
                 "user" -> ChatMessage.User(o.getString("text"))
                 "notice" -> ChatMessage.Notice(o.getString("text"), if (o.has("detail")) o.getString("detail") else null, o.optBoolean("err"))
                 "summary" -> ChatMessage.Summary(o.getString("text"))
+                "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,
+                    o.optString("route"), o.optBoolean("ov"))
                 "usage" -> ChatMessage.UsageRecord(o.optString("model"), o.optString("role"), usageFrom(o.optJSONObject("u")),
                     o.optDouble("extra", 0.0), o.optString("label"))
                 "tool" -> ChatMessage.ToolResult(o.getString("id"), o.getString("name"), o.getString("content"), o.optBoolean("err"))

@@ -127,6 +127,20 @@ class Settings(context: Context) {
         get() = str("model_catalog").lines().filter { it.isNotBlank() }
         set(v) = put("model_catalog", v.distinct().joinToString("\n"))
 
+    // ---- Smart routing (Gemini Decision 1) ----
+
+    var smartRouting: Boolean
+        get() = bool("smart_routing", false)
+        set(v) = putBool("smart_routing", v)
+
+    var decisionModel: String
+        get() = str("decision_model", "gemini-decision-1")
+        set(v) = put("decision_model", v.trim())
+
+    var decisionTimeoutMs: Long
+        get() = prefs.getLong("decision_timeout_ms", 2_000L)
+        set(v) = prefs.edit().putLong("decision_timeout_ms", v.coerceIn(500L, 30_000L)).apply()
+
     // ---- Selected context files ----
 
     var contextRepo: String

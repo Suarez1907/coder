@@ -68,6 +68,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var cacheTtl by remember { mutableStateOf(s.cacheTtlMinutes.toString()) }
     var keepTurns by remember { mutableStateOf(s.keepTurns.toString()) }
     var previewOn by remember { mutableStateOf(s.tokenPreview) }
+    var decisionModel by remember { mutableStateOf(s.decisionModel) }
+    var decisionTimeout by remember { mutableStateOf((s.decisionTimeoutMs / 1000.0).toString()) }
 
     /** Stores fetched models and picks sensible architect/editor defaults from them. */
     fun remember(p: Provider, models: List<String>) {
@@ -99,6 +101,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         s.cacheTtlMinutes = cacheTtl.toIntOrNull() ?: 10
         s.keepTurns = keepTurns.toIntOrNull() ?: 4
         s.tokenPreview = previewOn
+        s.decisionModel = decisionModel.ifBlank { "gemini-decision-1" }
+        s.decisionTimeoutMs = ((decisionTimeout.replace(',', '.').toDoubleOrNull() ?: 2.0) * 1000).toLong()
     }
 
     Scaffold(topBar = {
@@ -190,6 +194,16 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     "Boş bırakılırsa yerleşik yaklaşık fiyatlar kullanılır; güncel fiyatları Google/DeepSeek fiyat sayfasından kontrol edin.",
                 style = MaterialTheme.typography.bodySmall,
             )
+
+            HorizontalDivider()
+            Text("Akıllı Yönlendirme (Decision 1)", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Her istekte önce Gemini Decisions API görevi sınıflandırır (basit düzenleme / mimari / soru) ve ilgili dosyaları seçer. " +
+                    "Hata, kota veya zaman aşımında manuel model ve dosyalarınız kullanılır. Gemini API anahtarı gerekir.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedTextField(decisionModel, { decisionModel = it }, label = { Text("Karar modeli") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(decisionTimeout, { decisionTimeout = it }, label = { Text("Zaman aşımı (saniye)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
             HorizontalDivider()
             Text("Önbellek ve geçmiş", style = MaterialTheme.typography.titleSmall)

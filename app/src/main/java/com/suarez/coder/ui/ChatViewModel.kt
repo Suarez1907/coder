@@ -13,6 +13,7 @@ import com.suarez.coder.agent.StopException
 import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.decision.Route
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.MessageJson
 import com.suarez.coder.llm.ModelRef
@@ -84,6 +85,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun selectEditor(ref: ModelRef) { settings.editorModel = ref.key; refreshSettings() }
     fun setArchitectMode(on: Boolean) { settings.architectMode = on; refreshSettings() }
     fun setThinking(level: String) { settings.thinkingLevel = level; refreshSettings() }
+    fun setSmartRouting(on: Boolean) { settings.smartRouting = on; refreshSettings() }
 
     // ---- Sending ----
 
@@ -101,6 +103,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         previewJob?.cancel(); preview = null
         messages += ChatMessage.User(text.trim())
         save()
+        start(null)
+    }
+
+    /** Stops the current run if any and repeats the last request in Architect mode. Spent cost stays recorded. */
+    fun rerunAsArchitect() {
+        val previous = job
+        previous?.cancel()
+        viewModelScope.launch {
+            previous?.join()
+            val idx = messages.indexOfLast { it is ChatMessage.User }
+            if (idx < 0) return@launch
+            val keep = messages.take(idx + 1) + messages.drop(idx + 1).filterIsInstance<ChatMessage.UsageRecord>()
+            messages.clear(); messages.addAll(keep)
+            save()
+            start(Route.COMPLEX_ARCHITECT)
+        }
+    }
+
+    private fun start(override: Route?) {
         running = true
         job = viewModelScope.launch {
             val work = messages.toMutableList()
@@ -108,7 +129,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 override fun update() { sync(work); save() }
             }
             try {
-                agent.run(work, agentUi)
+                agent.run(work, agentUi, override)
             } catch (e: CancellationException) {
                 work += ChatMessage.Notice("Durduruldu.")
             } catch (e: StopException) {

@@ -74,6 +74,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
 
     val results = vm.messages.filterIsInstance<ChatMessage.ToolResult>().associateBy { it.callId }
     val visible = vm.messages.filter { it !is ChatMessage.ToolResult && it !is ChatMessage.UsageRecord }
+    val lastRoute = vm.messages.lastOrNull { it is ChatMessage.RouteInfo }
 
     LaunchedEffect(vm.messages.size, vm.running) {
         val count = visible.size + if (vm.running) 1 else 0
@@ -111,6 +112,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                         is ChatMessage.Assistant -> AssistantItem(m, results)
                         is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
                         is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi (token tasarrufu)", m.text, false)
+                        is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
                         else -> Unit
                     }
                 }
@@ -164,6 +166,11 @@ private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
             if (!s.architectMode) {
                 ModelChip("Model", vm.agent.singleRef(), options) { vm.selectSingle(it) }
             }
+            FilterChip(
+                selected = s.smartRouting,
+                onClick = { vm.setSmartRouting(!s.smartRouting) },
+                label = { Text("Akıllı Yönlendirme (Decision 1)") },
+            )
             ChoiceChip("Düşünme", s.thinkingLevel, listOf("low", "medium", "high")) { vm.setThinking(it) }
             AssistChip(onClick = onOpenContext, label = { Text("📎 Bağlam: ${s.contextFiles.size}") })
         }
@@ -220,6 +227,29 @@ private fun UserBubble(text: String) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
         Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
             SelectionContainer { Text(text, Modifier.padding(10.dp), style = MaterialTheme.typography.bodyMedium) }
+        }
+    }
+}
+
+@Composable
+private fun RouteBar(m: ChatMessage.RouteInfo, isLatest: Boolean, onOverride: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+        modifier = Modifier.fillMaxWidth().animateContentSize(),
+    ) {
+        Column(Modifier.clickable(enabled = m.detail != null) { open = !open }.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Text("⚡ " + m.text + if (m.detail != null) (if (open) "  ▴" else "  ▾") else "",
+                style = MaterialTheme.typography.labelMedium)
+            if (open && m.detail != null) {
+                Text(m.detail, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+            if (isLatest && m.canOverride) {
+                TextButton(onClick = onOverride, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) {
+                    Text("↻ Mimar Modu'nda yeniden çalıştır", style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
     }
 }

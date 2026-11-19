@@ -19,8 +19,7 @@ class ArchitectEditor(private val agent: Agent) {
         const val GROUP_CHARS = 100_000
     }
 
-    suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi) {
-        val ctx = agent.context.load()?.text
+    suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, ctx: String?) {
         val plan = agent.agentLoop(
             history, ui, agent.architectRef(), "architect", agent.architectSystem(ctx),
             agent.tools.readOnlySpecs, readOnly = true, stopTool = "submit_plan",

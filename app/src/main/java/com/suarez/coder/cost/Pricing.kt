@@ -11,6 +11,7 @@ object Pricing {
     fun defaultFor(model: String): Price {
         val m = model.lowercase()
         return when {
+            m.contains("decision") -> Price(0.10, 0.0, 0.10) // Gemini Decision 1: no output tokens billed
             m.contains("deepseek") -> Price(0.28, 0.42, 0.028)
             m.contains("flash-lite") -> Price(0.10, 0.40, 0.01, 1.0)
             m.contains("flash") -> Price(0.30, 2.50, 0.03, 1.0)
