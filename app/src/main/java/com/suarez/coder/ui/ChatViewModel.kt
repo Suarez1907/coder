@@ -196,6 +196,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun fetchModels(provider: Provider): List<String> = agent.client(agent.singleRef(provider)).listModels()
 
+    /** Stores fetched models; picks architect/editor defaults by price when the current ones are not available. */
+    fun mergeCatalog(p: Provider, models: List<String>) {
+        val prefix = p.name.lowercase() + "/"
+        settings.modelCatalog = settings.modelCatalog.filter { !it.startsWith(prefix) } + models.map { prefix + it }
+        if (p == Provider.GEMINI && models.isNotEmpty()) {
+            val known = models.toSet()
+            if (settings.architectModel.startsWith(prefix) && settings.architectModel.removePrefix(prefix) !in known) {
+                (models.firstOrNull { it == "gemini-4-neon" } ?: models.firstOrNull { it.contains("pro") })?.let { settings.architectModel = prefix + it }
+            }
+            if (settings.editorModel.startsWith(prefix) && settings.editorModel.removePrefix(prefix) !in known) {
+                models.filter { it.contains("flash") && !it.contains("tts") && !it.contains("image") && !it.contains("live") }
+                    .minByOrNull { Pricing.blended(agent.price(it)) }?.let { settings.editorModel = prefix + it }
+            }
+        }
+        refreshSettings()
+    }
+
+    var catalogStatus by mutableStateOf<String?>(null)
+        private set
+
+    /** Fetches model lists from every provider that has a key, so both dropdowns can mix providers. */
+    fun refreshCatalog() {
+        viewModelScope.launch {
+            val parts = ArrayList<String>()
+            for (p in Provider.entries) {
+                val hasKey = if (p == Provider.GEMINI) settings.geminiKey.isNotBlank() else settings.deepseekKey.isNotBlank()
+                if (!hasKey) continue
+                parts += runCatching { fetchModels(p).also { mergeCatalog(p, it) }.size.let { "${p.label}: $it" } }
+                    .getOrElse { "${p.label}: hata" }
+            }
+            catalogStatus = if (parts.isEmpty()) "Önce API anahtarı girin" else parts.joinToString(", ")
+        }
+    }
+
     suspend fun loadTree(repo: String, ref: String?): List<String> =
         agent.tools.filteredTree(agent.tools.normalizeRepo(repo), ref?.ifBlank { null }).map { it.path }
 

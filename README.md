@@ -34,6 +34,16 @@ GitHub Actions sonuçlarını kontrol eder ve internette arama yapıp sayfa okuy
   📎 ile sabitlenmiş dosyalar varsa onlar korunur. Hata, kota veya zaman aşımında (varsayılan 2 sn) manuel seçime dönülür.
   Karar çubuğundan istek tek dokunuşla Mimar Modu'nda yeniden çalıştırılabilir. Karar çağrıları maliyette "Karar" kalemi olarak görünür ($0.10 / 1M giriş).
 
+- **Repo Haritası:** Mimar'a ham kod yerine gövdesiz bir iskelet gider (yollar, tipler, fonksiyon imzaları). Repo commit başına
+  tek tarball isteğiyle okunur, harita sha'ya göre saklanır. Bu projede harita kaynak kodun ~%8.5'i boyutunda.
+- **Sıfır maliyetli yönlendirici:** Yerel kural ($0) → Decision 1 → en ucuz uygun model (10 çıktı tokenı) → manuel ayar.
+- **Çıktı sınırları ve Sadece Diff:** Mimar 1500, Uygulayıcı 4096, ajan 4096 token (ayarlanabilir); kesilen yanıt bir kez
+  iki katı sınırla yeniden denenir. Açıklamasız modda selamlama, açıklama ve özet yazılmaz.
+- **Önbellek eşiği:** Açık önbellek yalnızca sabit bağlam 32k tokenı aşınca ve model destekliyorsa kurulur
+  (Gemini 4 yalnızca otomatik önbellek). "🧹 Önbelleği Temizle" sunucudaki önbelleği siler.
+- **Karışık sağlayıcı:** Mimar ve Uygulayıcı için Gemini ve DeepSeek modelleri birlikte seçilebilir; maliyet özeti
+  model ve sağlayıcı bazında ayrılır, fiyat tablosunda olmayan modeller * ile işaretlenir.
+
 `SavingsSimulationTest` 5 turluk örnek bir oturumda modele giden girdinin eski yönteme göre ~%70 küçüldüğünü ölçer
 (çıktı tarafında tam dosya yerine diff yazılması ve önbellek indirimi buna ek kazançtır).
 

@@ -164,7 +164,7 @@ private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
                 label = { Text("Mimar Modu (Maliyet Tasarrufu)") },
             )
             if (!s.architectMode) {
-                ModelChip("Model", vm.agent.singleRef(), options) { vm.selectSingle(it) }
+                ModelChip("Model", vm.agent.singleRef(), options, vm::refreshCatalog) { vm.selectSingle(it) }
             }
             FilterChip(
                 selected = s.smartRouting,
@@ -173,23 +173,25 @@ private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
             )
             ChoiceChip("Düşünme", s.thinkingLevel, listOf("low", "medium", "high")) { vm.setThinking(it) }
             AssistChip(onClick = onOpenContext, label = { Text("📎 Bağlam: ${s.contextFiles.size}") })
+            vm.catalogStatus?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
             AssistChip(onClick = { vm.clearCache() }, enabled = !vm.running, label = { Text("🧹 Önbelleği Temizle") })
         }
         if (s.architectMode) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ModelChip("Mimar", vm.agent.architectRef(), options) { vm.selectArchitect(it) }
-                ModelChip("Uygulayıcı", vm.agent.editorRef(), options) { vm.selectEditor(it) }
+                ModelChip("Mimar", vm.agent.architectRef(), options, vm::refreshCatalog) { vm.selectArchitect(it) }
+                ModelChip("Uygulayıcı", vm.agent.editorRef(), options, vm::refreshCatalog) { vm.selectEditor(it) }
             }
         }
     }
 }
 
 @Composable
-private fun ModelChip(label: String, current: ModelRef, options: List<ModelRef>, onPick: (ModelRef) -> Unit) {
+private fun ModelChip(label: String, current: ModelRef, options: List<ModelRef>, onRefresh: () -> Unit, onPick: (ModelRef) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         AssistChip(onClick = { open = true }, label = { Text("$label: ${current.model} ▾", maxLines = 1) })
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(text = { Text("↻ Gemini + DeepSeek listesini güncelle") }, onClick = { onRefresh(); open = false })
             options.forEach { ref ->
                 DropdownMenuItem(text = { Text(ref.label) }, onClick = { onPick(ref); open = false })
             }

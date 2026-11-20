@@ -421,18 +421,26 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     private fun usageSummary(history: List<ChatMessage>, from: Int): ChatMessage.Notice? {
         val recs = history.drop(from).filterIsInstance<ChatMessage.UsageRecord>()
         if (recs.isEmpty()) return null
-        val parts = recs.groupBy { it.role }.map { (role, list) ->
+        val overrides = Pricing.parseOverrides(settings.priceOverrides)
+        fun estimated(model: String) = !Pricing.isKnown(model) && overrides.keys.none { model.lowercase().contains(it) }
+        val parts = recs.groupBy { it.role to it.model }.map { (k, list) ->
+            val (role, model) = k
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
             val c = list.sumOf { costOf(it) }
-            if (role == "cache") "${roleLabel(role)} ${Pricing.formatUsd(c)}"
-            else "${roleLabel(role)} ${Pricing.formatTokens(u.input)}→${Pricing.formatTokens(u.output + u.thoughts)} ${Pricing.formatUsd(c)}"
+            val name = if (role in setOf("architect", "editor", "router")) "${roleLabel(role)} ($model)" else roleLabel(role)
+            if (role == "cache") "$name ${Pricing.formatUsd(c)}"
+            else "$name ${Pricing.formatTokens(u.input)}→${Pricing.formatTokens(u.output + u.thoughts)} ${Pricing.formatUsd(c)}" +
+                if (estimated(model)) "*" else ""
         }
         val total = recs.sumOf { costOf(it) }
         val detail = recs.groupBy { it.role to it.model }.entries.joinToString("\n") { (k, list) ->
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
             "${roleLabel(k.first)} (${k.second}), ${list.size} çağrı: giriş ${u.input} (önbellekten ${u.cached}), " +
                 "çıkış ${u.output}, düşünme ${u.thoughts}, maliyet ${money(list.sumOf { costOf(it) })}"
-        } + "\nOturum toplamı: ${money(sessionCost(history))}"
+        } + "\n" + recs.groupBy { if (it.model.startsWith("deepseek")) "DeepSeek" else "Gemini" }.entries.joinToString("\n") { (p, l) ->
+            "$p toplamı: ${money(l.sumOf { costOf(it) })}"
+        } + "\nOturum toplamı: ${money(sessionCost(history))}" +
+            (if (recs.any { estimated(it.model) }) "\n* Tahmini fiyat: bu model fiyat tablosunda yok; Ayarlar > Fiyat düzeltmeleri'nden girin." else "")
         return ChatMessage.Notice("💰 " + parts.joinToString(" · ") + " · Toplam ${money(total)}", detail)
     }
 

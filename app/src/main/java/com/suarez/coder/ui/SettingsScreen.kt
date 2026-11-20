@@ -80,20 +80,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var cacheMsg by remember { mutableStateOf(vm.agent.cacheStatus) }
     var decisionTimeout by remember { mutableStateOf((s.decisionTimeoutMs / 1000.0).toString()) }
 
-    /** Stores fetched models and picks sensible architect/editor defaults from them. */
-    fun remember(p: Provider, models: List<String>) {
-        val prefix = p.name.lowercase() + "/"
-        s.modelCatalog = s.modelCatalog.filter { !it.startsWith(prefix) } + models.map { prefix + it }
-        if (p == Provider.GEMINI && models.isNotEmpty()) {
-            val known = models.toSet()
-            if (s.architectModel.startsWith(prefix) && s.architectModel.removePrefix(prefix) !in known) {
-                models.firstOrNull { it.contains("pro") }?.let { s.architectModel = prefix + it }
-            }
-            if (s.editorModel.startsWith(prefix) && s.editorModel.removePrefix(prefix) !in known) {
-                (models.firstOrNull { it.contains("flash-lite") } ?: models.firstOrNull { it.contains("flash") })?.let { s.editorModel = prefix + it }
-            }
-        }
-    }
+    fun remember(p: Provider, models: List<String>) = vm.mergeCatalog(p, models)
     val scope = rememberCoroutineScope()
     val uri = LocalUriHandler.current
 
