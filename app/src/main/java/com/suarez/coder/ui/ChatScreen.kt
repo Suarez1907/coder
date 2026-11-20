@@ -169,7 +169,7 @@ private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
             FilterChip(
                 selected = s.smartRouting,
                 onClick = { vm.setSmartRouting(!s.smartRouting) },
-                label = { Text("Akıllı Yönlendirme (Decision 1)") },
+                label = { Text("Akıllı Yönlendirme") },
             )
             ChoiceChip("Düşünme", s.thinkingLevel, listOf("low", "medium", "high")) { vm.setThinking(it) }
             AssistChip(onClick = onOpenContext, label = { Text("📎 Bağlam: ${s.contextFiles.size}") })

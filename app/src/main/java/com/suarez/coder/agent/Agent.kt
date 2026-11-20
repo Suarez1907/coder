@@ -6,6 +6,7 @@ import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
 import com.suarez.coder.decision.DecisionClient
+import com.suarez.coder.decision.LocalRouter
 import com.suarez.coder.decision.Route
 import com.suarez.coder.decision.RoutingDecision
 import com.suarez.coder.decision.SmartRouter
@@ -63,6 +64,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             "summary" -> "Özet"
             "cache" -> "Önbellek"
             "decision" -> "Karar"
+            "router" -> "Yönlendirici"
             else -> "Ajan"
         }
     }
@@ -260,16 +262,40 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                     null, override.name, false)
                 ui.update()
             } else if (settings.smartRouting && request != null) {
-                val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) }
-                val d = router.route(request.text, recentContext(history), repo, context.ref, context.hasManualFiles)
-                if (d.fallbackReason == null) {
-                    history += ChatMessage.UsageRecord(settings.decisionModel, "decision", Usage(input = d.inputTokens))
-                    route = d.route
-                    if (d.selected.isNotEmpty() && d.repo != null) {
-                        autoCtx = context.loadAuto(d.repo, d.ref, d.selected.map { it.path })?.text
+                // Tier 1: free local rules.
+                val local = LocalRouter.classify(request.text, settings.contextFiles.size)
+                if (local != null) {
+                    route = local.route
+                    history += ChatMessage.RouteInfo("Yerel Kural → ${modeName(local.route)} • $0", "Gerekçe: ${local.reason}",
+                        local.route.name, local.route != Route.COMPLEX_ARCHITECT)
+                } else {
+                    var decisionError: String? = null
+                    if (settings.useDecision1 && settings.geminiKey.isNotBlank()) {
+                        val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) }
+                        val d = router.route(request.text, recentContext(history), repo, context.ref, context.hasManualFiles)
+                        if (d.fallbackReason == null) {
+                            history += ChatMessage.UsageRecord(settings.decisionModel, "decision", Usage(input = d.inputTokens))
+                            route = d.route
+                            if (d.selected.isNotEmpty() && d.repo != null) {
+                                autoCtx = context.loadAuto(d.repo, d.ref, d.selected.map { it.path })?.text
+                            }
+                            history += routeInfo(d)
+                        } else decisionError = d.fallbackReason
+                    }
+                    if (route == null) {
+                        // Tier 2: one-word answer from the cheapest suitable model.
+                        val cheap = cheapRoute(history, request.text, ui)
+                        val why = decisionError?.let { "Decision 1 kullanılamadı: ${it.take(100)}\n" } ?: ""
+                        if (cheap != null) {
+                            route = cheap.first
+                            history += ChatMessage.RouteInfo("${cheap.second.model} → ${modeName(cheap.first)} • ${Pricing.formatUsd(cheap.third)}",
+                                why + "Tek kelimelik sınıflandırma (en fazla 10 çıktı tokenı).", cheap.first.name, cheap.first != Route.COMPLEX_ARCHITECT)
+                        } else {
+                            history += ChatMessage.RouteInfo("Otomatik yönlendirme yapılamadı → manuel seçim: ${manualModeLabel()}",
+                                why.ifBlank { null }, "MANUAL", !settings.architectMode)
+                        }
                     }
                 }
-                history += routeInfo(d)
                 ui.update()
             }
             val ctx = autoCtx ?: context.load()?.text
@@ -303,6 +329,52 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         return buildString {
             prevUser?.let { append("User: ").append(it.text.take(300)).append('\n') }
             prevAnswer?.let { append("Assistant: ").append(HistoryPruner.stripCodeBlocks(it.text).take(500)) }
+        }
+    }
+
+    private fun modeName(r: Route) = when (r) {
+        Route.SIMPLE_EDIT -> "Hızlı Mod (${editorRef().model})"
+        Route.QUESTION_ONLY -> "Soru Modu (${editorRef().model})"
+        Route.COMPLEX_ARCHITECT -> "Mimar Modu (${architectRef().model} + ${editorRef().model})"
+    }
+
+    /** Model for tier-2 routing: the configured one, else the cheapest catalog model whose thinking can be turned (nearly) off. */
+    fun routerRef(): ModelRef? {
+        ModelRef.parse(settings.routerModel)?.let { return it }
+        val candidates = (settings.modelCatalog + listOf("gemini/gemini-2.5-flash-lite", "gemini/gemini-3.1-flash-lite", "deepseek/deepseek-chat"))
+            .distinct().mapNotNull { ModelRef.parse(it) }
+            .filter { (it.provider == Provider.GEMINI && settings.geminiKey.isNotBlank()) || (it.provider == Provider.DEEPSEEK && settings.deepseekKey.isNotBlank()) }
+            .filter { Pricing.canNearlyDisableThinking(it.model) }
+        val catalog = settings.modelCatalog.toSet()
+        // Prefer models the account actually listed; fall back to the built-in candidates.
+        val pool = candidates.filter { it.key in catalog }.ifEmpty { candidates }
+        return pool.minByOrNull { Pricing.blended(price(it.model)) }
+    }
+
+    /** Returns (route, model, cost) or null when the classifier is unavailable or unsure. */
+    private suspend fun cheapRoute(history: MutableList<ChatMessage>, request: String, ui: AgentUi): Triple<Route, ModelRef, Double>? {
+        val ref = routerRef() ?: return null
+        val system = "You classify requests sent to a coding assistant that edits a GitHub repository. Reply with exactly one word: " +
+            "SIMPLE (small change in one file: UI tweak, text fix, small logic update), COMPLEX (several files, new feature, " +
+            "refactoring, hard debugging) or QUESTION (no code change needed)."
+        val prompt = (recentContext(history)?.let { "Previous exchange:\n$it\n\n" } ?: "") + "Request:\n" + request.take(2_000)
+        val scratch = ArrayList<ChatMessage>()
+        return try {
+            val reply = kotlinx.coroutines.withTimeout(8_000) {
+                callModel(scratch, listOf(ChatMessage.User(prompt)), ref, "router", system, emptyList(), ui,
+                    useCache = false, maxOut = 10, minimalThinking = true)
+            }
+            val recs = scratch.filterIsInstance<ChatMessage.UsageRecord>()
+            history.addAll(recs)
+            LocalRouter.parseOneWord(reply.text)?.let { Triple(it, ref, recs.sumOf { r -> costOf(r) }) }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            null
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: StopException) {
+            throw e
+        } catch (e: Exception) {
+            null
         }
     }
 
