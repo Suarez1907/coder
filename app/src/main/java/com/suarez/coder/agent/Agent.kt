@@ -41,6 +41,16 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     val repoMaps = com.suarez.coder.repomap.RepoMapService(tools.github, filesDir)
     private val cache = GeminiCacheManager(settings)
     private var budgetApprovedUpTo = 0.0
+    /** Frozen stable project context per kind ("agent" / "architect"); rebuilt only at checkpoints or after many commits. */
+    private val snapshots = HashMap<String, String?>()
+    private var commitsSinceSnapshot = 0
+    private var flexDisabledForRun = false
+    /** Whether the architect snapshot contains a repo map (limits architect reads). */
+    var architectHasMap = false
+        private set
+    /** Approximate composition of the last main request, for the cost summary. */
+    var lastAnatomy: String? = null
+        private set
     private val router = SmartRouter(
         tools.github,
         listFiles = { repo, ref -> tools.filteredTree(repo, ref) },
@@ -50,13 +60,19 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     )
 
     init {
-        tools.onRepoChanged = { context.invalidate() }
+        tools.onRepoChanged = {
+            context.invalidate()
+            if (++commitsSinceSnapshot > SNAPSHOT_MAX_COMMITS) snapshots.clear()
+        }
+        tools.isInSnapshot = { path -> snapshots.values.any { it?.contains("### $path\n") == true || it?.contains("\n$path\n") == true } }
     }
 
     companion object {
         const val MAX_CONSECUTIVE_FAILURES = 3
-        const val SUMMARIZE_AFTER_CHARS = 8_000
+        const val SUMMARIZE_AFTER_CHARS = 24_000
         const val MAX_ARCHITECT_READS = 3
+        const val SNAPSHOT_MAX_COMMITS = 6
+        const val STABLE_ACK = "Tamam, proje bağlamını aldım."
 
         fun roleLabel(role: String) = when (role) {
             "architect" -> "Mimar"
@@ -65,6 +81,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             "cache" -> "Önbellek"
             "decision" -> "Karar"
             "router" -> "Yönlendirici"
+            "escalation" -> "Yükseltme"
             else -> "Ajan"
         }
     }
@@ -78,6 +95,13 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         budgetApprovedUpTo = 0.0
         cache.invalidate()
         context.invalidate()
+        invalidateSnapshot()
+    }
+
+    /** Forces the stable context to be rebuilt on the next request (pinned files or repo changed). */
+    fun invalidateSnapshot() {
+        snapshots.clear()
+        commitsSinceSnapshot = 0
     }
 
     // ---- Models ----
@@ -96,7 +120,13 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     private fun overrides() = Pricing.parseOverrides(settings.priceOverrides)
     fun price(model: String) = Pricing.priceFor(model, overrides())
-    fun costOf(r: ChatMessage.UsageRecord) = Pricing.cost(r.usage, price(r.model)) + r.extraCostUsd
+    fun costOf(r: ChatMessage.UsageRecord) = Pricing.cost(r.usage, price(r.model)) * r.discount + r.extraCostUsd
+
+    /** Share of input tokens served from cache (implicit or explicit) across [records]. */
+    fun cacheHitRate(records: List<ChatMessage.UsageRecord>): Double? {
+        val input = records.sumOf { it.usage.input }
+        return if (input <= 0) null else records.sumOf { it.usage.cached }.toDouble() / input
+    }
     fun sessionCost(history: List<ChatMessage>) = history.filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
     fun money(usd: Double) = "${Pricing.formatUsd(usd)} (${Pricing.formatTry(usd * settings.usdTry)})"
 
@@ -117,15 +147,14 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     // ---- Prompts ----
 
+    /** Static per mode: no date or other per-request content, so the prompt prefix stays identical across requests. */
     private fun header(): String {
-        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val repo = settings.defaultRepo.takeIf { it.isNotBlank() }
         return buildString {
             appendLine("You are Coder, a software engineering agent inside an Android app. The user works only from a phone.")
-            appendLine("Tools give you GitHub (read, commit, branches, PRs, any REST endpoint incl. Actions logs) and the web (search, fetch).")
-            appendLine("You cannot run code on the device; to build or test, use the repo's GitHub Actions and read the logs.")
+            appendLine("Tools give you GitHub (read, commit, branches, PRs, Actions) and the web (search, fetch).")
+            appendLine("You cannot run code on the device; builds and tests run in the repo's GitHub Actions.")
             appendLine("Reply in the user's language (default Turkish). Keep answers short; the screen is small.")
-            appendLine("Today: $date.")
             if (repo != null) appendLine("Default repository: $repo.")
             if (settings.customInstructions.isNotBlank()) appendLine("User instructions: ${settings.customInstructions}")
         }
@@ -133,29 +162,37 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     private val tokenRules = """
         Token economy (important, the user pays per token):
-        - Read only what you need: use the file tree, then read specific line ranges of large files.
+        - Read only what you need. Request every file you need in ONE github_read_files call instead of one call per file;
+          read line ranges of large files with github_read_file.
         - Change existing files with github_apply_diff (SEARCH/REPLACE blocks), never by rewriting the whole file.
-          Keep each SEARCH small but unique: the changed lines plus 1-3 context lines, copied exactly.
+          Keep each SEARCH small but unique. For a long region you may write its first lines, a line with only `...`, then its last lines.
         - Use github_write_files only for new files, full rewrites of tiny files, or deletions.
+        - After pushing, call ci_wait once (it waits for the build and returns the errors); never poll with github_api.
+          Use ci_errors for an older run. Fix the reported errors, then ci_wait again.
+        - With web_fetch pass a short `query` so only the relevant parts of the page come back.
         - Do not repeat file contents or diffs in your answer; summarize what changed with links.
     """.trimIndent()
 
     private val terseCode = "Terse mode: no greetings, explanations, summaries or commentary. Make code changes only through " +
         "github_apply_diff with SEARCH/REPLACE blocks. Final reply: at most 2 short lines (what changed + link)."
 
-    fun agentSystem(ctx: String?) = buildString {
+    private val notesRule = "Project notes: the repo may keep .coder/NOTES.md (under 60 lines: purpose, structure, key files, conventions, " +
+        "build/test commands, pitfalls). If it is missing and you make a substantial change, create it; when a change alters " +
+        "architecture, conventions or build steps, update it in the same commit."
+
+    fun agentSystem() = buildString {
         append(header()).append('\n').append(tokenRules).append('\n')
         if (settings.terseMode) appendLine(terseCode)
         appendLine("Workflow: understand first, then change; group related edits in one commit; unless told otherwise use the branch the user names, or a new feature branch and offer a PR.")
-        if (ctx != null) append('\n').append(ctx)
+        if (settings.projectNotes) appendLine(notesRule)
     }
 
-    fun architectSystem(ctx: String?, repoMap: String? = null) = buildString {
+    fun architectSystem(hasMap: Boolean) = buildString {
         append(header()).append('\n')
         appendLine(
             """
             You are the ARCHITECT. A cheaper EDITOR model will implement your plan. You must not write the code yourself.
-            1. Inspect only what you need with the read-only tools (tree, specific line ranges, search, web).
+            1. Inspect only what you need with the read-only tools (tree, files in one github_read_files call, search, web).
             2. If code must change, call submit_plan exactly once. For each file give short, precise, numbered logical steps:
                which function/class/section changes, what to add/remove, exact names, signatures and behaviour.
                Snippets only when essential and at most 5 lines. List every file that must change (action modify/create/delete).
@@ -164,14 +201,13 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             """.trimIndent()
         )
         if (settings.terseMode) appendLine("Terse mode: no prose outside submit_plan; write plan steps as short imperative bullets.")
-        if (repoMap != null) {
+        if (hasMap) {
             appendLine(
-                "Aim for a plan that touches 1-3 files. Use the REPO MAP below first (paths, types, signatures; bodies removed). " +
-                    "Read at most $MAX_ARCHITECT_READS files, and only when the map is not enough."
+                "Aim for a plan that touches 1-3 files. Use the REPO MAP in the project context first (paths, types, signatures; " +
+                    "bodies removed). Read at most $MAX_ARCHITECT_READS files, and only when the map is not enough."
             )
-            append("\nREPO MAP:\n").append(repoMap).append('\n')
         }
-        if (ctx != null) append('\n').append(ctx)
+        if (settings.projectNotes) appendLine("$notesRule Include .coder/NOTES.md in the plan when that applies.")
     }
 
     val editorSystem: String get() = """
@@ -187,14 +223,69 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         - Put the file path alone on the line right above <<<<<<< SEARCH.
         - SEARCH must copy existing lines character for character (indentation included) and must be unique in the file.
         - Keep blocks small: only the lines that change plus 1-3 unchanged context lines. Use several blocks per file, in file order.
+        - To replace a long region you may abbreviate the middle of SEARCH: its first 2+ lines, a line with only `...`, its last 2+ lines.
         - New file: leave SEARCH empty and put the whole file in REPLACE. To remove code, leave REPLACE empty.
         - Write complete, working code; no placeholders. Only touch the files listed.
         - Output nothing except the blocks: no explanations, no whole files.
     """.trimIndent() + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
 
+    fun questionSystem() = buildString {
+        append(header()).append('\n').append(tokenRules).append('\n')
+        appendLine("This request needs no code change: answer it concisely, using read-only tools if needed. Do not modify the repository.")
+    }
+
+    // ---- Stable project context ----
+
+    /**
+     * Notes, repo map (architect) and pinned files as one frozen block, sent right after the system prompt so that every
+     * request in a session starts with the same content. Our own later commits appear in the conversation instead.
+     */
+    suspend fun stableContext(kind: String, history: MutableList<ChatMessage>, ui: AgentUi): String? {
+        if (snapshots.containsKey(kind)) return snapshots[kind]
+        val parts = ArrayList<String>()
+        if (settings.projectNotes) context.loadNotes()?.let { parts += "PROJECT NOTES (.coder/NOTES.md):\n$it" }
+        var hasMap = false
+        if (kind == "architect") repoMapFor(history, ui)?.let { parts += "REPO MAP (paths, types, signatures; bodies removed):\n$it"; hasMap = true }
+        context.load()?.let { parts += it.text }
+        if (kind == "architect") architectHasMap = hasMap
+        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val text = if (parts.isEmpty()) null else
+            "STABLE PROJECT CONTEXT (snapshot of $date; changes made after it appear later in the conversation).\n\n" + parts.joinToString("\n\n")
+        snapshots[kind] = text
+        commitsSinceSnapshot = 0
+        return text
+    }
+
+    /** Repo map for the architect, or null when disabled/unavailable (the architect then reads files with tools). */
+    private suspend fun repoMapFor(history: MutableList<ChatMessage>, ui: AgentUi): String? {
+        if (!settings.repoMapForArchitect) return null
+        val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return null
+        return try {
+            val r = kotlinx.coroutines.withTimeout(45_000) { repoMaps.get(repo, context.ref) }
+            history += ChatMessage.Notice(
+                "🗺 Repo haritası: ${r.files} dosya, ~${Pricing.formatTokens((r.map.length / 4).toLong())} token" +
+                    (if (r.fromCache) " (önbellekten, ${r.sha.take(7)})" else " (oluşturuldu, ${r.sha.take(7)})"),
+                r.map.take(20_000),
+            )
+            ui.update()
+            r.map
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            history += ChatMessage.Notice("Repo haritası zamanında hazırlanamadı; Mimar dosyaları araçlarla okuyacak.")
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            history += ChatMessage.Notice("Repo haritası oluşturulamadı (${e.message?.take(100)}); Mimar dosyaları araçlarla okuyacak.")
+            null
+        }
+    }
+
     // ---- Model calls ----
 
-    /** One API call with budget check, optional Gemini cache and usage bookkeeping. */
+    /**
+     * One API call with budget check, cache handling, Flex tier and usage bookkeeping.
+     * [stable] is sent as the first user message (followed by a short model acknowledgement) so it forms a cacheable prefix.
+     */
     suspend fun callModel(
         history: MutableList<ChatMessage>,
         messages: List<ChatMessage>,
@@ -205,35 +296,72 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         ui: AgentUi,
         useCache: Boolean = true,
         maxOut: Int? = null,
-        minimalThinking: Boolean = false,
+        thinking: String? = null,
+        stable: String? = null,
     ): ChatMessage.Assistant {
         checkBudget(history, ui)
         val client = client(ref)
-        var opts = CallOptions(thinkingLevel = settings.thinkingLevel, maxOutputTokens = maxOut, minimalThinking = minimalThinking)
+        val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
+        val full = prefix + messages
+        val flex = settings.economyMode && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
+        var opts = CallOptions(
+            thinkingLevel = thinking?.takeIf { it != "minimal" },
+            maxOutputTokens = maxOut,
+            minimalThinking = thinking == "minimal",
+            serviceTier = if (flex) "flex" else null,
+        )
+        var send = full
         if (useCache && client is GeminiClient) {
-            cache.prepare(client, system, toolSpecs)?.let { p ->
+            cache.prepare(client, system, toolSpecs, prefix)?.let { p ->
                 opts = opts.copy(cachedContent = p.name)
+                send = full.drop(p.prefixCount)
                 if (p.createdOrExtended) {
                     history += ChatMessage.UsageRecord(ref.model, "cache", Usage(),
                         Pricing.storageCost(p.tokens, p.ttlMinutes.toDouble(), price(ref.model)), cache.lastStatus)
                 }
             }
         }
-        suspend fun once(o: CallOptions) = try {
-            client.complete(system, messages, toolSpecs, o)
-        } catch (e: CacheRejectedException) {
-            cache.invalidate()
-            client.complete(system, messages, toolSpecs, o.copy(cachedContent = null))
+        if (stable != null || role == "agent" || role == "architect") {
+            fun tok(chars: Int) = Pricing.formatTokens((chars / 4).toLong())
+            lastAnatomy = "kurallar ~${tok(system.length)} · araçlar ~${tok(toolSpecs.sumOf { it.description.length + it.parameters.toString().length })}" +
+                " · sabit bağlam ~${tok(stable?.length ?: 0)} · konuşma ~${tok(HistoryPruner.charSize(messages))} token"
         }
+
+        suspend fun once(o: CallOptions): com.suarez.coder.llm.LlmResponse {
+            return try {
+                client.complete(system, if (o.cachedContent != null) send else full, toolSpecs, o)
+            } catch (e: CacheRejectedException) {
+                cache.invalidate()
+                client.complete(system, full, toolSpecs, o.copy(cachedContent = null))
+            } catch (e: GeminiClient.FlexUnavailableException) {
+                val ok = ui.confirm(
+                    "Flex kullanılamıyor",
+                    "${e.message}\nFlex (%50 indirimli) kendiliğinden standart fiyata geçmez. Bu çalıştırma standart fiyatla devam etsin mi?",
+                    "Standart fiyatla devam", "Durdur",
+                )
+                if (!ok) throw StopException("Flex kapasitesi yok; durduruldu.")
+                flexDisabledForRun = true
+                client.complete(system, if (o.cachedContent != null) send else full, toolSpecs, o.copy(serviceTier = null))
+            }
+        }
+
+        fun record(resp: com.suarez.coder.llm.LlmResponse, o: CallOptions) {
+            val servedFlex = resp.serviceTier?.contains("flex") ?: (o.serviceTier == "flex" && !flexDisabledForRun)
+            history += ChatMessage.UsageRecord(ref.model, role, resp.usage,
+                label = if (servedFlex) "flex" else "", discount = if (servedFlex) 0.5 else 1.0)
+            if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
+        }
+
         var resp = once(opts)
-        history += ChatMessage.UsageRecord(ref.model, role, resp.usage)
-        if (resp.truncated && maxOut != null && !minimalThinking) {
+        record(resp, opts)
+        if (resp.truncated && maxOut != null && maxOut >= 64) {
             // A cut-off answer is useless (and a cut-off diff is dangerous): retry once with a larger cap.
             val bigger = maxOut * 2
             history += ChatMessage.Notice("✂️ ${roleLabel(role)} yanıtı çıktı sınırına ($maxOut token) takıldı; $bigger ile bir kez yeniden deneniyor.")
             ui.update()
-            resp = once(opts.copy(maxOutputTokens = bigger))
-            history += ChatMessage.UsageRecord(ref.model, role, resp.usage)
+            val o2 = opts.copy(maxOutputTokens = bigger)
+            resp = once(o2)
+            record(resp, o2)
             if (resp.truncated) {
                 history += ChatMessage.Notice("⚠️ Yanıt $bigger tokenda yine kesildi. Ayarlar'dan çıktı sınırını artırın veya düşünme seviyesini düşürün.", isError = true)
             }
@@ -241,22 +369,18 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         return resp.message
     }
 
-    fun questionSystem(ctx: String?) = buildString {
-        append(header()).append('\n').append(tokenRules).append('\n')
-        appendLine("This request needs no code change: answer it concisely, using read-only tools if needed. Do not modify the repository.")
-        if (ctx != null) append('\n').append(ctx)
-    }
-
     // ---- Entry point ----
 
     /** [override] forces a route for this request (e.g. the user re-runs it in Architect mode). */
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, override: Route? = null) {
-        maybeSummarize(history, ui)
+        flexDisabledForRun = false
         val start = history.size
         try {
-            val request = history.lastOrNull { it is ChatMessage.User } as? ChatMessage.User
+            val requestIndex = history.indexOfLast { it is ChatMessage.User }
+            val request = history.getOrNull(requestIndex) as? ChatMessage.User
             var route: Route? = override
-            var autoCtx: String? = null
+            var auto: com.suarez.coder.context.ContextProvider.Loaded? = null
+            var autoPaths: List<String> = emptyList()
             if (override != null) {
                 history += ChatMessage.RouteInfo("↻ Kullanıcı kararı geçersiz kıldı → Mimar Modu (${architectRef().model} + ${editorRef().model})",
                     null, override.name, false)
@@ -277,7 +401,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                             history += ChatMessage.UsageRecord(settings.decisionModel, "decision", Usage(input = d.inputTokens))
                             route = d.route
                             if (d.selected.isNotEmpty() && d.repo != null) {
-                                autoCtx = context.loadAuto(d.repo, d.ref, d.selected.map { it.path })?.text
+                                autoPaths = d.selected.map { it.path }
+                                auto = context.loadAuto(d.repo, d.ref, autoPaths)
                             }
                             history += routeInfo(d)
                         } else decisionError = d.fallbackReason
@@ -298,20 +423,21 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 }
                 ui.update()
             }
-            val ctx = autoCtx ?: context.load()?.text
+            // Request-specific files go into the conversation (the volatile end), not the stable prefix.
+            auto?.let { if (requestIndex >= 0) history.add(requestIndex + 1, ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))) }
+            val questionSpecs = tools.readOnlySpecs.filter { it.name != "submit_plan" }
             when (route) {
-                Route.COMPLEX_ARCHITECT -> ArchitectEditor(this).run(history, ui, ctx)
+                Route.COMPLEX_ARCHITECT -> ArchitectEditor(this).run(history, ui)
                 Route.SIMPLE_EDIT ->
-                    agentLoop(history, ui, editorRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null,
-                        maxOut = settings.maxOutAgent)
+                    agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
+                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
                 Route.QUESTION_ONLY ->
-                    agentLoop(history, ui, editorRef(), "agent", questionSystem(ctx),
-                        tools.readOnlySpecs.filter { it.name != "submit_plan" }, readOnly = true, stopTool = null,
-                        maxOut = settings.maxOutAgent)
+                    agentLoop(history, ui, editorRef(), "agent", questionSystem(), "agent", questionSpecs, readOnly = true, stopTool = null,
+                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
                 null ->
-                    if (settings.architectMode) ArchitectEditor(this).run(history, ui, ctx)
-                    else agentLoop(history, ui, singleRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null,
-                        maxOut = settings.maxOutAgent)
+                    if (settings.architectMode) ArchitectEditor(this).run(history, ui)
+                    else agentLoop(history, ui, singleRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
+                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
             }
         } finally {
             usageSummary(history, start)?.let { history += it }
@@ -338,6 +464,27 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         Route.COMPLEX_ARCHITECT -> "Mimar Modu (${architectRef().model} + ${editorRef().model})"
     }
 
+    /**
+     * Middle rung of the editor ladder: the configured model, or the cheapest known model priced between the editor and
+     * the architect (e.g. a Flash model between Flash-Lite and Neon). Null when none fits or set to "none".
+     */
+    fun escalationRef(): ModelRef? {
+        if (settings.escalationModel.equals("none", true)) return null
+        ModelRef.parse(settings.escalationModel)?.let { return it }
+        val lo = Pricing.blended(price(editorRef().model))
+        val hi = Pricing.blended(price(architectRef().model))
+        val skip = Regex("tts|image|live|decision|embedding|transcribe|robotics|omni|banana", RegexOption.IGNORE_CASE)
+        val candidates = (settings.modelCatalog + listOf("gemini/gemini-3.8-flash", "gemini/gemini-2.5-flash"))
+            .distinct().mapNotNull { ModelRef.parse(it) }
+            .filter { !skip.containsMatchIn(it.model) }
+            .filter { (it.provider == Provider.GEMINI && settings.geminiKey.isNotBlank()) || (it.provider == Provider.DEEPSEEK && settings.deepseekKey.isNotBlank()) }
+            .filter { it.key != editorRef().key && it.key != architectRef().key }
+            .filter { Pricing.blended(price(it.model)) in (lo * 1.2)..(hi * 0.8) }
+        val catalog = settings.modelCatalog.toSet()
+        val pool = candidates.filter { it.key in catalog }.ifEmpty { candidates }
+        return pool.minByOrNull { Pricing.blended(price(it.model)) }
+    }
+
     /** Model for tier-2 routing: the configured one, else the cheapest catalog model whose thinking can be turned (nearly) off. */
     fun routerRef(): ModelRef? {
         ModelRef.parse(settings.routerModel)?.let { return it }
@@ -362,7 +509,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         return try {
             val reply = kotlinx.coroutines.withTimeout(8_000) {
                 callModel(scratch, listOf(ChatMessage.User(prompt)), ref, "router", system, emptyList(), ui,
-                    useCache = false, maxOut = 10, minimalThinking = true)
+                    useCache = false, maxOut = 10, thinking = "minimal")
             }
             val recs = scratch.filterIsInstance<ChatMessage.UsageRecord>()
             history.addAll(recs)
@@ -433,7 +580,13 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 if (estimated(model)) "*" else ""
         }
         val total = recs.sumOf { costOf(it) }
-        val detail = recs.groupBy { it.role to it.model }.entries.joinToString("\n") { (k, list) ->
+        val callRecs = recs.filter { it.role != "cache" && it.role != "decision" }
+        val hit = cacheHitRate(callRecs)
+        val flexCalls = recs.count { it.label == "flex" }
+        val detail = (lastAnatomy?.let { "İstek anatomisi (son ana çağrı, yaklaşık): $it\n" } ?: "") +
+            (hit?.let { "Önbellekten okunan giriş: %${(it * 100).roundToInt()} (${callRecs.sumOf { r -> r.usage.cached }} / ${callRecs.sumOf { r -> r.usage.input }} token)\n" } ?: "") +
+            (if (flexCalls > 0) "Flex (%50 indirimli) çağrı: $flexCalls\n" else "") +
+            "Önbellek durumu: ${cache.describe()}\n" + recs.groupBy { it.role to it.model }.entries.joinToString("\n") { (k, list) ->
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
             "${roleLabel(k.first)} (${k.second}), ${list.size} çağrı: giriş ${u.input} (önbellekten ${u.cached}), " +
                 "çıkış ${u.output}, düşünme ${u.thoughts}, maliyet ${money(list.sumOf { costOf(it) })}"
@@ -441,10 +594,11 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             "$p toplamı: ${money(l.sumOf { costOf(it) })}"
         } + "\nOturum toplamı: ${money(sessionCost(history))}" +
             (if (recs.any { estimated(it.model) }) "\n* Tahmini fiyat: bu model fiyat tablosunda yok; Ayarlar > Fiyat düzeltmeleri'nden girin." else "")
-        return ChatMessage.Notice("💰 " + parts.joinToString(" · ") + " · Toplam ${money(total)}", detail)
+        val hitText = hit?.let { " · önbellek %${(it * 100).roundToInt()}" } ?: ""
+        return ChatMessage.Notice("💰 " + parts.joinToString(" · ") + " · Toplam ${money(total)}$hitText", detail)
     }
 
-    /** Folds old turns into a short summary once they get large. */
+    /** Folds compacted old turns into a short summary once they get large (only right after a checkpoint). */
     private suspend fun maybeSummarize(history: MutableList<ChatMessage>, ui: AgentUi) {
         val p = HistoryPruner.prepare(history, settings.keepTurns)
         if (HistoryPruner.charSize(p.summarizable) < SUMMARIZE_AFTER_CHARS) return
@@ -457,7 +611,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         try {
             val scratch = ArrayList<ChatMessage>()
             val reply = callModel(scratch, listOf(ChatMessage.User(prompt)), editorRef(), "summary", system, emptyList(), ui,
-                useCache = false, maxOut = 1024)
+                useCache = false, maxOut = 1024, thinking = "minimal")
             val rec = scratch.filterIsInstance<ChatMessage.UsageRecord>()
             if (reply.text.isNotBlank() && !reply.text.startsWith("(Model boş")) {
                 history.add(p.summaryInsertIndex, ChatMessage.Summary(reply.text.trim()))
@@ -483,17 +637,28 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         ref: ModelRef,
         role: String,
         system: String,
+        stableKind: String?,
         toolSpecs: List<ToolSpec>,
         readOnly: Boolean,
         stopTool: String?,
         maxOut: Int? = null,
         maxReads: Int? = null,
+        thinking: String? = null,
     ): ToolCall? {
         var consecutiveFailures = 0
         var reads = 0
         for (step in 1..settings.maxSteps) {
+            // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
+            HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->
+                history.add(idx, ChatMessage.CompactMark)
+                snapshots.clear()
+                history += ChatMessage.Notice("🗜 Geçmiş toplu sıkıştırıldı; önbellek bu adımda bir kez yenilenecek.")
+                maybeSummarize(history, ui)
+                ui.update()
+            }
+            val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, ref, role, system, toolSpecs, ui, maxOut = maxOut)
+            val reply = callModel(history, prepared.messages, ref, role, system, toolSpecs, ui, maxOut = maxOut, thinking = thinking, stable = stable)
             history += reply
             ui.update()
             if (reply.toolCalls.isEmpty()) return null
@@ -502,12 +667,14 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             val calls = reply.toolCalls
             for ((i, call) in calls.withIndex()) {
                 if (call.name == stopTool) { stopCall = call; continue }
-                if (maxReads != null && call.name == "github_read_file" && ++reads > maxReads) {
+                val readCount = if (call.name == "github_read_files") call.args.optJSONArray("paths")?.length() ?: 1 else 1
+                if (maxReads != null && call.name in setOf("github_read_file", "github_read_files") && reads >= maxReads) {
                     history += ChatMessage.ToolResult(call.id, call.name,
                         "Okuma sınırına ($maxReads dosya) ulaşıldı. Repo haritası ve okuduğun dosyalarla planı şimdi submit_plan ile gönder.")
                     ui.update()
                     continue
                 }
+                if (call.name in setOf("github_read_file", "github_read_files")) reads += readCount
                 val (result, rejected) = executeTool(call, readOnly, ui)
                 history += result
                 ui.update()
@@ -556,11 +723,12 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     suspend fun preview(history: List<ChatMessage>, input: String): Preview {
         val ref = mainRef()
-        val ctx = context.load()?.text
-        val map = if (settings.repoMapForArchitect) context.repo.takeIf { it.isNotBlank() }?.let { repoMaps.peek(tools.normalizeRepo(it)) } else null
-        val system = if (settings.architectMode) architectSystem(ctx, map) else agentSystem(ctx)
+        val kind = if (settings.architectMode) "architect" else "agent"
+        val stable = snapshots[kind] // only an already built snapshot; no network work for a preview
+        val system = if (settings.architectMode) architectSystem(architectHasMap) else agentSystem()
         val toolSpecs = if (settings.architectMode) tools.readOnlySpecs else tools.specs
-        val msgs = HistoryPruner.prepare(history + ChatMessage.User(input), settings.keepTurns).messages
+        val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
+        val msgs = prefix + HistoryPruner.prepare(history + ChatMessage.User(input), settings.keepTurns).messages
         val client = client(ref)
         val exact = runCatching { client.countTokens(system, msgs, toolSpecs) }.getOrNull()
         val tokens = exact ?: run {

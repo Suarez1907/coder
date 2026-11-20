@@ -1,11 +1,14 @@
 package com.suarez.coder.llm
 
+import kotlinx.coroutines.delay
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 class GeminiClient(private val apiKey: String, override val model: String) : LlmClient {
     private val base = "https://generativelanguage.googleapis.com/v1beta"
@@ -15,9 +18,18 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
     /** The cache would be below the model's minimum size. */
     class CacheTooSmallException(message: String) : Exception(message)
 
+    /** Flex capacity is full (503/429 after retries) or Flex is not offered for this model. */
+    class FlexUnavailableException(message: String) : Exception(message)
+
     companion object {
         /** Models that rejected our thinkingConfig; we stop sending it to them. */
         private val noThinkingConfig = HashSet<String>()
+
+        /** Flex requests can wait in a queue for minutes (Google recommends 10+ minute client timeouts). */
+        private val flexClient: OkHttpClient = Http.client.newBuilder()
+            .readTimeout(15, TimeUnit.MINUTES).writeTimeout(2, TimeUnit.MINUTES).callTimeout(16, TimeUnit.MINUTES).build()
+
+        private val FLEX_BACKOFF_MS = listOf(10_000L, 30_000L)
 
         fun isLegacyThinking(model: String) = Regex("gemini-(1|2)\\.").containsMatchIn(model.lowercase())
     }
@@ -29,10 +41,25 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
     private fun errorMessage(body: String): String =
         runCatching { JSONObject(body).getJSONObject("error").getString("message") }.getOrDefault(body.take(500))
 
-    private suspend fun send(method: String, path: String, body: JSONObject?): Http.Result {
+    private suspend fun send(method: String, path: String, body: JSONObject?, client: OkHttpClient = Http.client): Http.Result {
         val rb = body?.toString()?.toRequestBody(Http.JSON)
         val req = Request.Builder().url("$base/$path").header("x-goog-api-key", apiKey).method(method, rb).build()
-        return Http.execute(req)
+        return Http.execute(req, client)
+    }
+
+    /** Sends a generateContent request; on the Flex tier retries 503/429 with backoff and never silently upgrades. */
+    private suspend fun generate(body: JSONObject, flex: Boolean): Http.Result {
+        if (!flex) return send("POST", "models/$model:generateContent", body)
+        var attempt = 0
+        while (true) {
+            val res = send("POST", "models/$model:generateContent", body, flexClient)
+            if (res.code == 400 && Regex("service.?tier|flex", RegexOption.IGNORE_CASE).containsMatchIn(errorMessage(res.body))) {
+                throw FlexUnavailableException("Bu model Flex'i desteklemiyor: ${errorMessage(res.body).take(150)}")
+            }
+            if (res.code != 503 && res.code != 429) return res
+            if (attempt >= FLEX_BACKOFF_MS.size) throw FlexUnavailableException("Flex kapasitesi dolu (HTTP ${res.code}).")
+            delay(FLEX_BACKOFF_MS[attempt++])
+        }
     }
 
     /** Gemini 3+ takes thinkingLevel; 2.x models take a token budget. */
@@ -84,16 +111,18 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
         if (withThinking) thinkingConfig(options.thinkingLevel, options.minimalThinking)?.let { gen.put("thinkingConfig", it) }
         options.maxOutputTokens?.let { gen.put("maxOutputTokens", it) }
         if (gen.length() > 0) body.put("generationConfig", gen)
+        options.serviceTier?.let { body.put("serviceTier", it) }
         return body
     }
 
     override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
         checkKey()
-        var res = send("POST", "models/$model:generateContent", requestBody(system, history, tools, options, true))
+        val flex = options.serviceTier == "flex"
+        var res = generate(requestBody(system, history, tools, options, true), flex)
         if (res.code == 400 && (options.thinkingLevel != null || options.minimalThinking) && errorMessage(res.body).contains("think", ignoreCase = true)) {
             // This model does not accept our thinking setting: remember and retry without it.
             noThinkingConfig += model
-            res = send("POST", "models/$model:generateContent", requestBody(system, history, tools, options, false))
+            res = generate(requestBody(system, history, tools, options, false), flex)
         }
         if (options.cachedContent != null && res.code in setOf(400, 403, 404) &&
             errorMessage(res.body).contains("cach", ignoreCase = true)
@@ -101,7 +130,8 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
         if (res.code !in 200..299) throw LlmException("Gemini hatası (${res.code}): ${errorMessage(res.body)}")
         val json = JSONObject(res.body)
         val finish = json.optJSONArray("candidates")?.optJSONObject(0)?.optString("finishReason") ?: ""
-        return LlmResponse(parse(json), parseUsage(json.optJSONObject("usageMetadata")), truncated = finish == "MAX_TOKENS")
+        val tier = json.optString("serviceTier").takeIf { it.isNotBlank() }?.lowercase()
+        return LlmResponse(parse(json), parseUsage(json.optJSONObject("usageMetadata")), truncated = finish == "MAX_TOKENS", serviceTier = tier)
     }
 
     private fun parseUsage(u: JSONObject?): Usage {
@@ -126,7 +156,8 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
 
     // ---- Explicit context caching ----
 
-    suspend fun createCache(system: String, tools: List<ToolSpec>, ttlSeconds: Long): CacheInfo {
+    /** [contents] are leading conversation messages (e.g. the stable project context) cached together with the system prompt. */
+    suspend fun createCache(system: String, tools: List<ToolSpec>, ttlSeconds: Long, contents: List<ChatMessage> = emptyList()): CacheInfo {
         checkKey()
         val body = JSONObject()
             .put("model", "models/$model")
@@ -134,6 +165,7 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             .put("systemInstruction", systemJson(system))
             .put("ttl", "${ttlSeconds}s")
         toolsJson(tools)?.let { body.put("tools", it) }
+        if (contents.isNotEmpty()) body.put("contents", buildContents(contents))
         val res = send("POST", "cachedContents", body)
         if (res.code !in 200..299) {
             val msg = errorMessage(res.body)

@@ -44,6 +44,22 @@ GitHub Actions sonuçlarını kontrol eder ve internette arama yapıp sayfa okuy
 - **Karışık sağlayıcı:** Mimar ve Uygulayıcı için Gemini ve DeepSeek modelleri birlikte seçilebilir; maliyet özeti
   model ve sağlayıcı bazında ayrılır, fiyat tablosunda olmayan modeller * ile işaretlenir.
 
+- **Önbellek dostu istem düzeni:** Sistem talimatı ve araçlar her istekte birebir aynı (tarih yok); proje notları, repo haritası ve
+  sabitlenmiş dosyalar dondurulmuş bir "sabit bağlam" mesajında; isteğe özel dosyalar konuşmanın sonunda. Geçmiş iki sıkıştırma
+  noktası arasında yalnızca büyür, eşik (80k karakter) aşılınca bir kerede sıkıştırılır. Önbellek modelli simülasyonda eski kayan
+  budamaya göre giriş maliyeti ~%40 düşük (`SavingsSimulationTest`).
+- **Ölçüm:** Her istek özetinde önbellek isabet oranı ve istek anatomisi; üst çubukta oturumun isabet oranı.
+- **Açık önbellek ölçüme göre:** Otomatik önbellek iyi tutuyorsa açık önbellek (ve depolama ücreti) kullanılmaz.
+- **Role göre düşünme:** Mimar medium, Uygulayıcı minimal (desteklemeyen modelde low), yönlendirici/özet minimal.
+- **CI araçları:** `ci_wait` CI bitene kadar uygulamada bekler (model adımı harcamaz), `ci_errors` logdan yalnızca hata satırlarını verir.
+- **Daha az okuma tokenı:** `github_read_files` ile toplu okuma, tam okumada satır numarası yok (~%9), `web_fetch` için `query` ile ilgili bölümler.
+- **Kısa diff:** SEARCH'te uzun bölgenin ortası `...` ile kısaltılabilir.
+- **Uygulayıcı merdiveni:** Uygulayıcı → aynı konuşmaya eklenen yeniden deneme → ara model → (onayla) Mimar.
+- **Yerel kontrol:** Commit öncesi parantez dengesi, katı JSON ve XML kontrolü; bozuk düzenleme CI'a gitmez.
+- **Ekonomi modu (Flex):** Gemini istekleri `serviceTier: flex` ile %50 indirimli; yanıtlar dakikalar sürebilir, kapasite dolarsa sorulur.
+- **Proje notları:** `.coder/NOTES.md` sabit bağlama eklenir, ajan önemli değişikliklerde aynı commit'te günceller.
+- **CI dakikaları:** Art arda commit'lerde yalnızca sonuncusu derlenir; yalnızca doküman/not değişikliği derleme tetiklemez.
+
 `SavingsSimulationTest` 5 turluk örnek bir oturumda modele giden girdinin eski yönteme göre ~%70 küçüldüğünü ölçer
 (çıktı tarafında tam dosya yerine diff yazılması ve önbellek indirimi buna ek kazançtır).
 

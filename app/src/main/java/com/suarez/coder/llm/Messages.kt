@@ -45,7 +45,15 @@ sealed class ChatMessage {
         val usage: Usage,
         val extraCostUsd: Double = 0.0,
         val label: String = "",
+        /** Price multiplier for the token cost, e.g. 0.5 for the Flex tier. */
+        val discount: Double = 1.0,
     ) : ChatMessage()
+
+    /** Everything model-visible before this marker is sent compacted; everything after it in full (append-only). */
+    object CompactMark : ChatMessage()
+
+    /** Extra context for one request (e.g. files picked by Decision 1); sent as part of the preceding user message. */
+    data class ContextBlock(val text: String, val label: String) : ChatMessage()
 
     /** Smart-routing decision shown as an info bar; never sent to the model. */
     data class RouteInfo(val text: String, val detail: String?, val route: String, val canOverride: Boolean) : ChatMessage()
@@ -62,11 +70,19 @@ data class CallOptions(
     val maxOutputTokens: Int? = null,
     /** Ask for the lowest thinking the model supports (classification calls). */
     val minimalThinking: Boolean = false,
+    /** Gemini service tier, e.g. "flex" (50% cheaper, slower, best-effort capacity). */
+    val serviceTier: String? = null,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
     val cachedContent: String? = null,
 )
 
-data class LlmResponse(val message: ChatMessage.Assistant, val usage: Usage, val truncated: Boolean = false)
+data class LlmResponse(
+    val message: ChatMessage.Assistant,
+    val usage: Usage,
+    val truncated: Boolean = false,
+    /** Tier that actually served the request, as reported by the API. */
+    val serviceTier: String? = null,
+)
 
 interface LlmClient {
     val model: String
@@ -124,7 +140,9 @@ object MessageJson {
                     m.detail?.let { o.put("detail", it) }
                 }
                 is ChatMessage.UsageRecord -> o.put("t", "usage").put("model", m.model).put("role", m.role)
-                    .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label)
+                    .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label).put("disc", m.discount)
+                is ChatMessage.CompactMark -> o.put("t", "mark")
+                is ChatMessage.ContextBlock -> o.put("t", "ctx").put("text", m.text).put("label", m.label)
                 is ChatMessage.ToolResult -> o.put("t", "tool").put("id", m.callId).put("name", m.name)
                     .put("content", m.content).put("err", m.isError)
                 is ChatMessage.Assistant -> {
@@ -157,7 +175,9 @@ object MessageJson {
                 "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,
                     o.optString("route"), o.optBoolean("ov"))
                 "usage" -> ChatMessage.UsageRecord(o.optString("model"), o.optString("role"), usageFrom(o.optJSONObject("u")),
-                    o.optDouble("extra", 0.0), o.optString("label"))
+                    o.optDouble("extra", 0.0), o.optString("label"), o.optDouble("disc", 1.0))
+                "mark" -> ChatMessage.CompactMark
+                "ctx" -> ChatMessage.ContextBlock(o.getString("text"), o.optString("label"))
                 "tool" -> ChatMessage.ToolResult(o.getString("id"), o.getString("name"), o.getString("content"), o.optBoolean("err"))
                 else -> {
                     val calls = o.optJSONArray("calls") ?: JSONArray()

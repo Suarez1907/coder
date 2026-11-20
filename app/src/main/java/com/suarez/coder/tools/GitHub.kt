@@ -116,9 +116,18 @@ class GitHub(private val token: () -> String) {
         return r.body
     }
 
+    /**
+     * Reads a file. Whole-file reads come without per-line numbers (they add ~9% tokens); ranged reads keep them,
+     * since the model needs them to ask for the next range.
+     */
     suspend fun readFile(repo: String, path: String, ref: String?, startLine: Int?, endLine: Int?): String {
         val text = readFileRaw(repo, path, ref) ?: throw ToolException("Dosya bulunamadı: $path")
         val lines = text.split("\n")
+        if (startLine == null && endLine == null) {
+            val limit = 80_000
+            return "$path (${lines.size} satır)\n" + if (text.length <= limit) text
+            else text.take(limit) + "\n... (kesildi; devamı için start_line kullan, toplam ${lines.size} satır)"
+        }
         val from = (startLine ?: 1).coerceAtLeast(1)
         val to = (endLine ?: lines.size).coerceAtMost(lines.size)
         val sb = StringBuilder()
@@ -187,6 +196,36 @@ class GitHub(private val token: () -> String) {
         val pr = json("POST", "/repos/$repo/pulls",
             JSONObject().put("title", title).put("head", head).put("base", b).put("body", body ?: ""))
         return "PR #${pr.getInt("number")} açıldı: ${pr.getString("html_url")}"
+    }
+
+    // ---- GitHub Actions ----
+
+    data class Run(val id: Long, val name: String, val status: String, val conclusion: String?, val url: String)
+
+    suspend fun runsForSha(repo: String, sha: String): List<Run> {
+        val o = json("GET", "/repos/$repo/actions/runs?head_sha=$sha&per_page=20")
+        val arr = o.optJSONArray("workflow_runs") ?: return emptyList()
+        return (0 until arr.length()).map { i ->
+            val r = arr.getJSONObject(i)
+            Run(r.getLong("id"), r.optString("name"), r.optString("status"),
+                r.optString("conclusion").takeIf { !r.isNull("conclusion") && it.isNotBlank() }, r.optString("html_url"))
+        }
+    }
+
+    data class Job(val id: Long, val name: String, val conclusion: String?)
+
+    suspend fun jobs(repo: String, runId: Long): List<Job> {
+        val arr = json("GET", "/repos/$repo/actions/runs/$runId/jobs?per_page=50").optJSONArray("jobs") ?: return emptyList()
+        return (0 until arr.length()).map { i ->
+            val j = arr.getJSONObject(i)
+            Job(j.getLong("id"), j.optString("name"), j.optString("conclusion").takeIf { !j.isNull("conclusion") && it.isNotBlank() })
+        }
+    }
+
+    suspend fun jobLog(repo: String, jobId: Long): String {
+        val r = call("GET", "/repos/$repo/actions/jobs/$jobId/logs")
+        if (r.code !in 200..299) throw ToolException("Log alınamadı (HTTP ${r.code})")
+        return r.body
     }
 
     suspend fun searchCode(query: String): String {

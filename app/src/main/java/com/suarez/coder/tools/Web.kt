@@ -49,7 +49,7 @@ class Web {
         return URLDecoder.decode(enc, "UTF-8")
     }
 
-    suspend fun fetch(url: String, start: Int = 0, maxChars: Int = 20_000): String {
+    suspend fun fetch(url: String, start: Int = 0, maxChars: Int = 20_000, query: String? = null): String {
         val u = if (url.startsWith("http")) url else "https://$url"
         val r = Http.execute(Request.Builder().url(u).header("User-Agent", ua).get().build())
         val type = r.contentType ?: ""
@@ -62,6 +62,10 @@ class Web {
             val cleaned = body.lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n")
             (if (title.isNotBlank()) "# $title\n\n" else "") + cleaned
         } else r.body
+        if (!query.isNullOrBlank() && start == 0 && text.length > 6_000) {
+            val focused = WebFocus.select(text, query)
+            return "HTTP ${r.code} $u (sorguya göre seçilmiş bölümler, sayfa ${text.length} karakter; tamamı için query olmadan start ile oku)\n\n$focused"
+        }
         val s = start.coerceIn(0, text.length)
         val e = (s + maxChars).coerceAtMost(text.length)
         val more = if (e < text.length) "\n\n... (devamı var: toplam ${text.length} karakter; devam için start=$e kullan)" else ""

@@ -78,6 +78,13 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var routerModel by remember { mutableStateOf(s.routerModel) }
     var useDecision by remember { mutableStateOf(s.useDecision1) }
     var cacheMsg by remember { mutableStateOf(vm.agent.cacheStatus) }
+    var thinkArch by remember { mutableStateOf(s.thinkingArchitect) }
+    var thinkEditor by remember { mutableStateOf(s.thinkingEditor) }
+    var compactTail by remember { mutableStateOf(s.compactTailChars.toString()) }
+    var explicitAuto by remember { mutableStateOf(s.explicitCacheAuto) }
+    var notes by remember { mutableStateOf(s.projectNotes) }
+    var escalation by remember { mutableStateOf(s.escalationModel) }
+    var economy by remember { mutableStateOf(s.economyMode) }
     var decisionTimeout by remember { mutableStateOf((s.decisionTimeoutMs / 1000.0).toString()) }
 
     fun remember(p: Provider, models: List<String>) = vm.mergeCatalog(p, models)
@@ -106,6 +113,13 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         s.repoMapForArchitect = repoMap
         s.routerModel = routerModel
         s.useDecision1 = useDecision
+        s.thinkingArchitect = thinkArch
+        s.thinkingEditor = thinkEditor
+        s.compactTailChars = compactTail.toIntOrNull() ?: 80_000
+        s.explicitCacheAuto = explicitAuto
+        s.projectNotes = notes
+        s.escalationModel = escalation
+        s.economyMode = economy
         s.decisionTimeoutMs = ((decisionTimeout.replace(',', '.').toDoubleOrNull() ?: 2.0) * 1000).toLong()
     }
 
@@ -206,6 +220,15 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             OutlinedTextField(outEditor, { outEditor = it.filter(Char::isDigit) }, label = { Text("Uygulayıcı için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(outAgent, { outAgent = it.filter(Char::isDigit) }, label = { Text("Tek model ajan için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Text("Gemini'de düşünme tokenları da bu sınıra dahildir. Yanıt kesilirse bir kez iki katı sınırla yeniden denenir.", style = MaterialTheme.typography.bodySmall)
+            Text("Role göre düşünme seviyesi (düşünme tokenları çıktı fiyatından ödenir)", style = MaterialTheme.typography.bodySmall)
+            LevelPicker("Mimar", thinkArch) { thinkArch = it }
+            LevelPicker("Uygulayıcı", thinkEditor) { thinkEditor = it }
+            Text("Tek model ajanın seviyesi sohbet ekranındaki 'Düşünme' düğmesinden seçilir. 'minimal' yalnızca bazı Flash modellerinde vardır; diğerlerinde 'low' kullanılır.",
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(escalation, { escalation = it }, label = { Text("Yükseltme modeli (sağlayıcı/model; boş = otomatik, none = kapalı)") },
+                placeholder = { Text("gemini/gemini-3.8-flash") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            ToggleRow("Ekonomi modu (Flex, %50)", "Gemini istekleri Flex kademesinden gider: yarı fiyat, ama yanıtlar dakikalar sürebilir ve kapasite dolabilir.", economy) { economy = it }
+            ToggleRow("Proje notları (.coder/NOTES.md)", "Repodaki kalıcı proje notları sabit bağlama eklenir; ajan önemli değişikliklerde günceller.", notes) { notes = it }
             ToggleRow("Mimar için Repo Haritası kullan", "Mimar'a ham kod yerine dosya yolları, sınıflar ve fonksiyon imzalarından oluşan hafif bir harita gönderilir.", repoMap) { repoMap = it }
 
             HorizontalDivider()
@@ -236,6 +259,9 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             }
             OutlinedTextField(cacheTtl, { cacheTtl = it.filter(Char::isDigit) }, label = { Text("Önbellek süresi (dakika)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(cacheMin, { cacheMin = it.filter(Char::isDigit) }, label = { Text("Önbellek için en az sabit bağlam (token)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            ToggleRow("Açık önbelleği ölçüme göre kullan", "Otomatik önbellek iyi tutuyorsa açık önbellek (ve depolama ücreti) kullanılmaz.", explicitAuto) { explicitAuto = it }
+            OutlinedTextField(compactTail, { compactTail = it.filter(Char::isDigit) }, label = { Text("Toplu sıkıştırma eşiği (karakter)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("Geçmiş bu boyuta ulaşana kadar yalnızca büyür (önbellek tutar); aşınca eski kısım bir kerede kısaltılır.", style = MaterialTheme.typography.bodySmall)
             Text("Gemini 4 modelleri yalnızca otomatik önbellek destekler; onlarda açık önbellek oluşturulmaz.", style = MaterialTheme.typography.bodySmall)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(onClick = { scope.launch { cacheMsg = runCatching { vm.agent.clearCache() }.getOrElse { it.message ?: "Hata" } } }) {
@@ -249,6 +275,17 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             Spacer(Modifier.size(8.dp))
             Button(onClick = { save(); onBack() }, modifier = Modifier.fillMaxWidth()) { Text("Kaydet") }
             Text("Anahtarlar bu telefonda şifreli olarak saklanır ve yalnızca ilgili servise gönderilir.", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun LevelPicker(label: String, value: String, onPick: (String) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.horizontalScroll(rememberScrollState())) {
+        Text("$label:", style = MaterialTheme.typography.bodyMedium)
+        listOf("minimal", "low", "medium", "high").forEach { lv ->
+            if (lv == value) Button(onClick = {}) { Text(lv) } else OutlinedButton(onClick = { onPick(lv) }) { Text(lv) }
         }
     }
 }

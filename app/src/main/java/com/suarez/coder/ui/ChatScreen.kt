@@ -73,7 +73,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion // recompose when settings change
 
     val results = vm.messages.filterIsInstance<ChatMessage.ToolResult>().associateBy { it.callId }
-    val visible = vm.messages.filter { it !is ChatMessage.ToolResult && it !is ChatMessage.UsageRecord }
+    val visible = vm.messages.filter { it !is ChatMessage.ToolResult && it !is ChatMessage.UsageRecord && it !is ChatMessage.CompactMark }
     val lastRoute = vm.messages.lastOrNull { it is ChatMessage.RouteInfo }
 
     LaunchedEffect(vm.messages.size, vm.running) {
@@ -113,6 +113,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                         is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
                         is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi (token tasarrufu)", m.text, false)
                         is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
+                        is ChatMessage.ContextBlock -> NoticeItem("📎 Bu istek için bağlam: ${m.label}", m.text.take(20_000), false)
                         else -> Unit
                     }
                 }
@@ -170,6 +171,11 @@ private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
                 selected = s.smartRouting,
                 onClick = { vm.setSmartRouting(!s.smartRouting) },
                 label = { Text("Akıllı Yönlendirme") },
+            )
+            FilterChip(
+                selected = s.economyMode,
+                onClick = { vm.setEconomy(!s.economyMode) },
+                label = { Text("💸 Ekonomi (Flex %50)") },
             )
             ChoiceChip("Düşünme", s.thinkingLevel, listOf("low", "medium", "high")) { vm.setThinking(it) }
             AssistChip(onClick = onOpenContext, label = { Text("📎 Bağlam: ${s.contextFiles.size}") })

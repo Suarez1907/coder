@@ -61,7 +61,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val sessionCostText: String
         get() {
             val c = agent.sessionCost(messages)
-            return "Oturum ${Pricing.formatUsd(c)} (${Pricing.formatTry(c * settings.usdTry)})"
+            val calls = messages.filterIsInstance<ChatMessage.UsageRecord>().filter { it.role != "cache" && it.role != "decision" }
+            val hit = agent.cacheHitRate(calls)?.let { " · önbellek %${(it * 100).toInt()}" } ?: ""
+            return "Oturum ${Pricing.formatUsd(c)} (${Pricing.formatTry(c * settings.usdTry)})$hit"
         }
 
     // ---- Model choices ----
@@ -86,6 +88,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setArchitectMode(on: Boolean) { settings.architectMode = on; refreshSettings() }
     fun setThinking(level: String) { settings.thinkingLevel = level; refreshSettings() }
     fun setSmartRouting(on: Boolean) { settings.smartRouting = on; refreshSettings() }
+    fun setEconomy(on: Boolean) { settings.economyMode = on; refreshSettings() }
 
     /** Deletes the active Gemini cache; the result is shown as a notice. */
     fun clearCache() {
@@ -238,6 +241,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         settings.contextRef = ref
         settings.contextFiles = files
         agent.context.invalidate()
+        agent.invalidateSnapshot()
         refreshSettings()
     }
 

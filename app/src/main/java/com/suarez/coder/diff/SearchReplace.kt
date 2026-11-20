@@ -117,7 +117,12 @@ object SearchReplace {
         data class Err(val reason: String) : Match()
     }
 
+    /** A SEARCH line that abbreviates the middle of a long region. */
+    private fun isEllipsis(line: String) = line.trim() == "..." || line.trim() == "…"
+
     fun replaceOnce(content: String, search: String, replace: String): Match {
+        val sLines = search.split("\n")
+        if (sLines.count { isEllipsis(it) } == 1 && !content.contains(search)) return replaceAnchored(content, sLines, replace)
         // 1) Exact match.
         val exact = countOccurrences(content, search)
         if (exact == 1) return Match.Ok(content.replaceFirst(search, replace))
@@ -150,6 +155,39 @@ object SearchReplace {
             }
         }
         return Match.Err("SEARCH metni dosyada bulunamadı" + hint(fileLines, searchLines) + ". Dosyayı tekrar okuyup satırları birebir kopyalayın.")
+    }
+
+    /**
+     * SEARCH of the form `head lines / ... / tail lines`: the region runs from the unique head match to the first
+     * tail match after it. Saves output tokens when a long block is replaced.
+     */
+    private fun replaceAnchored(content: String, sLines: List<String>, replace: String): Match {
+        val cut = sLines.indexOfFirst { isEllipsis(it) }
+        val head = trimBlankEdges(sLines.subList(0, cut))
+        val tail = trimBlankEdges(sLines.subList(cut + 1, sLines.size))
+        if (head.isEmpty() || tail.isEmpty()) return Match.Err("'...' kısaltmasının önünde ve arkasında en az birer satır olmalı.")
+        val fileLines = content.split("\n")
+        for (mode in 0..1) {
+            val norm: (String) -> String = if (mode == 0) { x -> x.trimEnd() } else { x -> x.trim() }
+            fun matchesAt(start: Int, pat: List<String>) =
+                start + pat.size <= fileLines.size && pat.indices.all { norm(fileLines[start + it]) == norm(pat[it]) }
+            val heads = (0..fileLines.size - head.size).filter { matchesAt(it, head) }
+            if (heads.size > 1) return Match.Err("'...' öncesindeki satırlar dosyada ${heads.size} yerde geçiyor; daha fazla satır ekleyin.")
+            if (heads.size == 1) {
+                val h = heads[0]
+                val t = (h + head.size..fileLines.size - tail.size).firstOrNull { matchesAt(it, tail) }
+                    ?: return Match.Err("'...' sonrasındaki satırlar, öncesindeki satırlardan sonra bulunamadı.")
+                val end = t + tail.size
+                val region = fileLines.subList(h, end)
+                val newLines = if (mode == 1) reindent(head + tail, region.take(head.size) + region.takeLast(tail.size), replace.split("\n")) else replace.split("\n")
+                val out = ArrayList<String>(fileLines.size)
+                out.addAll(fileLines.subList(0, h))
+                if (replace.isNotEmpty()) out.addAll(newLines)
+                out.addAll(fileLines.subList(end, fileLines.size))
+                return Match.Ok(out.joinToString("\n"))
+            }
+        }
+        return Match.Err("'...' öncesindeki satırlar dosyada bulunamadı. Dosyayı tekrar okuyup satırları birebir kopyalayın.")
     }
 
     private fun trimBlankEdges(lines: List<String>): List<String> {

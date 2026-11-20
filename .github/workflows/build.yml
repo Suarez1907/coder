@@ -2,7 +2,16 @@ name: Build APK
 
 on:
   push:
+    # Docs and project notes do not change the app: skip the build (saves Actions minutes).
+    paths-ignore:
+      - '**.md'
+      - '.coder/**'
   workflow_dispatch:
+
+# Rapid consecutive commits (e.g. the agent fixing a build) only build the latest one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write

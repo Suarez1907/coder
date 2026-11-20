@@ -127,6 +127,43 @@ class Settings(context: Context) {
         get() = str("model_catalog").lines().filter { it.isNotBlank() }
         set(v) = put("model_catalog", v.distinct().joinToString("\n"))
 
+    // ---- Per-role thinking (minimal | low | medium | high) ----
+
+    var thinkingArchitect: String
+        get() = str("thinking_architect", "medium")
+        set(v) = put("thinking_architect", v)
+
+    var thinkingEditor: String
+        get() = str("thinking_editor", "minimal")
+        set(v) = put("thinking_editor", v)
+
+    // ---- Cache-friendly history and caching policy ----
+
+    /** Uncompacted history (characters) that may accumulate before one bulk compaction. */
+    var compactTailChars: Int
+        get() = prefs.getInt("compact_tail_chars", 80_000)
+        set(v) = prefs.edit().putInt("compact_tail_chars", v.coerceIn(20_000, 2_000_000)).apply()
+
+    /** Use explicit caching only when the measured implicit hit rate is low. */
+    var explicitCacheAuto: Boolean
+        get() = bool("explicit_cache_auto", true)
+        set(v) = putBool("explicit_cache_auto", v)
+
+    /** Gemini Flex tier: 50% cheaper, minutes of latency, best-effort capacity. */
+    var economyMode: Boolean
+        get() = bool("economy_mode", false)
+        set(v) = putBool("economy_mode", v)
+
+    /** Keep and use .coder/NOTES.md as persistent project memory. */
+    var projectNotes: Boolean
+        get() = bool("project_notes", true)
+        set(v) = putBool("project_notes", v)
+
+    /** "provider/model" between editor and architect for failed edits; blank = automatic, "none" = skip. */
+    var escalationModel: String
+        get() = str("escalation_model")
+        set(v) = put("escalation_model", v.trim())
+
     // ---- Output limits ----
 
     /** "Sadece Diff (Açıklamasız Mod)" */

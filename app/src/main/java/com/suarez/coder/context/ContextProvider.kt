@@ -9,13 +9,24 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
 
     data class Loaded(val text: String, val files: Int, val chars: Int, val skipped: List<String>)
 
-    companion object { const val MAX_TOTAL_CHARS = 150_000 }
+    companion object {
+        const val MAX_TOTAL_CHARS = 150_000
+        const val NOTES_PATH = ".coder/NOTES.md"
+    }
 
     fun invalidate() = memo.clear()
 
     val repo: String get() = settings.contextRepo.ifBlank { settings.defaultRepo }
     val ref: String? get() = settings.contextRef.ifBlank { null }
     val hasManualFiles: Boolean get() = settings.contextFiles.isNotEmpty()
+
+    /** Persistent project notes (.coder/NOTES.md), or null when the repo has none. */
+    suspend fun loadNotes(): String? {
+        if (repo.isBlank()) return null
+        val key = "$repo@${ref ?: ""}:.coder/NOTES.md"
+        val text = if (memo.containsKey(key)) memo[key] else runCatching { github.readFileRaw(repo, NOTES_PATH, ref) }.getOrNull().also { memo[key] = it }
+        return text?.takeIf { it.isNotBlank() }?.take(8_000)
+    }
 
     /** The user's pinned files. */
     suspend fun load(): Loaded? = load(repo, ref, settings.contextFiles, "Kullanıcının seçtiği")
