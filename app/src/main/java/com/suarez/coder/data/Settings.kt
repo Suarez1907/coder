@@ -127,6 +127,46 @@ class Settings(context: Context) {
         get() = str("model_catalog").lines().filter { it.isNotBlank() }
         set(v) = put("model_catalog", v.distinct().joinToString("\n"))
 
+    // ---- Output limits ----
+
+    /** "Sadece Diff (Açıklamasız Mod)" */
+    var terseMode: Boolean
+        get() = bool("terse_mode", true)
+        set(v) = putBool("terse_mode", v)
+
+    var maxOutArchitect: Int
+        get() = prefs.getInt("max_out_architect", 1500)
+        set(v) = prefs.edit().putInt("max_out_architect", v.coerceIn(256, 65_536)).apply()
+
+    var maxOutEditor: Int
+        get() = prefs.getInt("max_out_editor", 4096)
+        set(v) = prefs.edit().putInt("max_out_editor", v.coerceIn(256, 65_536)).apply()
+
+    var maxOutAgent: Int
+        get() = prefs.getInt("max_out_agent", 4096)
+        set(v) = prefs.edit().putInt("max_out_agent", v.coerceIn(256, 65_536)).apply()
+
+    // ---- Cache threshold, repo map ----
+
+    var cacheMinTokens: Int
+        get() = prefs.getInt("cache_min_tokens", 32_000)
+        set(v) = prefs.edit().putInt("cache_min_tokens", v.coerceIn(1_024, 1_000_000)).apply()
+
+    var repoMapForArchitect: Boolean
+        get() = bool("repo_map_architect", true)
+        set(v) = putBool("repo_map_architect", v)
+
+    // ---- Local + cheap router ----
+
+    /** "provider/model" for tier-2 classification; blank = cheapest suitable model from the catalog. */
+    var routerModel: String
+        get() = str("router_model")
+        set(v) = put("router_model", v.trim())
+
+    var useDecision1: Boolean
+        get() = bool("use_decision1", true)
+        set(v) = putBool("use_decision1", v)
+
     // ---- Smart routing (Gemini Decision 1) ----
 
     var smartRouting: Boolean

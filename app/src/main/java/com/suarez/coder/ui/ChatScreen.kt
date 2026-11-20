@@ -173,6 +173,7 @@ private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
             )
             ChoiceChip("Düşünme", s.thinkingLevel, listOf("low", "medium", "high")) { vm.setThinking(it) }
             AssistChip(onClick = onOpenContext, label = { Text("📎 Bağlam: ${s.contextFiles.size}") })
+            AssistChip(onClick = { vm.clearCache() }, enabled = !vm.running, label = { Text("🧹 Önbelleği Temizle") })
         }
         if (s.architectMode) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

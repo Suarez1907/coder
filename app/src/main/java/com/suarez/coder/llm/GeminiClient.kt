@@ -36,9 +36,18 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
     }
 
     /** Gemini 3+ takes thinkingLevel; 2.x models take a token budget. */
-    fun thinkingConfig(level: String?): JSONObject? {
-        if (level.isNullOrBlank() || model in noThinkingConfig) return null
+    fun thinkingConfig(level: String?, minimal: Boolean = false): JSONObject? {
+        if (model in noThinkingConfig) return null
         val m = model.lowercase()
+        if (minimal) {
+            return when {
+                m.startsWith("gemini-2.5-flash") -> JSONObject().put("thinkingBudget", 0)
+                m.startsWith("gemini-2.5-pro") -> JSONObject().put("thinkingBudget", 128)
+                com.suarez.coder.cost.Pricing.canNearlyDisableThinking(m) -> JSONObject().put("thinkingLevel", "minimal")
+                else -> JSONObject().put("thinkingLevel", "low")
+            }
+        }
+        if (level.isNullOrBlank()) return null
         if (!isLegacyThinking(m)) return JSONObject().put("thinkingLevel", level)
         if (!m.contains("2.5")) return null // older models do not think
         val budget = when (level) {
@@ -71,16 +80,17 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             body.put("systemInstruction", systemJson(system))
             toolsJson(tools)?.let { body.put("tools", it) }
         }
-        if (withThinking) thinkingConfig(options.thinkingLevel)?.let {
-            body.put("generationConfig", JSONObject().put("thinkingConfig", it))
-        }
+        val gen = JSONObject()
+        if (withThinking) thinkingConfig(options.thinkingLevel, options.minimalThinking)?.let { gen.put("thinkingConfig", it) }
+        options.maxOutputTokens?.let { gen.put("maxOutputTokens", it) }
+        if (gen.length() > 0) body.put("generationConfig", gen)
         return body
     }
 
     override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
         checkKey()
         var res = send("POST", "models/$model:generateContent", requestBody(system, history, tools, options, true))
-        if (res.code == 400 && options.thinkingLevel != null && errorMessage(res.body).contains("think", ignoreCase = true)) {
+        if (res.code == 400 && (options.thinkingLevel != null || options.minimalThinking) && errorMessage(res.body).contains("think", ignoreCase = true)) {
             // This model does not accept our thinking setting: remember and retry without it.
             noThinkingConfig += model
             res = send("POST", "models/$model:generateContent", requestBody(system, history, tools, options, false))
@@ -90,7 +100,8 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
         ) throw CacheRejectedException(errorMessage(res.body))
         if (res.code !in 200..299) throw LlmException("Gemini hatası (${res.code}): ${errorMessage(res.body)}")
         val json = JSONObject(res.body)
-        return LlmResponse(parse(json), parseUsage(json.optJSONObject("usageMetadata")))
+        val finish = json.optJSONArray("candidates")?.optJSONObject(0)?.optString("finishReason") ?: ""
+        return LlmResponse(parse(json), parseUsage(json.optJSONObject("usageMetadata")), truncated = finish == "MAX_TOKENS")
     }
 
     private fun parseUsage(u: JSONObject?): Usage {

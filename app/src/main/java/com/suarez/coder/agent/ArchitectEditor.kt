@@ -20,9 +20,12 @@ class ArchitectEditor(private val agent: Agent) {
     }
 
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, ctx: String?) {
+        val map = repoMap(history, ui)
         val plan = agent.agentLoop(
-            history, ui, agent.architectRef(), "architect", agent.architectSystem(ctx),
+            history, ui, agent.architectRef(), "architect", agent.architectSystem(ctx, map),
             agent.tools.readOnlySpecs, readOnly = true, stopTool = "submit_plan",
+            maxOut = agent.settings.maxOutArchitect,
+            maxReads = if (map != null) Agent.MAX_ARCHITECT_READS else null,
         ) ?: return
 
         val outcome = try {
@@ -37,6 +40,9 @@ class ArchitectEditor(private val agent: Agent) {
         )
         ui.update()
     }
+
+    /** Placeholder until the repo map step; returns null (no map). */
+    private suspend fun repoMap(history: MutableList<ChatMessage>, ui: AgentUi): String? = null
 
     private fun planText(planArgs: org.json.JSONObject, files: List<PlanFile>): String = buildString {
         append("Commit: ").append(planArgs.optString("commit_message")).append('\n')
@@ -59,6 +65,9 @@ class ArchitectEditor(private val agent: Agent) {
         if (files.isEmpty()) return Outcome(false, "Plan boş.")
 
         history += ChatMessage.Notice("📋 Plan hazır: ${files.size} dosya → $repo@$branch", planText(a, files))
+        if (files.size > Agent.MAX_ARCHITECT_READS) {
+            history += ChatMessage.Notice("ℹ️ Plan ${files.size} dosyaya dokunuyor (hedef 1-3). Uygulayıcıya giden içerik ve maliyet buna göre artar.")
+        }
         ui.update()
 
         // Load the current contents of the files the editor will touch.
@@ -141,7 +150,8 @@ class ArchitectEditor(private val agent: Agent) {
                     .append("\nThe content above already includes the blocks that did apply. Output blocks only for the remaining changes.\n")
             }
             val role = if (useArchitect) "architect" else "editor"
-            val reply = agent.callModel(history, listOf(ChatMessage.User(prompt)), ref, role, agent.editorSystem, emptyList(), ui, useCache = false)
+            val reply = agent.callModel(history, listOf(ChatMessage.User(prompt)), ref, role, agent.editorSystem, emptyList(), ui,
+                useCache = false, maxOut = agent.settings.maxOutEditor)
             outputs.append(reply.text).append("\n\n")
 
             val parsed = SearchReplace.parse(reply.text)

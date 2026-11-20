@@ -54,6 +54,7 @@ class Agent(val settings: Settings) {
     companion object {
         const val MAX_CONSECUTIVE_FAILURES = 3
         const val SUMMARIZE_AFTER_CHARS = 8_000
+        const val MAX_ARCHITECT_READS = 3
 
         fun roleLabel(role: String) = when (role) {
             "architect" -> "Mimar"
@@ -64,6 +65,11 @@ class Agent(val settings: Settings) {
             else -> "Ajan"
         }
     }
+
+    /** Deletes the active explicit cache (stops storage billing). */
+    suspend fun clearCache(): String = cache.clear(settings.geminiKey)
+
+    val cacheStatus: String get() = cache.describe()
 
     fun resetSession() {
         budgetApprovedUpTo = 0.0
@@ -131,13 +137,17 @@ class Agent(val settings: Settings) {
         - Do not repeat file contents or diffs in your answer; summarize what changed with links.
     """.trimIndent()
 
+    private val terseCode = "Terse mode: no greetings, explanations, summaries or commentary. Make code changes only through " +
+        "github_apply_diff with SEARCH/REPLACE blocks. Final reply: at most 2 short lines (what changed + link)."
+
     fun agentSystem(ctx: String?) = buildString {
         append(header()).append('\n').append(tokenRules).append('\n')
+        if (settings.terseMode) appendLine(terseCode)
         appendLine("Workflow: understand first, then change; group related edits in one commit; unless told otherwise use the branch the user names, or a new feature branch and offer a PR.")
         if (ctx != null) append('\n').append(ctx)
     }
 
-    fun architectSystem(ctx: String?) = buildString {
+    fun architectSystem(ctx: String?, repoMap: String? = null) = buildString {
         append(header()).append('\n')
         appendLine(
             """
@@ -150,10 +160,18 @@ class Agent(val settings: Settings) {
             Branch: use the one the user names; otherwise choose a short new feature branch name.
             """.trimIndent()
         )
+        if (settings.terseMode) appendLine("Terse mode: no prose outside submit_plan; write plan steps as short imperative bullets.")
+        if (repoMap != null) {
+            appendLine(
+                "Aim for a plan that touches 1-3 files. Use the REPO MAP below first (paths, types, signatures; bodies removed). " +
+                    "Read at most $MAX_ARCHITECT_READS files, and only when the map is not enough."
+            )
+            append("\nREPO MAP:\n").append(repoMap).append('\n')
+        }
         if (ctx != null) append('\n').append(ctx)
     }
 
-    val editorSystem = """
+    val editorSystem: String get() = """
         You are a code EDITOR. Implement the given plan in the given files by emitting SEARCH/REPLACE blocks ONLY.
         Format for every change:
         path/to/file
@@ -169,7 +187,7 @@ class Agent(val settings: Settings) {
         - New file: leave SEARCH empty and put the whole file in REPLACE. To remove code, leave REPLACE empty.
         - Write complete, working code; no placeholders. Only touch the files listed.
         - Output nothing except the blocks: no explanations, no whole files.
-    """.trimIndent()
+    """.trimIndent() + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
 
     // ---- Model calls ----
 
@@ -183,10 +201,12 @@ class Agent(val settings: Settings) {
         toolSpecs: List<ToolSpec>,
         ui: AgentUi,
         useCache: Boolean = true,
+        maxOut: Int? = null,
+        minimalThinking: Boolean = false,
     ): ChatMessage.Assistant {
         checkBudget(history, ui)
         val client = client(ref)
-        var opts = CallOptions(thinkingLevel = settings.thinkingLevel)
+        var opts = CallOptions(thinkingLevel = settings.thinkingLevel, maxOutputTokens = maxOut, minimalThinking = minimalThinking)
         if (useCache && client is GeminiClient) {
             cache.prepare(client, system, toolSpecs)?.let { p ->
                 opts = opts.copy(cachedContent = p.name)
@@ -196,18 +216,33 @@ class Agent(val settings: Settings) {
                 }
             }
         }
-        val resp = try {
-            client.complete(system, messages, toolSpecs, opts)
+        suspend fun once(o: CallOptions) = try {
+            client.complete(system, messages, toolSpecs, o)
         } catch (e: CacheRejectedException) {
             cache.invalidate()
-            client.complete(system, messages, toolSpecs, opts.copy(cachedContent = null))
+            client.complete(system, messages, toolSpecs, o.copy(cachedContent = null))
         }
+        var resp = once(opts)
         history += ChatMessage.UsageRecord(ref.model, role, resp.usage)
+        if (resp.truncated && maxOut != null && !minimalThinking) {
+            // A cut-off answer is useless (and a cut-off diff is dangerous): retry once with a larger cap.
+            val bigger = maxOut * 2
+            history += ChatMessage.Notice("✂️ ${roleLabel(role)} yanıtı çıktı sınırına ($maxOut token) takıldı; $bigger ile bir kez yeniden deneniyor.")
+            ui.update()
+            resp = once(opts.copy(maxOutputTokens = bigger))
+            history += ChatMessage.UsageRecord(ref.model, role, resp.usage)
+            if (resp.truncated) {
+                history += ChatMessage.Notice("⚠️ Yanıt $bigger tokenda yine kesildi. Ayarlar'dan çıktı sınırını artırın veya düşünme seviyesini düşürün.", isError = true)
+            }
+        }
         return resp.message
     }
 
-    fun questionSystem(ctx: String?) = agentSystem(ctx) +
-        "\nThis request needs no code change: answer it, using read-only tools if needed. Do not modify the repository.\n"
+    fun questionSystem(ctx: String?) = buildString {
+        append(header()).append('\n').append(tokenRules).append('\n')
+        appendLine("This request needs no code change: answer it concisely, using read-only tools if needed. Do not modify the repository.")
+        if (ctx != null) append('\n').append(ctx)
+    }
 
     // ---- Entry point ----
 
@@ -240,13 +275,16 @@ class Agent(val settings: Settings) {
             when (route) {
                 Route.COMPLEX_ARCHITECT -> ArchitectEditor(this).run(history, ui, ctx)
                 Route.SIMPLE_EDIT ->
-                    agentLoop(history, ui, editorRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null)
+                    agentLoop(history, ui, editorRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null,
+                        maxOut = settings.maxOutAgent)
                 Route.QUESTION_ONLY ->
                     agentLoop(history, ui, editorRef(), "agent", questionSystem(ctx),
-                        tools.readOnlySpecs.filter { it.name != "submit_plan" }, readOnly = true, stopTool = null)
+                        tools.readOnlySpecs.filter { it.name != "submit_plan" }, readOnly = true, stopTool = null,
+                        maxOut = settings.maxOutAgent)
                 null ->
                     if (settings.architectMode) ArchitectEditor(this).run(history, ui, ctx)
-                    else agentLoop(history, ui, singleRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null)
+                    else agentLoop(history, ui, singleRef(), "agent", agentSystem(ctx), tools.specs, readOnly = false, stopTool = null,
+                        maxOut = settings.maxOutAgent)
             }
         } finally {
             usageSummary(history, start)?.let { history += it }
@@ -337,7 +375,8 @@ class Agent(val settings: Settings) {
             "Keep: user goals and preferences, repos/branches/files touched, decisions, commits and PRs (with links), open problems. Drop code and tool output."
         try {
             val scratch = ArrayList<ChatMessage>()
-            val reply = callModel(scratch, listOf(ChatMessage.User(prompt)), editorRef(), "summary", system, emptyList(), ui, useCache = false)
+            val reply = callModel(scratch, listOf(ChatMessage.User(prompt)), editorRef(), "summary", system, emptyList(), ui,
+                useCache = false, maxOut = 1024)
             val rec = scratch.filterIsInstance<ChatMessage.UsageRecord>()
             if (reply.text.isNotBlank() && !reply.text.startsWith("(Model boş")) {
                 history.add(p.summaryInsertIndex, ChatMessage.Summary(reply.text.trim()))
@@ -366,11 +405,14 @@ class Agent(val settings: Settings) {
         toolSpecs: List<ToolSpec>,
         readOnly: Boolean,
         stopTool: String?,
+        maxOut: Int? = null,
+        maxReads: Int? = null,
     ): ToolCall? {
         var consecutiveFailures = 0
+        var reads = 0
         for (step in 1..settings.maxSteps) {
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, ref, role, system, toolSpecs, ui)
+            val reply = callModel(history, prepared.messages, ref, role, system, toolSpecs, ui, maxOut = maxOut)
             history += reply
             ui.update()
             if (reply.toolCalls.isEmpty()) return null
@@ -379,6 +421,12 @@ class Agent(val settings: Settings) {
             val calls = reply.toolCalls
             for ((i, call) in calls.withIndex()) {
                 if (call.name == stopTool) { stopCall = call; continue }
+                if (maxReads != null && call.name == "github_read_file" && ++reads > maxReads) {
+                    history += ChatMessage.ToolResult(call.id, call.name,
+                        "Okuma sınırına ($maxReads dosya) ulaşıldı. Repo haritası ve okuduğun dosyalarla planı şimdi submit_plan ile gönder.")
+                    ui.update()
+                    continue
+                }
                 val (result, rejected) = executeTool(call, readOnly, ui)
                 history += result
                 ui.update()

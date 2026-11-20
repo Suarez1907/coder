@@ -69,6 +69,15 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var keepTurns by remember { mutableStateOf(s.keepTurns.toString()) }
     var previewOn by remember { mutableStateOf(s.tokenPreview) }
     var decisionModel by remember { mutableStateOf(s.decisionModel) }
+    var terse by remember { mutableStateOf(s.terseMode) }
+    var outArch by remember { mutableStateOf(s.maxOutArchitect.toString()) }
+    var outEditor by remember { mutableStateOf(s.maxOutEditor.toString()) }
+    var outAgent by remember { mutableStateOf(s.maxOutAgent.toString()) }
+    var cacheMin by remember { mutableStateOf(s.cacheMinTokens.toString()) }
+    var repoMap by remember { mutableStateOf(s.repoMapForArchitect) }
+    var routerModel by remember { mutableStateOf(s.routerModel) }
+    var useDecision by remember { mutableStateOf(s.useDecision1) }
+    var cacheMsg by remember { mutableStateOf(vm.agent.cacheStatus) }
     var decisionTimeout by remember { mutableStateOf((s.decisionTimeoutMs / 1000.0).toString()) }
 
     /** Stores fetched models and picks sensible architect/editor defaults from them. */
@@ -102,6 +111,14 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         s.keepTurns = keepTurns.toIntOrNull() ?: 4
         s.tokenPreview = previewOn
         s.decisionModel = decisionModel.ifBlank { "gemini-decision-1" }
+        s.terseMode = terse
+        s.maxOutArchitect = outArch.toIntOrNull() ?: 1500
+        s.maxOutEditor = outEditor.toIntOrNull() ?: 4096
+        s.maxOutAgent = outAgent.toIntOrNull() ?: 4096
+        s.cacheMinTokens = cacheMin.toIntOrNull() ?: 32_000
+        s.repoMapForArchitect = repoMap
+        s.routerModel = routerModel
+        s.useDecision1 = useDecision
         s.decisionTimeoutMs = ((decisionTimeout.replace(',', '.').toDoubleOrNull() ?: 2.0) * 1000).toLong()
     }
 
@@ -196,6 +213,22 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             )
 
             HorizontalDivider()
+            Text("Çıktı tasarrufu", style = MaterialTheme.typography.titleSmall)
+            ToggleRow("Sadece Diff (Açıklamasız Mod)", "Selamlama, açıklama ve özet yazılmaz; kod yalnızca SEARCH/REPLACE bloklarıyla değişir.", terse) { terse = it }
+            OutlinedTextField(outArch, { outArch = it.filter(Char::isDigit) }, label = { Text("Mimar planı için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(outEditor, { outEditor = it.filter(Char::isDigit) }, label = { Text("Uygulayıcı için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(outAgent, { outAgent = it.filter(Char::isDigit) }, label = { Text("Tek model ajan için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("Gemini'de düşünme tokenları da bu sınıra dahildir. Yanıt kesilirse bir kez iki katı sınırla yeniden denenir.", style = MaterialTheme.typography.bodySmall)
+            ToggleRow("Mimar için Repo Haritası kullan", "Mimar'a ham kod yerine dosya yolları, sınıflar ve fonksiyon imzalarından oluşan hafif bir harita gönderilir.", repoMap) { repoMap = it }
+
+            HorizontalDivider()
+            Text("Yönlendirme yedeği", style = MaterialTheme.typography.titleSmall)
+            Text("Akıllı Yönlendirme açıkken önce ücretsiz yerel kurallar, sonra Decision 1, sonra aşağıdaki ucuz model denenir.", style = MaterialTheme.typography.bodySmall)
+            ToggleRow("Decision 1 kullan", "Kapalıysa yalnızca yerel kural ve ucuz model kullanılır.", useDecision) { useDecision = it }
+            OutlinedTextField(routerModel, { routerModel = it }, label = { Text("Ucuz sınıflandırma modeli (sağlayıcı/model, boşsa otomatik)") },
+                placeholder = { Text("gemini/gemini-2.5-flash-lite") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+
+            HorizontalDivider()
             Text("Akıllı Yönlendirme (Decision 1)", style = MaterialTheme.typography.titleSmall)
             Text(
                 "Her istekte önce Gemini Decisions API görevi sınıflandırır (basit düzenleme / mimari / soru) ve ilgili dosyaları seçer. " +
@@ -215,12 +248,32 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Switch(cacheOn, { cacheOn = it })
             }
             OutlinedTextField(cacheTtl, { cacheTtl = it.filter(Char::isDigit) }, label = { Text("Önbellek süresi (dakika)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(cacheMin, { cacheMin = it.filter(Char::isDigit) }, label = { Text("Önbellek için en az sabit bağlam (token)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("Gemini 4 modelleri yalnızca otomatik önbellek destekler; onlarda açık önbellek oluşturulmaz.", style = MaterialTheme.typography.bodySmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { scope.launch { cacheMsg = runCatching { vm.agent.clearCache() }.getOrElse { it.message ?: "Hata" } } }) {
+                    Text("Önbelleği Temizle")
+                }
+                Spacer(Modifier.size(8.dp))
+                Text(cacheMsg, style = MaterialTheme.typography.bodySmall)
+            }
             OutlinedTextField(keepTurns, { keepTurns = it.filter(Char::isDigit) }, label = { Text("Tam gönderilecek son tur sayısı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
             Spacer(Modifier.size(8.dp))
             Button(onClick = { save(); onBack() }, modifier = Modifier.fillMaxWidth()) { Text("Kaydet") }
             Text("Anahtarlar bu telefonda şifreli olarak saklanır ve yalnızca ilgili servise gönderilir.", style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+@Composable
+private fun ToggleRow(title: String, desc: String, value: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(desc, style = MaterialTheme.typography.bodySmall)
+        }
+        Switch(value, onChange)
     }
 }
 

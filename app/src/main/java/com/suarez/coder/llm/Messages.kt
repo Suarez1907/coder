@@ -58,11 +58,15 @@ data class ToolSpec(val name: String, val description: String, val parameters: J
 
 data class CallOptions(
     val thinkingLevel: String? = null,
+    /** Hard cap on generated tokens (thinking included on Gemini). */
+    val maxOutputTokens: Int? = null,
+    /** Ask for the lowest thinking the model supports (classification calls). */
+    val minimalThinking: Boolean = false,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
     val cachedContent: String? = null,
 )
 
-data class LlmResponse(val message: ChatMessage.Assistant, val usage: Usage)
+data class LlmResponse(val message: ChatMessage.Assistant, val usage: Usage, val truncated: Boolean = false)
 
 interface LlmClient {
     val model: String

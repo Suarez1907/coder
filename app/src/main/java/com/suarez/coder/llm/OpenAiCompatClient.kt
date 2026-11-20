@@ -19,6 +19,7 @@ class OpenAiCompatClient(
         val body = JSONObject()
             .put("model", model)
             .put("messages", buildMessages(system, history))
+        options.maxOutputTokens?.let { body.put("max_tokens", it) }
         if (tools.isNotEmpty()) {
             val arr = JSONArray()
             tools.forEach {
@@ -42,7 +43,8 @@ class OpenAiCompatClient(
             output = u.optLong("completion_tokens"),
             cached = u.optLong("prompt_cache_hit_tokens", u.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L),
         )
-        return LlmResponse(parse(json), usage)
+        val finish = json.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason") ?: ""
+        return LlmResponse(parse(json), usage, truncated = finish == "length")
     }
 
     private fun errorMessage(body: String): String =

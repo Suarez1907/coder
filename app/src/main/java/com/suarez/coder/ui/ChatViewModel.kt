@@ -87,6 +87,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setThinking(level: String) { settings.thinkingLevel = level; refreshSettings() }
     fun setSmartRouting(on: Boolean) { settings.smartRouting = on; refreshSettings() }
 
+    /** Deletes the active Gemini cache; the result is shown as a notice. */
+    fun clearCache() {
+        if (running) return
+        viewModelScope.launch {
+            val msg = runCatching { agent.clearCache() }.getOrElse { "Önbellek silinemedi: ${it.message}" }
+            messages += ChatMessage.Notice("🧹 $msg")
+            save()
+        }
+    }
+
     // ---- Sending ----
 
     private val ui = object : AgentUi {
