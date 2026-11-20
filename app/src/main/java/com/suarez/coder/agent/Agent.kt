@@ -31,6 +31,8 @@ import kotlin.math.roundToInt
 interface AgentUi {
     fun update()
     suspend fun confirm(title: String, body: String, okText: String = "Onayla", cancelText: String = "Reddet"): Boolean
+    /** What the agent is waiting for right now (shown with a running timer); null clears it. */
+    fun status(text: String?) {}
 }
 
 class StopException(message: String) : Exception(message)
@@ -242,6 +244,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
      */
     suspend fun stableContext(kind: String, history: MutableList<ChatMessage>, ui: AgentUi): String? {
         if (snapshots.containsKey(kind)) return snapshots[kind]
+        ui.status(if (kind == "architect") "Proje bağlamı ve repo haritası hazırlanıyor" else "Proje bağlamı hazırlanıyor")
         val parts = ArrayList<String>()
         if (settings.projectNotes) context.loadNotes()?.let { parts += "PROJECT NOTES (.coder/NOTES.md):\n$it" }
         var hasMap = false
@@ -352,7 +355,25 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
         }
 
-        var resp = once(opts)
+        suspend fun timed(o: CallOptions): com.suarez.coder.llm.LlmResponse {
+            val tier = if (o.serviceTier == "flex") " · Flex (yavaş olabilir)" else ""
+            val think = o.thinkingLevel?.let { " · düşünme $it" } ?: if (o.minimalThinking) " · düşünme minimal" else ""
+            ui.status("${ref.model} yanıtı bekleniyor ($role)$think$tier")
+            // Flex may legitimately queue for minutes; standard requests get a clear error instead of hanging.
+            val limitMs = if (o.serviceTier == "flex") 16 * 60_000L else settings.requestTimeoutSec * 1000L
+            return try {
+                kotlinx.coroutines.withTimeout(limitMs) { once(o) }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                throw com.suarez.coder.llm.LlmException(
+                    "${ref.model} ${limitMs / 1000} sn içinde yanıt vermedi. Düşünme seviyesini düşürmeyi, başka model seçmeyi " +
+                        "veya Ayarlar > Bağlantıyı test et'i deneyin."
+                )
+            } finally {
+                ui.status(null)
+            }
+        }
+
+        var resp = timed(opts)
         record(resp, opts)
         if (resp.truncated && maxOut != null && maxOut >= 64) {
             // A cut-off answer is useless (and a cut-off diff is dangerous): retry once with a larger cap.
@@ -360,7 +381,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             history += ChatMessage.Notice("✂️ ${roleLabel(role)} yanıtı çıktı sınırına ($maxOut token) takıldı; $bigger ile bir kez yeniden deneniyor.")
             ui.update()
             val o2 = opts.copy(maxOutputTokens = bigger)
-            resp = once(o2)
+            resp = timed(o2)
             record(resp, o2)
             if (resp.truncated) {
                 history += ChatMessage.Notice("⚠️ Yanıt $bigger tokenda yine kesildi. Ayarlar'dan çıktı sınırını artırın veya düşünme seviyesini düşürün.", isError = true)
@@ -702,6 +723,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     /** Returns the result and whether the user rejected it. */
     private suspend fun executeTool(call: ToolCall, readOnly: Boolean, ui: AgentUi): Pair<ChatMessage.ToolResult, Boolean> {
+        ui.status(if (call.name == "ci_wait") "GitHub Actions derlemesi bekleniyor" else "Araç çalışıyor: ${call.name}")
         return try {
             if (!readOnly && tools.needsApproval(call) && !settings.autoApprove &&
                 !ui.confirm("İzin ver: ${call.name}", "Bu işlem GitHub'da değişiklik yapacak.\n\n" + call.args.toString(2).take(20_000))
@@ -714,6 +736,27 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             throw e
         } catch (e: Exception) {
             ChatMessage.ToolResult(call.id, call.name, e.message ?: e.toString(), true) to false
+        } finally {
+            ui.status(null)
+        }
+    }
+
+    /** Sends a tiny request to a model and reports latency or the error, to diagnose hangs and wrong settings. */
+    suspend fun ping(ref: ModelRef): String {
+        val started = System.currentTimeMillis()
+        return try {
+            val r = kotlinx.coroutines.withTimeout(60_000) {
+                client(ref).complete("Reply with the single word OK.", listOf(ChatMessage.User("ping")), emptyList(),
+                    CallOptions(maxOutputTokens = 64, minimalThinking = true))
+            }
+            val ms = System.currentTimeMillis() - started
+            "✓ ${ref.model}: $ms ms" + if (r.message.text.isBlank()) " (boş yanıt)" else ""
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            "✗ ${ref.model}: 60 sn içinde yanıt yok"
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            "✗ ${ref.model}: ${e.message?.take(160)}"
         }
     }
 

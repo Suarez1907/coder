@@ -85,6 +85,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var notes by remember { mutableStateOf(s.projectNotes) }
     var escalation by remember { mutableStateOf(s.escalationModel) }
     var economy by remember { mutableStateOf(s.economyMode) }
+    var timeoutSec by remember { mutableStateOf(s.requestTimeoutSec.toString()) }
+    var pingResult by remember { mutableStateOf("") }
     var decisionTimeout by remember { mutableStateOf((s.decisionTimeoutMs / 1000.0).toString()) }
 
     fun remember(p: Provider, models: List<String>) = vm.mergeCatalog(p, models)
@@ -120,6 +122,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         s.projectNotes = notes
         s.escalationModel = escalation
         s.economyMode = economy
+        s.requestTimeoutSec = timeoutSec.toIntOrNull() ?: 180
         s.decisionTimeoutMs = ((decisionTimeout.replace(',', '.').toDoubleOrNull() ?: 2.0) * 1000).toLong()
     }
 
@@ -212,6 +215,16 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     "Boş bırakılırsa yerleşik yaklaşık fiyatlar kullanılır; güncel fiyatları Google/DeepSeek fiyat sayfasından kontrol edin.",
                 style = MaterialTheme.typography.bodySmall,
             )
+
+            HorizontalDivider()
+            Text("Bağlantı", style = MaterialTheme.typography.titleSmall)
+            OutlinedButton(onClick = {
+                save()
+                scope.launch { pingResult = "Test ediliyor…"; pingResult = vm.testConnections() }
+            }) { Text("Bağlantıyı test et") }
+            if (pingResult.isNotBlank()) Text(pingResult, style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(timeoutSec, { timeoutSec = it.filter(Char::isDigit) }, label = { Text("İstek zaman aşımı (saniye, Flex hariç)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth())
 
             HorizontalDivider()
             Text("Çıktı tasarrufu", style = MaterialTheme.typography.titleSmall)

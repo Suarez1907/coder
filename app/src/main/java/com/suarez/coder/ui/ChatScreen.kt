@@ -121,7 +121,17 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(8.dp))
-                        Text(if (vm.pending != null) "Onay bekleniyor…" else "Çalışıyor…", style = MaterialTheme.typography.bodySmall)
+                        var now by remember { mutableStateOf(System.currentTimeMillis()) }
+                        LaunchedEffect(vm.status) { while (true) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
+                        val secs = ((now - vm.statusSince) / 1000).coerceAtLeast(0)
+                        Text(
+                            when {
+                                vm.pending != null -> "Onay bekleniyor…"
+                                vm.status != null -> "${vm.status} · $secs sn"
+                                else -> "Çalışıyor…"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                 }
             }

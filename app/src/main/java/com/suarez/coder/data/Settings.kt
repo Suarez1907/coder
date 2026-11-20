@@ -164,6 +164,11 @@ class Settings(context: Context) {
         get() = str("escalation_model")
         set(v) = put("escalation_model", v.trim())
 
+    /** Standard (non-Flex) model requests fail with a clear message after this many seconds. */
+    var requestTimeoutSec: Int
+        get() = prefs.getInt("request_timeout_sec", 180)
+        set(v) = prefs.edit().putInt("request_timeout_sec", v.coerceIn(30, 900)).apply()
+
     // ---- Output limits ----
 
     /** "Sadece Diff (Açıklamasız Mod)" */

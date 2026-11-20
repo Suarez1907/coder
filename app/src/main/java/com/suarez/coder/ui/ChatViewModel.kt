@@ -45,6 +45,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var preview by mutableStateOf<String?>(null)
         private set
+    /** What the agent is waiting for and since when (for the live timer). */
+    var status by mutableStateOf<String?>(null)
+        private set
+    var statusSince by mutableStateOf(0L)
+        private set
     /** Bumped whenever settings shown on the chat screen change. */
     var settingsVersion by mutableStateOf(0)
         private set
@@ -104,6 +109,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val ui = object : AgentUi {
         override fun update() {}
+        override fun status(text: String?) {
+            status = text
+            statusSince = System.currentTimeMillis()
+        }
         override suspend fun confirm(title: String, body: String, okText: String, cancelText: String): Boolean {
             val p = PendingConfirm(title, body, okText, cancelText, CompletableDeferred())
             pending = p
@@ -152,6 +161,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 sync(work)
                 pending = null
+                status = null
                 running = false
                 save()
             }
@@ -231,6 +241,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             catalogStatus = if (parts.isEmpty()) "Önce API anahtarı girin" else parts.joinToString(", ")
         }
+    }
+
+    /** Pings the single, architect and editor models. */
+    suspend fun testConnections(): String {
+        val refs = listOf(agent.singleRef(), agent.architectRef(), agent.editorRef()).distinctBy { it.key }
+        return refs.map { agent.ping(it) }.joinToString("\n")
     }
 
     suspend fun loadTree(repo: String, ref: String?): List<String> =
