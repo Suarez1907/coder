@@ -4,7 +4,9 @@ import com.suarez.coder.diff.SearchReplace
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
+import com.suarez.coder.tools.Args
 import com.suarez.coder.tools.GitHub
+import org.json.JSONObject
 import com.suarez.coder.validate.CodeValidator
 
 /**
@@ -14,29 +16,101 @@ import com.suarez.coder.validate.CodeValidator
  * contents come from cache) → a mid-priced escalation model → the architect model (after asking, as that is the
  * third consecutive failure).
  */
+data class PlanFile(val path: String, val action: String, val instructions: String)
+
+data class ParsedPlan(
+    val repo: String,
+    val branch: String,
+    val base: String?,
+    val message: String,
+    val notes: String,
+    val files: List<PlanFile>,
+    /** Why the plan cannot be used (sent back to the architect), or null. */
+    val error: String? = null,
+)
+
 class ArchitectEditor(private val agent: Agent) {
-    private data class PlanFile(val path: String, val action: String, val instructions: String)
 
     private data class Outcome(val ok: Boolean, val text: String)
 
     companion object {
         const val GROUP_CHARS = 100_000
         const val APPLIED_IN_RESULT_CHARS = 4_000
+        const val PLAN_FIX_ATTEMPTS = 2
+
+        const val PLAN_FORMAT = "submit_plan biçimi: {\"repo\":\"sahip/isim\",\"branch\":\"feat/x\",\"commit_message\":\"...\"," +
+            "\"files\":[{\"path\":\"app/src/main/java/.../A.kt\",\"action\":\"modify\",\"instructions\":\"1. ...\"}]} — " +
+            "'files' dizisinin her öğesi path, action (modify/create/delete) ve instructions alanları olan bir NESNE olmalı."
+
+        /** Reads the architect's plan leniently; returns an error message for the architect when it is not usable. */
+        fun parsePlan(a: JSONObject, defaultRepo: String): ParsedPlan {
+            val repo = a.optString("repo").ifBlank { defaultRepo }.trim()
+                .removePrefix("https://github.com/").trim('/').removeSuffix(".git")
+            val branch = a.optString("branch").trim()
+            val base = a.optString("base_branch").trim().takeIf { it.isNotBlank() && it != "null" }
+            val message = a.optString("commit_message").ifBlank { "Coder: değişiklikler" }
+            val notes = a.optString("notes").takeIf { it != "null" } ?: ""
+            fun fail(why: String) = ParsedPlan(repo, branch, base, message, notes, emptyList(), "$why $PLAN_FORMAT")
+            if (repo.isBlank()) return fail("Planda 'repo' yok.")
+            if (branch.isBlank()) return fail("Planda 'branch' yok.")
+            val els = Args.elements(a, "files") ?: return fail("Planda 'files' yok.")
+            val files = ArrayList<PlanFile>()
+            for (e in els) {
+                val obj = when (e) {
+                    is JSONObject -> e
+                    is String -> e.trim().takeIf { it.startsWith("{") }?.let { runCatching { JSONObject(it) }.getOrNull() }
+                    else -> null
+                }
+                val f = if (obj != null) {
+                    val path = obj.optString("path").ifBlank { obj.optString("file").ifBlank { obj.optString("filename") } }
+                    val action = obj.optString("action", "modify").lowercase().let { if (it in setOf("modify", "create", "delete")) it else "modify" }
+                    val instr = obj.optString("instructions").ifBlank { obj.optString("changes").ifBlank { obj.optString("description") } }
+                    PlanFile(path.trim().removePrefix("./").removePrefix("/"), action, instr)
+                } else {
+                    // "path: instructions" written as plain text
+                    val s = e.toString().trim()
+                    val idx = s.indexOf(':')
+                    if (idx > 0 && Args.looksLikePath(s.substring(0, idx).trim())) {
+                        PlanFile(s.substring(0, idx).trim().removePrefix("./").removePrefix("/"), "modify", s.substring(idx + 1).trim())
+                    } else PlanFile(s.removePrefix("./").removePrefix("/"), "modify", "")
+                }
+                if (!Args.looksLikePath(f.path)) return fail("'${f.path.take(80)}' bir dosya yolu değil.")
+                if (f.action != "delete" && f.instructions.isBlank() && notes.isBlank()) return fail("${f.path} için talimat (instructions) yok.")
+                files += f
+            }
+            if (files.isEmpty()) return fail("Plan boş.")
+            return ParsedPlan(repo, branch, base, message, notes, files.distinctBy { it.path })
+        }
     }
 
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi) {
         val stable = agent.stableContext("architect", history, ui)
-        val plan = agent.agentLoop(
-            history, ui, agent.architectRef(), "architect", agent.architectSystem(agent.architectHasMap), "architect",
-            agent.tools.architectSpecs, readOnly = true, stopTool = "submit_plan",
-            maxOut = agent.settings.maxOutArchitect,
-            maxReads = if (agent.architectHasMap && stable != null) Agent.MAX_ARCHITECT_READS else null,
-            thinking = agent.settings.thinkingArchitect,
-            allowOps = true,
-        ) ?: return
+        var plan: ToolCall? = null
+        var parsed: ParsedPlan? = null
+        for (attempt in 0..PLAN_FIX_ATTEMPTS) {
+            val call = agent.agentLoop(
+                history, ui, agent.architectRef(), "architect", agent.architectSystem(agent.architectHasMap), "architect",
+                agent.tools.architectSpecs, readOnly = true, stopTool = "submit_plan",
+                maxOut = agent.settings.maxOutArchitect,
+                maxReads = if (agent.architectHasMap && stable != null) Agent.MAX_ARCHITECT_READS else null,
+                thinking = agent.settings.thinkingArchitect,
+                allowOps = true,
+            ) ?: return
+            val p = parsePlan(call.args, agent.settings.defaultRepo)
+            if (p.error == null) { plan = call; parsed = p; break }
+            // Send the problem back so the architect fixes its plan instead of the run failing.
+            history += ChatMessage.ToolResult(call.id, call.name, "Plan kullanılamadı: ${p.error}", isError = true)
+            history += ChatMessage.Notice("⚠️ Mimar'ın planı okunamadı; düzeltmesi istendi.", p.error, isError = true)
+            ui.update()
+            if (attempt == PLAN_FIX_ATTEMPTS) {
+                history += ChatMessage.Assistant("⚠️ Plan biçimi ${PLAN_FIX_ATTEMPTS + 1} denemede düzeltilemedi; değişiklik yapılmadı.", model = "coder")
+                return
+            }
+        }
+        plan!!
 
         val outcome = try {
-            implement(history, ui, plan)
+            implement(history, ui, parsed!!)
         } catch (e: StopException) {
             Outcome(false, e.message ?: "Durduruldu")
         }
@@ -48,27 +122,20 @@ class ArchitectEditor(private val agent: Agent) {
         ui.update()
     }
 
-    private fun planText(planArgs: org.json.JSONObject, files: List<PlanFile>): String = buildString {
-        append("Commit: ").append(planArgs.optString("commit_message")).append('\n')
-        planArgs.optString("notes").takeIf { it.isNotBlank() && it != "null" }?.let { append("Notes: ").append(it).append('\n') }
-        files.forEach { append("\n## ").append(it.path).append(" [").append(it.action).append("]\n").append(it.instructions).append('\n') }
+    private fun planText(p: ParsedPlan): String = buildString {
+        append("Commit: ").append(p.message).append('\n')
+        if (p.notes.isNotBlank()) append("Notes: ").append(p.notes).append('\n')
+        p.files.forEach { append("\n## ").append(it.path).append(" [").append(it.action).append("]\n").append(it.instructions).append('\n') }
     }
 
-    private suspend fun implement(history: MutableList<ChatMessage>, ui: AgentUi, plan: ToolCall): Outcome {
-        val a = plan.args
-        val repo = agent.tools.normalizeRepo(a.optString("repo").ifBlank { agent.settings.defaultRepo })
-        if (repo.isBlank()) return Outcome(false, "Planda repo yok.")
-        val branch = a.optString("branch").ifBlank { return Outcome(false, "Planda branch yok.") }
-        val base = a.optString("base_branch").takeIf { it.isNotBlank() && it != "null" }
-        val message = a.optString("commit_message").ifBlank { "Coder: değişiklikler" }
-        val arr = a.optJSONArray("files") ?: return Outcome(false, "Planda dosya listesi yok.")
-        val files = (0 until arr.length()).map {
-            val f = arr.getJSONObject(it)
-            PlanFile(f.getString("path").trim().removePrefix("/"), f.optString("action", "modify"), f.optString("instructions"))
-        }
-        if (files.isEmpty()) return Outcome(false, "Plan boş.")
+    private suspend fun implement(history: MutableList<ChatMessage>, ui: AgentUi, plan: ParsedPlan): Outcome {
+        val repo = plan.repo
+        val branch = plan.branch
+        val base = plan.base
+        val message = plan.message
+        val files = plan.files
 
-        history += ChatMessage.Notice("📋 Plan hazır: ${files.size} dosya → $repo@$branch", planText(a, files))
+        history += ChatMessage.Notice("📋 Plan hazır: ${files.size} dosya → $repo@$branch", planText(plan))
         if (files.size > Agent.MAX_ARCHITECT_READS) {
             history += ChatMessage.Notice("ℹ️ Plan ${files.size} dosyaya dokunuyor (hedef 1-3). Uygulayıcıya giden içerik ve maliyet buna göre artar.")
         }
@@ -80,7 +147,7 @@ class ArchitectEditor(private val agent: Agent) {
         }
         val state = HashMap(originals)
         val editable = files.filter { it.action != "delete" }
-        val text = planText(a, files)
+        val text = planText(plan)
 
         val groups = ArrayList<MutableList<PlanFile>>()
         var size = 0

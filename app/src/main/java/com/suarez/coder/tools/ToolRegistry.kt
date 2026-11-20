@@ -191,7 +191,8 @@ class ToolRegistry(private val settings: Settings) {
                 }
                 github.readFile(repo(), path, s("ref"), i("start_line"), i("end_line"))
             }
-            "github_read_files" -> readMany(repo(), a.optJSONArray("paths") ?: throw ToolException("'paths' dizisi gerekli"), s("ref"))
+            "github_read_files" -> readMany(repo(), Args.stringList(a, "paths")?.takeIf { it.isNotEmpty() }
+                ?: throw ToolException("'paths' dosya yolu dizisi olmalı, ör. {\"paths\": [\"app/src/A.kt\", \"build.gradle.kts\"]}"), s("ref"))
             "ci_wait" -> ciWait(repo(), s("ref"), (i("timeout_minutes") ?: 15).coerceIn(1, 30))
             "ci_errors" -> ciErrors(repo(), a.optLong("run_id").takeIf { it > 0 } ?: throw ToolException("'run_id' gerekli"))
             "github_apply_diff" -> applyDiff(repo(), req("branch"), req("message"), req("diff"), s("base_branch"))
@@ -272,11 +273,10 @@ class ToolRegistry(private val settings: Settings) {
         return if (stale.isEmpty()) "" else "\nNot: proje bağlamındaki ${stale.joinToString()} kopyası artık eski; güncel hali bu değişiklikle oluştu."
     }
 
-    private suspend fun readMany(repo: String, paths: JSONArray, ref: String?): String {
+    private suspend fun readMany(repo: String, paths: List<String>, ref: String?): String {
         val sb = StringBuilder()
         val limit = 120_000
-        for (i in 0 until paths.length()) {
-            val p = paths.getString(i)
+        for (p in paths) {
             if (FileFilter.isBinaryOrLock(p)) { sb.append("### $p\n(binary/lock dosyası, atlandı)\n\n"); continue }
             val text = github.readFileRaw(repo, p, ref)
             if (text == null) { sb.append("### $p\n(bulunamadı)\n\n"); continue }
