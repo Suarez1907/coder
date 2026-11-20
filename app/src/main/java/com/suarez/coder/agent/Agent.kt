@@ -361,20 +361,32 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             val base = "${ref.model} yanıtı bekleniyor ($role)$think$tier"
             ui.status(base)
             // Timeout per hop: Flex may queue for minutes; long-decode hops may take up to 10 minutes each.
-            val longOutput = (o0.maxOutputTokens ?: 0) > GeminiClient.SINGLE_HOP_CAP_SMALL
-            val hopMs = when {
-                o0.serviceTier == "flex" -> 16 * 60_000L
-                longOutput -> maxOf(settings.requestTimeoutSec * 1000L, 10 * 60_000L)
-                else -> settings.requestTimeoutSec * 1000L
-            }
-            val o = o0.copy(hopTimeoutMs = hopMs, onHop = { n -> ui.status("$base · uzun yanıt, parça $n") })
+            var hopNo = 1
+            // Streaming: the hop may run long while data keeps coming; it is "stuck" only when nothing arrives for the stall time.
+            val thinksHard = o0.thinkingLevel in setOf("medium", "high", "xhigh")
+            val stallMs = if (thinksHard) maxOf(settings.requestTimeoutSec * 1000L, 240_000L) else settings.requestTimeoutSec * 1000L
+            val o = o0.copy(
+                hopTimeoutMs = 20 * 60_000L,
+                stallTimeoutMs = stallMs,
+                onHop = { n -> hopNo = n; ui.status("$base · uzun yanıt, parça $n") },
+                onProgress = { p ->
+                    val parts = ArrayList<String>()
+                    if (hopNo > 1) parts += "parça $hopNo"
+                    if (p.lastThought.isNotBlank() && p.textChars == 0 && p.toolCalls == 0) parts += "düşünüyor: “${p.lastThought.take(60)}”"
+                    else if (p.thoughtChars > 0 && p.textChars == 0 && p.toolCalls == 0) parts += "düşünüyor"
+                    if (p.textChars > 0) parts += "yazıyor ~${Pricing.formatTokens((p.textChars / 4).toLong())} token"
+                    if (p.toolCalls > 0) parts += "${p.toolCalls} araç çağrısı"
+                    ui.status("$base · " + parts.joinToString(" · "))
+                },
+            )
             return try {
                 once(o)
-            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            } catch (e: GeminiClient.StallException) {
                 throw com.suarez.coder.llm.LlmException(
-                    "${ref.model} ${hopMs / 1000} sn içinde yanıt vermedi. Düşünme seviyesini düşürmeyi, başka model seçmeyi, " +
-                        "Ayarlar'da zaman aşımını artırmayı veya Bağlantıyı test et'i deneyin."
+                    "${ref.model}: ${e.message}; istek takıldı. Tekrar deneyin; sürerse düşünme seviyesini düşürün veya başka model seçin."
                 )
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                throw com.suarez.coder.llm.LlmException("${ref.model}: tek parça 20 dakikayı aştı; istek durduruldu.")
             } finally {
                 ui.status(null)
             }

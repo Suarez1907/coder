@@ -1,8 +1,18 @@
 package com.suarez.coder.llm
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
+import java.net.SocketTimeoutException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,6 +31,9 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
     /** Flex capacity is full (503/429 after retries) or Flex is not offered for this model. */
     class FlexUnavailableException(message: String) : Exception(message)
 
+    /** No data arrived for the stall timeout while streaming. */
+    class StallException(message: String) : Exception(message)
+
     companion object {
         /** Models that rejected our thinkingConfig; we stop sending it to them. */
         private val noThinkingConfig = HashSet<String>()
@@ -30,6 +43,14 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             .readTimeout(15, TimeUnit.MINUTES).writeTimeout(2, TimeUnit.MINUTES).callTimeout(16, TimeUnit.MINUTES).build()
 
         private val FLEX_BACKOFF_MS = listOf(10_000L, 30_000L)
+
+        private val stallClients = HashMap<Long, OkHttpClient>()
+
+        /** A client whose read timeout is the stall timeout (time without any received bytes). */
+        @Synchronized
+        private fun clientFor(stallMs: Long): OkHttpClient = stallClients.getOrPut(stallMs) {
+            Http.client.newBuilder().readTimeout(stallMs, TimeUnit.MILLISECONDS).callTimeout(0, TimeUnit.MILLISECONDS).build()
+        }
 
         /** Per-request output cap of non-streaming REST calls on gemini-4-carbon/argon. */
         const val SINGLE_HOP_CAP_SMALL = 32_768
@@ -76,12 +97,16 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
         return Http.execute(req, client)
     }
 
-    /** Sends a generateContent request; on the Flex tier retries 503/429 with backoff and never silently upgrades. */
-    private suspend fun generate(body: JSONObject, flex: Boolean): Http.Result {
-        if (!flex) return send("POST", "models/$model:generateContent", body)
+    /**
+     * Sends the request with streamGenerateContent (SSE), so progress is visible and a stuck request is told apart
+     * from a slow one. On the Flex tier retries 503/429 with backoff and never silently upgrades.
+     */
+    private suspend fun generate(body: JSONObject, flex: Boolean, stallMs: Long?, onProgress: ((StreamProgress) -> Unit)?): Http.Result {
+        val client = if (flex) flexClient else stallMs?.let { clientFor(it) } ?: Http.client
+        if (!flex) return stream(body, client, onProgress)
         var attempt = 0
         while (true) {
-            val res = send("POST", "models/$model:generateContent", body, flexClient)
+            val res = stream(body, client, onProgress)
             if (res.code == 400 && Regex("service.?tier|flex", RegexOption.IGNORE_CASE).containsMatchIn(errorMessage(res.body))) {
                 throw FlexUnavailableException("Bu model Flex'i desteklemiyor: ${errorMessage(res.body).take(150)}")
             }
@@ -137,7 +162,11 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             toolsJson(tools)?.let { body.put("tools", it) }
         }
         val gen = JSONObject()
-        if (withThinking) thinkingConfig(options.thinkingLevel, options.minimalThinking)?.let { gen.put("thinkingConfig", it) }
+        if (withThinking) thinkingConfig(options.thinkingLevel, options.minimalThinking)?.let {
+            // Thought summaries stream while the model thinks: visible progress instead of minutes of silence.
+            if (options.onProgress != null && !options.minimalThinking) it.put("includeThoughts", true)
+            gen.put("thinkingConfig", it)
+        }
         options.maxOutputTokens?.let { gen.put("maxOutputTokens", it) }
         if (gen.length() > 0) body.put("generationConfig", gen)
         options.serviceTier?.let { body.put("serviceTier", it) }
@@ -155,18 +184,18 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
         while (true) {
             val body = requestBody(system, history, tools, opts, withThinking)
             token?.let { body.put("continuationToken", it) }
-            var res = hop(body, flex, opts.hopTimeoutMs)
+            var res = hop(body, flex, opts)
             if (hops.isEmpty() && res.code == 400) {
                 val msg = errorMessage(res.body)
                 if ((opts.thinkingLevel != null || opts.minimalThinking) && msg.contains("think", ignoreCase = true)) {
                     // This model does not accept our thinking setting: remember and retry without it.
                     noThinkingConfig += model
                     withThinking = false
-                    res = hop(requestBody(system, history, tools, opts, false), flex, opts.hopTimeoutMs)
+                    res = hop(requestBody(system, history, tools, opts, false), flex, opts)
                 } else if ((opts.maxOutputTokens ?: 0) > SINGLE_HOP_CAP_SMALL && Regex("max.?output|output.?tokens|continuation", RegexOption.IGNORE_CASE).containsMatchIn(msg)) {
                     // Some models reject a total above their single-request cap on the first hop: fall back to that cap.
                     opts = opts.copy(maxOutputTokens = SINGLE_HOP_CAP_SMALL)
-                    res = hop(requestBody(system, history, tools, opts, withThinking), flex, opts.hopTimeoutMs)
+                    res = hop(requestBody(system, history, tools, opts, withThinking), flex, opts)
                 }
             }
             if (opts.cachedContent != null && res.code in setOf(400, 403, 404) &&
@@ -191,8 +220,58 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             truncated = finish == "MAX_TOKENS" || finish == "CONTINUATION", serviceTier = tier)
     }
 
-    private suspend fun hop(body: JSONObject, flex: Boolean, timeoutMs: Long?): Http.Result =
-        if (timeoutMs == null) generate(body, flex) else kotlinx.coroutines.withTimeout(timeoutMs) { generate(body, flex) }
+    private suspend fun hop(body: JSONObject, flex: Boolean, o: CallOptions): Http.Result {
+        val run: suspend () -> Http.Result = { generate(body, flex, o.stallTimeoutMs, o.onProgress) }
+        return if (o.hopTimeoutMs == null) run() else kotlinx.coroutines.withTimeout(o.hopTimeoutMs) { run() }
+    }
+
+    /** One SSE request; returns the joined response as JSON text, or the error body for non-2xx answers. */
+    private suspend fun stream(body: JSONObject, client: OkHttpClient, onProgress: ((StreamProgress) -> Unit)?): Http.Result =
+        withContext(Dispatchers.IO) {
+            suspendCancellableCoroutine { cont ->
+                val req = Request.Builder().url("$base/models/$model:streamGenerateContent?alt=sse")
+                    .header("x-goog-api-key", apiKey).post(body.toString().toRequestBody(Http.JSON)).build()
+                val call = client.newCall(req)
+                cont.invokeOnCancellation { call.cancel() }
+                call.enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {
+                        if (cont.isActive) cont.resumeWithException(stallOr(e, client))
+                    }
+
+                    override fun onResponse(call: Call, response: Response) {
+                        response.use { r ->
+                            try {
+                                if (!r.isSuccessful) {
+                                    val text = r.body?.string() ?: ""
+                                    if (cont.isActive) cont.resume(Http.Result(r.code, text, r.header("Content-Type")))
+                                    return
+                                }
+                                val acc = StreamAccumulator()
+                                val src = r.body!!.source()
+                                var lastReport = 0L
+                                while (true) {
+                                    val line = src.readUtf8Line() ?: break
+                                    if (!line.startsWith("data:")) continue
+                                    val data = line.substring(5).trim()
+                                    if (data.isEmpty() || data == "[DONE]") continue
+                                    acc.add(JSONObject(data))
+                                    val now = System.currentTimeMillis()
+                                    if (onProgress != null && now - lastReport > 1_000) { lastReport = now; onProgress(acc.progress()) }
+                                }
+                                if (cont.isActive) cont.resume(Http.Result(200, acc.result().toString(), "application/json"))
+                            } catch (e: IOException) {
+                                if (cont.isActive) cont.resumeWithException(stallOr(e, client))
+                            } catch (e: org.json.JSONException) {
+                                if (cont.isActive) cont.resumeWithException(LlmException("Gemini akışı okunamadı: ${e.message}"))
+                            }
+                        }
+                    }
+                })
+            }
+        }
+
+    private fun stallOr(e: IOException, client: OkHttpClient): Exception =
+        if (e is SocketTimeoutException) StallException("${client.readTimeoutMillis / 1000} sn boyunca hiç veri gelmedi") else e
 
     private fun parseUsage(u: JSONObject?): Usage {
         if (u == null) return Usage()

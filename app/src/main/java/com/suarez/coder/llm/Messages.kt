@@ -74,6 +74,10 @@ data class CallOptions(
     val serviceTier: String? = null,
     /** Timeout for one request/continuation hop; null = client default. */
     val hopTimeoutMs: Long? = null,
+    /** Fail when no data arrives for this long while streaming (the request is stuck rather than slow). */
+    val stallTimeoutMs: Long? = null,
+    /** Live progress of a streamed answer (throttled). */
+    val onProgress: ((StreamProgress) -> Unit)? = null,
     /** Called when a long answer continues in another hop (Gemini long decode), with the hop number. */
     val onHop: ((Int) -> Unit)? = null,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */

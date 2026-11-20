@@ -12,6 +12,8 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
     companion object {
         const val MAX_TOTAL_CHARS = 150_000
         const val NOTES_PATH = ".coder/NOTES.md"
+        const val AUTO_MAX_PER_FILE = 30_000
+        const val AUTO_MAX_TOTAL = 80_000
     }
 
     fun invalidate() = memo.clear()
@@ -33,9 +35,12 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
 
     /** Files picked automatically for one request. */
     suspend fun loadAuto(repo: String, ref: String?, files: List<String>): Loaded? =
-        load(repo, ref, files, "Akıllı dosya seçicinin (Decision 1) bu istek için seçtiği")
+        load(repo, ref, files, "Akıllı dosya seçicinin (Decision 1) bu istek için seçtiği", AUTO_MAX_PER_FILE, AUTO_MAX_TOTAL)
 
-    private suspend fun load(repo: String, ref: String?, files: List<String>, who: String): Loaded? {
+    private suspend fun load(
+        repo: String, ref: String?, files: List<String>, who: String,
+        maxPerFile: Int = Int.MAX_VALUE, maxTotal: Int = MAX_TOTAL_CHARS,
+    ): Loaded? {
         if (repo.isBlank() || files.isEmpty()) return null
         val sb = StringBuilder()
         val skipped = ArrayList<String>()
@@ -45,8 +50,12 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
             val key = "$repo@${ref ?: ""}:$path"
             val content = if (memo.containsKey(key)) memo[key] else runCatching { github.readFileRaw(repo, path, ref) }.getOrNull().also { memo[key] = it }
             if (content == null) { skipped += "$path (bulunamadı)"; continue }
-            if (sb.length + content.length > MAX_TOTAL_CHARS) { skipped += "$path (bağlam sınırı aşıldı)"; continue }
-            sb.append("### ").append(path).append("\n```\n").append(content).append(if (content.endsWith("\n")) "" else "\n").append("```\n\n")
+            // Large files (e.g. generated level data) are cut: the editor reads the full file itself when it edits it.
+            val lines = content.count { it == '\n' } + 1
+            val text = if (content.length <= maxPerFile) content
+                else content.take(maxPerFile) + "\n… (dosya $lines satır, ${content.length} karakter; devamı için github_read_file ile aralık oku)"
+            if (sb.length + text.length > maxTotal) { skipped += "$path (bağlam sınırı aşıldı)"; continue }
+            sb.append("### ").append(path).append("\n```\n").append(text).append(if (text.endsWith("\n")) "" else "\n").append("```\n\n")
             count++
         }
         if (count == 0) return null
