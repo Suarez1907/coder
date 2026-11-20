@@ -89,6 +89,16 @@ class ToolRegistry(private val settings: Settings) {
         obj("method" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("GET", "POST", "PUT", "PATCH", "DELETE"))),
             "path" to str("API yolu"), "body" to str("JSON gövdesi (metin)"), required = listOf("method", "path")))
 
+    private val mergePr = ToolSpec("github_merge_pull_request", "Bir pull request'i birleştirir (merge).",
+        obj("repo" to str(repoDesc), "number" to int("PR numarası"),
+            "method" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("merge", "squash", "rebase"))).put("description", "Birleştirme yöntemi (varsayılan merge)"),
+            "commit_title" to str("Birleştirme commit başlığı (isteğe bağlı)"), required = listOf("repo", "number")))
+    private val runWorkflow = ToolSpec("github_run_workflow",
+        "Bir GitHub Actions workflow'unu elle başlatır (workflow_dispatch). Sonucu ci_wait ile izle.",
+        obj("repo" to str(repoDesc), "workflow" to str("Workflow dosya adı (ör. android.yml) veya kimliği"),
+            "ref" to str("Branch (boşsa varsayılan)"), "inputs_json" to str("Workflow girdileri, JSON nesnesi olarak (ör. {\"release_tag\":\"v1.3.0\"})"),
+            required = listOf("repo", "workflow")))
+
     /** Architect phase 1 finishes by calling this. */
     val submitPlan = ToolSpec("submit_plan",
         "Kod değişikliği planını uygulayıcıya teslim eder. Sadece mantıksal değişiklikleri yaz, kod yazma.",
@@ -104,13 +114,37 @@ class ToolRegistry(private val settings: Settings) {
             required = listOf("repo", "branch", "commit_message", "files")))
 
     val specs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
-        createBranch, createPr, searchCode, ciWait, ciErrors, githubApi)
+        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
     val readOnlySpecs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors, githubApi, submitPlan)
 
+    /** Architect: read tools + repository operations (PRs, merges, workflows, API writes), but no direct code edits. */
+    val architectSpecs: List<ToolSpec> = readOnlySpecs + listOf(createBranch, createPr, mergePr, runWorkflow, ciWait)
+
+    companion object {
+        val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
+        private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
+            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan")
+
+        /**
+         * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
+         * read tools plus repository operations, but never direct code edits (those go through the plan and the editor).
+         * Returns an error message, or null when allowed.
+         */
+        fun accessError(name: String, method: String?, readOnly: Boolean, allowOps: Boolean): String? {
+            if (!readOnly) return null
+            if (allowOps && name in OPS_TOOLS) return null
+            if (name !in READ_TOOLS) return if (allowOps) "Mimar kodu doğrudan değiştiremez: kod değişikliklerini submit_plan ile Uygulayıcı'ya ver ($name)."
+                else "Bu modda bu araç kullanılamaz: $name"
+            if (name == "github_api" && (method ?: "GET").uppercase() != "GET") return "Bu modda yalnızca GET istekleri yapılabilir."
+            return null
+        }
+    }
+
     fun needsApproval(call: ToolCall): Boolean = when (call.name) {
-        "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request" -> true
+        "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
+        "github_merge_pull_request", "github_run_workflow" -> true
         "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
         else -> false
     }
@@ -130,7 +164,7 @@ class ToolRegistry(private val settings: Settings) {
 
     fun normalizeRepo(r: String) = r.trim().removePrefix("https://github.com/").trim('/').removeSuffix(".git")
 
-    suspend fun execute(call: ToolCall, readOnly: Boolean = false): String {
+    suspend fun execute(call: ToolCall, readOnly: Boolean = false, allowOps: Boolean = false): String {
         val a = call.args
         fun s(k: String) = a.optString(k).takeIf { a.has(k) && !a.isNull(k) && it.isNotBlank() }
         fun req(k: String) = s(k) ?: throw ToolException("'$k' parametresi gerekli")
@@ -139,10 +173,7 @@ class ToolRegistry(private val settings: Settings) {
             val r = s("repo") ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
             return normalizeRepo(r)
         }
-        if (readOnly && readOnlySpecs.none { it.name == call.name }) throw ToolException("Planlama aşamasında bu araç kullanılamaz: ${call.name}")
-        if (readOnly && call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET") {
-            throw ToolException("Planlama aşamasında yalnızca GET istekleri yapılabilir.")
-        }
+        accessError(call.name, s("method"), readOnly, allowOps)?.let { throw ToolException(it) }
 
         val result = when (call.name) {
             "web_search" -> web.search(req("query"))
@@ -180,11 +211,15 @@ class ToolRegistry(private val settings: Settings) {
             }
             "github_create_branch" -> github.createBranch(repo(), req("branch"), s("from"))
             "github_create_pull_request" -> github.createPullRequest(repo(), req("title"), req("head"), s("base"), s("body"))
+            "github_merge_pull_request" -> github.mergePullRequest(repo(), i("number") ?: throw ToolException("'number' gerekli"),
+                (s("method") ?: "merge").lowercase(), s("commit_title"))
+            "github_run_workflow" -> github.dispatchWorkflow(repo(), req("workflow"), s("ref"),
+                s("inputs_json")?.let { runCatching { JSONObject(it) }.getOrElse { throw ToolException("inputs_json geçerli bir JSON nesnesi değil") } })
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             else -> throw ToolException("Bilinmeyen araç: ${call.name}")
         }
-        if (call.name in setOf("github_apply_diff", "github_write_files") ||
+        if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request") ||
             (call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET")
         ) onRepoChanged()
         return result

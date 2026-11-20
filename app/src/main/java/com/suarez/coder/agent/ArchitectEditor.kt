@@ -28,10 +28,11 @@ class ArchitectEditor(private val agent: Agent) {
         val stable = agent.stableContext("architect", history, ui)
         val plan = agent.agentLoop(
             history, ui, agent.architectRef(), "architect", agent.architectSystem(agent.architectHasMap), "architect",
-            agent.tools.readOnlySpecs, readOnly = true, stopTool = "submit_plan",
+            agent.tools.architectSpecs, readOnly = true, stopTool = "submit_plan",
             maxOut = agent.settings.maxOutArchitect,
             maxReads = if (agent.architectHasMap && stable != null) Agent.MAX_ARCHITECT_READS else null,
             thinking = agent.settings.thinkingArchitect,
+            allowOps = true,
         ) ?: return
 
         val outcome = try {

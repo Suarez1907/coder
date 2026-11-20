@@ -200,6 +200,9 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                Snippets only when essential and at most 5 lines. List every file that must change (action modify/create/delete).
             3. If the request needs no code change (a question, explanation or research), answer directly and do not call submit_plan.
             Branch: use the one the user names; otherwise choose a short new feature branch name.
+            4. Repository operations are yours to do directly (the user confirms each): create branches and pull requests,
+               merge pull requests (github_merge_pull_request), start workflows (github_run_workflow, then ci_wait), and other
+               GitHub API writes. Never tell the user to do these by hand. Only code changes must go through submit_plan.
             """.trimIndent()
         )
         if (settings.terseMode) appendLine("Terse mode: no prose outside submit_plan; write plan steps as short imperative bullets.")
@@ -684,6 +687,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         maxOut: Int? = null,
         maxReads: Int? = null,
         thinking: String? = null,
+        allowOps: Boolean = false,
     ): ToolCall? {
         var consecutiveFailures = 0
         var reads = 0
@@ -715,7 +719,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                     continue
                 }
                 if (call.name in setOf("github_read_file", "github_read_files")) reads += readCount
-                val (result, rejected) = executeTool(call, readOnly, ui)
+                val (result, rejected) = executeTool(call, readOnly, allowOps, ui)
                 history += result
                 ui.update()
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
@@ -741,15 +745,16 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     }
 
     /** Returns the result and whether the user rejected it. */
-    private suspend fun executeTool(call: ToolCall, readOnly: Boolean, ui: AgentUi): Pair<ChatMessage.ToolResult, Boolean> {
+    private suspend fun executeTool(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi): Pair<ChatMessage.ToolResult, Boolean> {
         ui.status(if (call.name == "ci_wait") "GitHub Actions derlemesi bekleniyor" else "Araç çalışıyor: ${call.name}")
         return try {
-            if (!readOnly && tools.needsApproval(call) && !settings.autoApprove &&
+            val denied = ToolRegistry.accessError(call.name, call.args.optString("method").ifBlank { null }, readOnly, allowOps)
+            if (denied == null && tools.needsApproval(call) && !settings.autoApprove &&
                 !ui.confirm("İzin ver: ${call.name}", "Bu işlem GitHub'da değişiklik yapacak.\n\n" + call.args.toString(2).take(20_000))
             ) {
                 ChatMessage.ToolResult(call.id, call.name, "Kullanıcı bu işlemi reddetti. Ne yapmak istediğini kullanıcıya sor.", true) to true
             } else {
-                ChatMessage.ToolResult(call.id, call.name, tools.execute(call, readOnly)) to false
+                ChatMessage.ToolResult(call.id, call.name, tools.execute(call, readOnly, allowOps)) to false
             }
         } catch (e: CancellationException) {
             throw e
@@ -788,7 +793,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         val kind = if (settings.architectMode) "architect" else "agent"
         val stable = snapshots[kind] // only an already built snapshot; no network work for a preview
         val system = if (settings.architectMode) architectSystem(architectHasMap) else agentSystem()
-        val toolSpecs = if (settings.architectMode) tools.readOnlySpecs else tools.specs
+        val toolSpecs = if (settings.architectMode) tools.architectSpecs else tools.specs
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
         val msgs = prefix + HistoryPruner.prepare(history + ChatMessage.User(input), settings.keepTurns).messages
         val client = client(ref)

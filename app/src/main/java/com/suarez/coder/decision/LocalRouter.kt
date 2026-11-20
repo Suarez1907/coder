@@ -18,6 +18,12 @@ object LocalRouter {
         "seviye", "level", "entegre", "entegrasyon", "veritabanı", "database", "migration", "kimlik doğrulama", "authentication",
         "yeni ekran", "ekran ekle", "hata ayıkla", "debug", "çöküyor", "crash", "performans", "optimize", "modül", "feature",
     )
+    /** Repository operations: a cheap model with full tools handles them; no planning needed. */
+    val OPS_WORDS = listOf(
+        "merge", "birleştir", "pull request", "pr aç", "pr oluştur", "release", "sürüm yayınla", "sürümü yayınla",
+        "workflow", "iş akışı", "actions'ı çalıştır", "tag oluştur", "etiket oluştur", "branch oluştur", "dal oluştur",
+    )
+
     private val QUESTION_STARTS = listOf(
         "nedir", "nasıl", "neden", "niçin", "ne işe", "ne yapar", "açıkla", "anlat", "hangi", "kaç",
         "what", "how", "why", "which", "explain", "is there", "does", "can you explain",
@@ -39,14 +45,19 @@ object LocalRouter {
     }
 
     fun classify(message: String, pinnedFiles: Int): Verdict? {
-        val t = message.trim().lowercase()
-        if (t.isEmpty()) return null
+        val raw = message.trim().lowercase()
+        if (raw.isEmpty()) return null
+        // Branch names and paths (feat/levels, src/level/A.kt) are names, not intent: leave them out of keyword matching.
+        val t = raw.replace(Regex("\\S*[/\\\\]\\S*"), " ").replace(Regex("\\s+"), " ").trim()
         val complex = COMPLEX_WORDS.firstOrNull { t.contains(it) }
         val simple = SIMPLE_WORDS.firstOrNull { t.contains(it) }
         val change = hasChangeVerb(t)
         val question = t.endsWith("?") || QUESTION_STARTS.any { t.startsWith(it) || t.contains(" $it ") }
 
         if (complex != null && t.length >= 25) return Verdict(Route.COMPLEX_ARCHITECT, "karmaşık iş: \"$complex\"")
+        OPS_WORDS.firstOrNull { t.contains(it) }?.let { op ->
+            if (!(question && !change)) return Verdict(Route.SIMPLE_EDIT, "GitHub işlemi: \"$op\"")
+        }
         if (pinnedFiles == 1 && complex == null && !(question && !change)) return Verdict(Route.SIMPLE_EDIT, "tek dosya seçili")
         if (t.length < SHORT_MESSAGE_CHARS && simple != null && complex == null && !(question && !change)) {
             return Verdict(Route.SIMPLE_EDIT, "kısa UI/metin isteği: \"$simple\"")

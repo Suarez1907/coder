@@ -198,6 +198,22 @@ class GitHub(private val token: () -> String) {
         return "PR #${pr.getInt("number")} açıldı: ${pr.getString("html_url")}"
     }
 
+    suspend fun mergePullRequest(repo: String, number: Int, method: String, title: String?): String {
+        val body = JSONObject().put("merge_method", method)
+        title?.let { body.put("commit_title", it) }
+        val o = json("PUT", "/repos/$repo/pulls/$number/merge", body)
+        return "PR #$number birleştirildi (${method}, ${o.optString("sha").take(7)}). https://github.com/$repo/pull/$number"
+    }
+
+    /** Starts a workflow_dispatch run; [workflow] is the file name (e.g. android.yml) or id. */
+    suspend fun dispatchWorkflow(repo: String, workflow: String, ref: String?, inputs: JSONObject?): String {
+        val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
+        val body = JSONObject().put("ref", branch)
+        if (inputs != null && inputs.length() > 0) body.put("inputs", inputs)
+        json("POST", "/repos/$repo/actions/workflows/${enc(workflow)}/dispatches", body)
+        return "Workflow '$workflow' $branch üzerinde başlatıldı. Sonucu görmek için ci_wait(ref=\"$branch\") çağır."
+    }
+
     // ---- GitHub Actions ----
 
     data class Run(val id: Long, val name: String, val status: String, val conclusion: String?, val url: String)
