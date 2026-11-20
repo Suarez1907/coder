@@ -60,11 +60,10 @@ object HistoryPruner {
         }
         mergeContextBlocks(out)
         repairToolPairs(out)
+        normalizeTurns(out, summary != null)
         if (summary != null) {
             val prefix = "[Önceki konuşmanın özeti]\n$summary\n[Özet sonu]\n\n"
-            val firstUser = out.indexOfFirst { it is ChatMessage.User }
-            if (firstUser >= 0) out[firstUser] = ChatMessage.User(prefix + (out[firstUser] as ChatMessage.User).text)
-            else out.add(0, ChatMessage.User(prefix.trim()))
+            out[0] = ChatMessage.User(prefix + (out[0] as ChatMessage.User).text)
         }
         return Prepared(out, old, if (mark >= 0) mark else s + 1, summary)
     }
@@ -109,6 +108,27 @@ object HistoryPruner {
         // Only worth breaking the cached prefix when a substantial part gets compacted.
         val compacted = charSize(tailIdx.filter { it < pos }.map { all[it] })
         return if (compacted >= tailSize / 4) pos else null
+    }
+
+    /**
+     * Gemini requires the conversation to start with a user turn and every function-call turn to follow a user turn or
+     * function responses. After a summary or a checkpoint the kept part can start with (or contain back-to-back) model
+     * turns, so short user turns are inserted where needed. Inserted text is deterministic, keeping the prefix stable.
+     */
+    fun normalizeTurns(list: MutableList<ChatMessage>, hasSummary: Boolean = false) {
+        if (list.isEmpty() || list[0] !is ChatMessage.User) {
+            list.add(0, ChatMessage.User(if (hasSummary) "(Konuşma özetten sonra devam ediyor.)" else "(Önceki konuşmanın devamı.)"))
+        }
+        var i = 1
+        while (i < list.size) {
+            val m = list[i]
+            val prev = list[i - 1]
+            if (m is ChatMessage.Assistant && m.toolCalls.isNotEmpty() && prev is ChatMessage.Assistant) {
+                list.add(i, ChatMessage.User("(devam)"))
+                i++
+            }
+            i++
+        }
     }
 
     /** Context blocks are sent as part of the user message they belong to. */

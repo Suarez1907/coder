@@ -113,3 +113,46 @@ class RepairTest {
         assertEquals("b", (list[3] as ChatMessage.ToolResult).callId)
     }
 }
+
+/** Reproduces the "function call turn comes immediately after a user turn" 400 error seen on the phone. */
+class TurnOrderTest {
+    private fun assertValidForGemini(msgs: List<ChatMessage>) {
+        assertTrue("must start with user: ${msgs.firstOrNull()}", msgs.first() is ChatMessage.User)
+        msgs.forEachIndexed { i, m ->
+            if (m is ChatMessage.Assistant && m.toolCalls.isNotEmpty()) {
+                val prev = msgs[i - 1]
+                assertTrue("function call at $i follows ${prev::class.simpleName}", prev is ChatMessage.User || prev is ChatMessage.ToolResult)
+            }
+        }
+    }
+
+    private fun call(id: String) = ChatMessage.Assistant("", listOf(ToolCall(id, "github_read_files", JSONObject().put("paths", "x"))))
+
+    @Test fun summaryBeforeAFunctionCallStillStartsWithUser() {
+        // Architect hit the step limit mid-loop; a checkpoint + summary landed right before a function-call turn.
+        val history = ArrayList<ChatMessage>()
+        history += ChatMessage.User("oyunu incele")
+        repeat(5) { i -> history += call("a$i"); history += ChatMessage.ToolResult("a$i", "github_read_files", "y".repeat(30_000)) }
+        val idx = history.indexOfFirst { it is ChatMessage.Assistant && (it as ChatMessage.Assistant).toolCalls.first().id == "a3" }
+        history.add(idx, ChatMessage.Summary("özet"))
+        history += ChatMessage.User("devam et")
+        val p = HistoryPruner.prepare(history)
+        assertValidForGemini(p.messages)
+        assertTrue((p.messages.first() as ChatMessage.User).text.startsWith("[Önceki konuşmanın özeti]"))
+        // With the stable context pair in front ([user stable][model ack]) the sequence must stay valid too.
+        assertValidForGemini(listOf(ChatMessage.User("stable"), ChatMessage.Assistant("Tamam")) + p.messages)
+    }
+
+    @Test fun backToBackModelTurnsGetAUserTurnBetween() {
+        val list: MutableList<ChatMessage> = mutableListOf(
+            ChatMessage.User("u"), ChatMessage.Assistant("metin"), call("b"), ChatMessage.ToolResult("b", "t", "ok"),
+        )
+        HistoryPruner.normalizeTurns(list)
+        assertValidForGemini(list)
+    }
+
+    @Test fun normalizationIsDeterministicForCaching() {
+        val h = listOf(call("c"), ChatMessage.ToolResult("c", "t", "ok"), ChatMessage.User("u"))
+        assertEquals(HistoryPruner.prepare(h).messages, HistoryPruner.prepare(h).messages)
+    }
+}
