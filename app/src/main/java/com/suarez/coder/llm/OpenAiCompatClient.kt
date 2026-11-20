@@ -33,7 +33,12 @@ class OpenAiCompatClient(
             .header("Authorization", "Bearer $apiKey")
             .post(body.toString().toRequestBody(Http.JSON))
             .build()
-        val res = Http.execute(req)
+        var res = Http.execute(req)
+        if (res.code == 400 && options.maxOutputTokens != null && errorMessage(res.body).contains("max_tokens", ignoreCase = true)) {
+            // The model's own output limit is lower than the configured one: let the API use its maximum.
+            body.remove("max_tokens")
+            res = Http.execute(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
         if (res.code !in 200..299) throw LlmException("$name hatası (${res.code}): ${errorMessage(res.body)}")
         val json = JSONObject(res.body)
         val u = json.optJSONObject("usage")

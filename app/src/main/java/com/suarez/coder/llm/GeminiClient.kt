@@ -31,6 +31,35 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
 
         private val FLEX_BACKOFF_MS = listOf(10_000L, 30_000L)
 
+        /** Per-request output cap of non-streaming REST calls on gemini-4-carbon/argon. */
+        const val SINGLE_HOP_CAP_SMALL = 32_768
+        const val MAX_HOPS = 40
+
+        /**
+         * Joins long-decode hops into one response: all parts in order (one model turn), usage summed,
+         * finish reason and service tier of the last hop.
+         */
+        fun mergeHops(hops: List<JSONObject>): JSONObject {
+            if (hops.size == 1) return hops[0]
+            val parts = JSONArray()
+            val usage = JSONObject()
+            for (h in hops) {
+                h.optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")?.let { p ->
+                    for (i in 0 until p.length()) parts.put(p.get(i))
+                }
+                h.optJSONObject("usageMetadata")?.let { u ->
+                    u.keys().forEach { k -> if (u.opt(k) is Number) usage.put(k, usage.optLong(k) + u.optLong(k)) }
+                }
+            }
+            val last = hops.last()
+            val lastCand = last.optJSONArray("candidates")?.optJSONObject(0) ?: JSONObject()
+            val cand = JSONObject().put("content", JSONObject().put("role", "model").put("parts", parts))
+                .put("finishReason", lastCand.optString("finishReason"))
+            val out = JSONObject().put("candidates", JSONArray().put(cand)).put("usageMetadata", usage)
+            last.optString("serviceTier").takeIf { it.isNotBlank() }?.let { out.put("serviceTier", it) }
+            return out
+        }
+
         fun isLegacyThinking(model: String) = Regex("gemini-(1|2)\\.").containsMatchIn(model.lowercase())
     }
 
@@ -118,21 +147,52 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
     override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
         checkKey()
         val flex = options.serviceTier == "flex"
-        var res = generate(requestBody(system, history, tools, options, true), flex)
-        if (res.code == 400 && (options.thinkingLevel != null || options.minimalThinking) && errorMessage(res.body).contains("think", ignoreCase = true)) {
-            // This model does not accept our thinking setting: remember and retry without it.
-            noThinkingConfig += model
-            res = generate(requestBody(system, history, tools, options, false), flex)
+        var opts = options
+        var withThinking = true
+        val hops = ArrayList<JSONObject>()
+        var token: String? = null
+        // Long decode: while the model reports CONTINUATION, resend the same request with the latest token and join the hops.
+        while (true) {
+            val body = requestBody(system, history, tools, opts, withThinking)
+            token?.let { body.put("continuationToken", it) }
+            var res = hop(body, flex, opts.hopTimeoutMs)
+            if (hops.isEmpty() && res.code == 400) {
+                val msg = errorMessage(res.body)
+                if ((opts.thinkingLevel != null || opts.minimalThinking) && msg.contains("think", ignoreCase = true)) {
+                    // This model does not accept our thinking setting: remember and retry without it.
+                    noThinkingConfig += model
+                    withThinking = false
+                    res = hop(requestBody(system, history, tools, opts, false), flex, opts.hopTimeoutMs)
+                } else if ((opts.maxOutputTokens ?: 0) > SINGLE_HOP_CAP_SMALL && Regex("max.?output|output.?tokens|continuation", RegexOption.IGNORE_CASE).containsMatchIn(msg)) {
+                    // Some models reject a total above their single-request cap on the first hop: fall back to that cap.
+                    opts = opts.copy(maxOutputTokens = SINGLE_HOP_CAP_SMALL)
+                    res = hop(requestBody(system, history, tools, opts, withThinking), flex, opts.hopTimeoutMs)
+                }
+            }
+            if (opts.cachedContent != null && res.code in setOf(400, 403, 404) &&
+                errorMessage(res.body).contains("cach", ignoreCase = true)
+            ) throw CacheRejectedException(errorMessage(res.body))
+            if (res.code !in 200..299) {
+                val partial = if (hops.isNotEmpty()) " (${hops.size} parça alındıktan sonra)" else ""
+                throw LlmException("Gemini hatası (${res.code})$partial: ${errorMessage(res.body)}")
+            }
+            val json = JSONObject(res.body)
+            hops += json
+            val cand = json.optJSONArray("candidates")?.optJSONObject(0)
+            val next = cand?.optString("continuationToken")?.takeIf { it.isNotBlank() }
+            if (cand?.optString("finishReason") != "CONTINUATION" || next == null || hops.size >= MAX_HOPS) break
+            token = next
+            opts.onHop?.invoke(hops.size + 1)
         }
-        if (options.cachedContent != null && res.code in setOf(400, 403, 404) &&
-            errorMessage(res.body).contains("cach", ignoreCase = true)
-        ) throw CacheRejectedException(errorMessage(res.body))
-        if (res.code !in 200..299) throw LlmException("Gemini hatası (${res.code}): ${errorMessage(res.body)}")
-        val json = JSONObject(res.body)
-        val finish = json.optJSONArray("candidates")?.optJSONObject(0)?.optString("finishReason") ?: ""
-        val tier = json.optString("serviceTier").takeIf { it.isNotBlank() }?.lowercase()
-        return LlmResponse(parse(json), parseUsage(json.optJSONObject("usageMetadata")), truncated = finish == "MAX_TOKENS", serviceTier = tier)
+        val merged = mergeHops(hops)
+        val finish = merged.optJSONArray("candidates")?.optJSONObject(0)?.optString("finishReason") ?: ""
+        val tier = merged.optString("serviceTier").takeIf { it.isNotBlank() }?.lowercase()
+        return LlmResponse(parse(merged), parseUsage(merged.optJSONObject("usageMetadata")),
+            truncated = finish == "MAX_TOKENS" || finish == "CONTINUATION", serviceTier = tier)
     }
+
+    private suspend fun hop(body: JSONObject, flex: Boolean, timeoutMs: Long?): Http.Result =
+        if (timeoutMs == null) generate(body, flex) else kotlinx.coroutines.withTimeout(timeoutMs) { generate(body, flex) }
 
     private fun parseUsage(u: JSONObject?): Usage {
         if (u == null) return Usage()

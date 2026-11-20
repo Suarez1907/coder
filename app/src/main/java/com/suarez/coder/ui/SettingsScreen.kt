@@ -232,7 +232,10 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             OutlinedTextField(outArch, { outArch = it.filter(Char::isDigit) }, label = { Text("Mimar planı için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(outEditor, { outEditor = it.filter(Char::isDigit) }, label = { Text("Uygulayıcı için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(outAgent, { outAgent = it.filter(Char::isDigit) }, label = { Text("Tek model ajan için en fazla çıktı tokenı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Text("Gemini'de düşünme tokenları da bu sınıra dahildir. Yanıt kesilirse bir kez iki katı sınırla yeniden denenir.", style = MaterialTheme.typography.bodySmall)
+            Text("Gemini'de düşünme tokenları da bu sınıra dahildir. Yanıt kesilirse bir kez iki katı sınırla yeniden denenir. " +
+                "En fazla 1.048.576; Gemini 4'te 65.536'nın (Carbon/Argon'da 32.768'in) üzerindeki yanıtlar parça parça (devam ettirme ile) alınır. " +
+                "Yüksek sınır yalnızca gerektiğinde kullanılır ama uzun yanıtlar pahalıdır (ör. Carbon'da 100k çıktı ≈ $1).",
+                style = MaterialTheme.typography.bodySmall)
             Text("Role göre düşünme seviyesi (düşünme tokenları çıktı fiyatından ödenir)", style = MaterialTheme.typography.bodySmall)
             LevelPicker("Mimar", thinkArch) { thinkArch = it }
             LevelPicker("Uygulayıcı", thinkEditor) { thinkEditor = it }

@@ -17,7 +17,8 @@ import kotlin.coroutines.resumeWithException
 object Http {
     val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS)
+        // A non-streaming Gemini hop may take up to 10 minutes (long decode).
+        .readTimeout(11, TimeUnit.MINUTES)
         .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 

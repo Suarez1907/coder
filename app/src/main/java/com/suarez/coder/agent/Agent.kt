@@ -355,18 +355,25 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
         }
 
-        suspend fun timed(o: CallOptions): com.suarez.coder.llm.LlmResponse {
-            val tier = if (o.serviceTier == "flex") " · Flex (yavaş olabilir)" else ""
-            val think = o.thinkingLevel?.let { " · düşünme $it" } ?: if (o.minimalThinking) " · düşünme minimal" else ""
-            ui.status("${ref.model} yanıtı bekleniyor ($role)$think$tier")
-            // Flex may legitimately queue for minutes; standard requests get a clear error instead of hanging.
-            val limitMs = if (o.serviceTier == "flex") 16 * 60_000L else settings.requestTimeoutSec * 1000L
+        suspend fun timed(o0: CallOptions): com.suarez.coder.llm.LlmResponse {
+            val tier = if (o0.serviceTier == "flex") " · Flex (yavaş olabilir)" else ""
+            val think = o0.thinkingLevel?.let { " · düşünme $it" } ?: if (o0.minimalThinking) " · düşünme minimal" else ""
+            val base = "${ref.model} yanıtı bekleniyor ($role)$think$tier"
+            ui.status(base)
+            // Timeout per hop: Flex may queue for minutes; long-decode hops may take up to 10 minutes each.
+            val longOutput = (o0.maxOutputTokens ?: 0) > GeminiClient.SINGLE_HOP_CAP_SMALL
+            val hopMs = when {
+                o0.serviceTier == "flex" -> 16 * 60_000L
+                longOutput -> maxOf(settings.requestTimeoutSec * 1000L, 10 * 60_000L)
+                else -> settings.requestTimeoutSec * 1000L
+            }
+            val o = o0.copy(hopTimeoutMs = hopMs, onHop = { n -> ui.status("$base · uzun yanıt, parça $n") })
             return try {
-                kotlinx.coroutines.withTimeout(limitMs) { once(o) }
+                once(o)
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                 throw com.suarez.coder.llm.LlmException(
-                    "${ref.model} ${limitMs / 1000} sn içinde yanıt vermedi. Düşünme seviyesini düşürmeyi, başka model seçmeyi " +
-                        "veya Ayarlar > Bağlantıyı test et'i deneyin."
+                    "${ref.model} ${hopMs / 1000} sn içinde yanıt vermedi. Düşünme seviyesini düşürmeyi, başka model seçmeyi, " +
+                        "Ayarlar'da zaman aşımını artırmayı veya Bağlantıyı test et'i deneyin."
                 )
             } finally {
                 ui.status(null)
@@ -377,7 +384,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         record(resp, opts)
         if (resp.truncated && maxOut != null && maxOut >= 64) {
             // A cut-off answer is useless (and a cut-off diff is dangerous): retry once with a larger cap.
-            val bigger = maxOut * 2
+            val bigger = minOf(maxOut * 2, Settings.MAX_OUTPUT)
             history += ChatMessage.Notice("✂️ ${roleLabel(role)} yanıtı çıktı sınırına ($maxOut token) takıldı; $bigger ile bir kez yeniden deneniyor.")
             ui.update()
             val o2 = opts.copy(maxOutputTokens = bigger)

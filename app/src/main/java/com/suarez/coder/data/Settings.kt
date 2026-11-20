@@ -68,6 +68,11 @@ class Settings(context: Context) {
         get() = prefs.getInt("max_steps", 40)
         set(v) = prefs.edit().putInt("max_steps", v.coerceIn(1, 200)).apply()
 
+    companion object {
+        /** Gemini 4 long decode allows up to the 1M-token context window. */
+        const val MAX_OUTPUT = 1_048_576
+    }
+
     val currentModel: String
         get() = if (provider == Provider.GEMINI) geminiModel else deepseekModel
 
@@ -178,15 +183,15 @@ class Settings(context: Context) {
 
     var maxOutArchitect: Int
         get() = prefs.getInt("max_out_architect", 1500)
-        set(v) = prefs.edit().putInt("max_out_architect", v.coerceIn(256, 65_536)).apply()
+        set(v) = prefs.edit().putInt("max_out_architect", v.coerceIn(256, MAX_OUTPUT)).apply()
 
     var maxOutEditor: Int
         get() = prefs.getInt("max_out_editor", 4096)
-        set(v) = prefs.edit().putInt("max_out_editor", v.coerceIn(256, 65_536)).apply()
+        set(v) = prefs.edit().putInt("max_out_editor", v.coerceIn(256, MAX_OUTPUT)).apply()
 
     var maxOutAgent: Int
         get() = prefs.getInt("max_out_agent", 4096)
-        set(v) = prefs.edit().putInt("max_out_agent", v.coerceIn(256, 65_536)).apply()
+        set(v) = prefs.edit().putInt("max_out_agent", v.coerceIn(256, MAX_OUTPUT)).apply()
 
     // ---- Cache threshold, repo map ----
 

@@ -72,6 +72,10 @@ data class CallOptions(
     val minimalThinking: Boolean = false,
     /** Gemini service tier, e.g. "flex" (50% cheaper, slower, best-effort capacity). */
     val serviceTier: String? = null,
+    /** Timeout for one request/continuation hop; null = client default. */
+    val hopTimeoutMs: Long? = null,
+    /** Called when a long answer continues in another hop (Gemini long decode), with the hop number. */
+    val onHop: ((Int) -> Unit)? = null,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
     val cachedContent: String? = null,
 )
