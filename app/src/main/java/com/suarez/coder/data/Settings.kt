@@ -174,6 +174,16 @@ class Settings(context: Context) {
         get() = prefs.getInt("request_timeout_sec", 180)
         set(v) = prefs.edit().putInt("request_timeout_sec", v.coerceIn(30, 900)).apply()
 
+    /** Architect first tries to plan in one call (map + context, no read tools). */
+    var architectSingleShot: Boolean
+        get() = bool("architect_single_shot", true)
+        set(v) = putBool("architect_single_shot", v)
+
+    /** "provider/model" used as architect for requests Decision 1 rates below medium difficulty; blank = off. */
+    var architectModelMedium: String
+        get() = str("architect_model_medium", "gemini/gemini-3.8-flash")
+        set(v) = put("architect_model_medium", v.trim())
+
     // ---- Output limits ----
 
     /** "Sadece Diff (Açıklamasız Mod)" */

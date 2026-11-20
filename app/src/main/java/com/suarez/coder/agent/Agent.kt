@@ -73,6 +73,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         const val MAX_CONSECUTIVE_FAILURES = 3
         const val SUMMARIZE_AFTER_CHARS = 24_000
         const val MAX_ARCHITECT_READS = 3
+        /** Decision 1 difficulty (0 trivial … 3 very hard) below which the medium architect is used. */
+        const val MEDIUM_COMPLEXITY = 1.5
         const val SNAPSHOT_MAX_COMMITS = 6
         const val STABLE_ACK = "Tamam, proje bağlamını aldım."
 
@@ -109,7 +111,12 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     // ---- Models ----
 
     fun singleRef(p: Provider = settings.provider) = ModelRef(p, if (p == Provider.GEMINI) settings.geminiModel else settings.deepseekModel)
-    fun architectRef() = ModelRef.parse(settings.architectModel) ?: singleRef()
+    /** Per-request override chosen from Decision 1's difficulty score (cleared after each run). */
+    private var architectOverride: ModelRef? = null
+    private var architectThinkingOverride: String? = null
+
+    fun architectRef() = architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
+    fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
     fun editorRef() = ModelRef.parse(settings.editorModel) ?: singleRef()
     fun mainRef() = if (settings.architectMode) architectRef() else singleRef()
 
@@ -189,7 +196,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         if (settings.projectNotes) appendLine(notesRule)
     }
 
-    fun architectSystem(hasMap: Boolean) = buildString {
+    fun architectSystem(hasMap: Boolean, singleShot: Boolean = false) = buildString {
         append(header()).append('\n')
         appendLine(
             """
@@ -206,6 +213,13 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             """.trimIndent()
         )
         if (settings.terseMode) appendLine("Terse mode: no prose outside submit_plan; write plan steps as short imperative bullets.")
+        if (singleShot) {
+            appendLine(
+                "SINGLE-SHOT STEP: in this step you have no read or GitHub tools. If the repo map and the project context are " +
+                    "enough, call submit_plan now. If you need file contents, repository operations or anything else, call " +
+                    "need_more_info (with up to $MAX_ARCHITECT_READS file paths, which will be provided). If no code change is needed, answer directly."
+            )
+        }
         if (hasMap) {
             appendLine(
                 "Aim for a plan that touches 1-3 files. Use the REPO MAP in the project context first (paths, types, signatures; " +
@@ -417,6 +431,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     /** [override] forces a route for this request (e.g. the user re-runs it in Architect mode). */
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, override: Route? = null) {
         flexDisabledForRun = false
+        architectOverride = null
+        architectThinkingOverride = null
         val start = history.size
         try {
             val requestIndex = history.indexOfLast { it is ChatMessage.User }
@@ -443,6 +459,14 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                         if (d.fallbackReason == null) {
                             history += ChatMessage.UsageRecord(settings.decisionModel, "decision", Usage(input = d.inputTokens))
                             route = d.route
+                            // Moderate work does not need the most expensive architect or deep thinking.
+                            val medium = ModelRef.parse(settings.architectModelMedium)
+                            if (d.route == Route.COMPLEX_ARCHITECT && d.complexity != null && d.complexity < MEDIUM_COMPLEXITY &&
+                                medium != null && medium.key != (ModelRef.parse(settings.architectModel)?.key)
+                            ) {
+                                architectOverride = medium
+                                architectThinkingOverride = "low"
+                            }
                             if (d.selected.isNotEmpty() && d.repo != null) {
                                 autoPaths = d.selected.map { it.path }
                                 auto = context.loadAuto(d.repo, d.ref, autoPaths)
@@ -467,7 +491,18 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 ui.update()
             }
             // Request-specific files go into the conversation (the volatile end), not the stable prefix.
-            auto?.let { if (requestIndex >= 0) history.add(requestIndex + 1, ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))) }
+            // The (expensive) architect only gets their names: contents go to the (cheap) editor, which reads the planned files anyway.
+            auto?.let {
+                if (requestIndex < 0) return@let
+                val block = if (route == Route.COMPLEX_ARCHITECT || (route == null && settings.architectMode)) {
+                    ChatMessage.ContextBlock(
+                        "Decision 1'e göre bu istekle ilgili dosyalar: ${autoPaths.joinToString(", ")}. Yapıları repo haritasında; " +
+                            "içerikleri plan sonrası Uygulayıcı'ya verilir. Plan için gerçekten gerekirse oku.",
+                        autoPaths.joinToString(", ") + " (yalnızca adlar)",
+                    )
+                } else ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))
+                history.add(requestIndex + 1, block)
+            }
             val questionSpecs = tools.readOnlySpecs.filter { it.name != "submit_plan" }
             when (route) {
                 Route.COMPLEX_ARCHITECT -> ArchitectEditor(this).run(history, ui)
@@ -484,6 +519,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             }
         } finally {
             usageSummary(history, start)?.let { history += it }
+            architectOverride = null
+            architectThinkingOverride = null
             ui.update()
         }
     }
@@ -586,7 +623,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             Route.COMPLEX_ARCHITECT ->
                 if (d.upgraded && d.rawRoute == Route.SIMPLE_EDIT) "Mimar Modu (basit düzenleme ${pct(d.confidence)} < %75, yükseltildi)"
                 else if (d.upgraded) "Mimar Modu (karar okunamadı, güvenli seçim)"
-                else "Mimar Modu (${architectRef().model} + ${editorRef().model}, ${pct(d.confidence)} güven)"
+                else "Mimar Modu (${architectRef().model} + ${editorRef().model}, ${pct(d.confidence)} güven" +
+                    (d.complexity?.let { c -> ", zorluk ${"%.1f".format(c)}/3" } ?: "") + ")"
         }
         val files = when {
             d.manualFiles -> "📎 manuel dosyalar korundu"
@@ -603,6 +641,11 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 append("\nBağlama eklenen dosyalar (evet olasılığı):\n")
                 d.selected.forEach { append("  ${it.path}: ${pct(it.yes)}\n") }
             } else if (!d.manualFiles && d.totalFiles > 0) append("\nEşik (%60) üzerinde dosya yok; otomatik bağlam eklenmedi.\n")
+            d.complexity?.let { c ->
+                append("\nZorluk: ${"%.1f".format(c)} / 3")
+                if (architectOverride != null) append(" → orta Mimar: ${architectOverride!!.model}, düşünme low")
+                append('\n')
+            }
             append("\nKarar çağrısı: ${d.inputTokens} giriş token, 0 çıkış token.")
         }
         return ChatMessage.RouteInfo(text, detail, d.route.name, d.route != Route.COMPLEX_ARCHITECT)
@@ -638,7 +681,17 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         } + "\nOturum toplamı: ${money(sessionCost(history))}" +
             (if (recs.any { estimated(it.model) }) "\n* Tahmini fiyat: bu model fiyat tablosunda yok; Ayarlar > Fiyat düzeltmeleri'nden girin." else "")
         val hitText = hit?.let { " · önbellek %${(it * 100).roundToInt()}" } ?: ""
-        return ChatMessage.Notice("💰 " + parts.joinToString(" · ") + " · Toplam ${money(total)}$hitText", detail)
+        val counters = HashMap<String, Int>()
+        val steps = recs.filter { it.role in setOf("architect", "agent", "editor", "escalation") }.joinToString("\n") { r ->
+            val n = counters.merge(r.role, 1, Int::plus)
+            val u = r.usage
+            val cachePct = if (u.input > 0) (u.cached * 100 / u.input) else 0
+            "  ${roleLabel(r.role)} adım $n (${r.model}): ${Pricing.formatTokens(u.input)} giriş (önbellek %$cachePct) → " +
+                "${Pricing.formatTokens(u.output)} çıkış + ${Pricing.formatTokens(u.thoughts)} düşünme · ${Pricing.formatUsd(costOf(r))}" +
+                if (r.label == "flex") " (Flex)" else ""
+        }
+        val detailWithSteps = if (steps.isBlank()) detail else "Adım adım:\n$steps\n\n$detail"
+        return ChatMessage.Notice("💰 " + parts.joinToString(" · ") + " · Toplam ${money(total)}$hitText", detailWithSteps)
     }
 
     /** Folds compacted old turns into a short summary once they get large (only right after a checkpoint). */

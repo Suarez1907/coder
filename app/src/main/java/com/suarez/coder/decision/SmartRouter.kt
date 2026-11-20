@@ -32,6 +32,8 @@ data class RoutingDecision(
     val repo: String? = null,
     val ref: String? = null,
     val routeProbabilities: Map<String, Double> = emptyMap(),
+    /** Expected difficulty level 0 (trivial) … 3 (very hard), from the same Decision call. */
+    val complexity: Double? = null,
 )
 
 /** Pure decision rules (unit-tested). */
@@ -44,6 +46,18 @@ object RouterLogic {
     const val PREVIEW_CHARS = 400
 
     const val ROUTE_KEY = "route"
+    const val COMPLEXITY_KEY = "complexity"
+
+    fun complexityQuestion() = DecisionQuestion(
+        COMPLEXITY_KEY, "score",
+        "How difficult is this coding request for an experienced software engineer working in this repository?",
+        levels = listOf(
+            "Trivial: a one-line, text or style change.",
+            "Moderate: a focused change in one or two files with clear logic.",
+            "Hard: a feature or fix across several files that needs careful design.",
+            "Very hard: architecture changes, complex algorithms or subtle cross-cutting bugs.",
+        ),
+    )
 
     fun routeQuestion() = DecisionQuestion(
         ROUTE_KEY, "choice",
@@ -112,7 +126,8 @@ object RouterLogic {
             if (yes >= 0.5 && a.confidence > FILE_MIN_CONFIDENCE) FileScore(f.path, yes, a.confidence) else null
         }.sortedByDescending { it.yes }.take(MAX_SELECTED_FILES)
         return RoutingDecision(route, raw, conf, upgraded, selected, files.size, manualFiles,
-            result.latencyMs, result.inputTokens, null, repo, ref, r?.probabilities ?: emptyMap())
+            result.latencyMs, result.inputTokens, null, repo, ref, r?.probabilities ?: emptyMap(),
+            result.answers[COMPLEXITY_KEY]?.score)
     }
 }
 
@@ -142,7 +157,8 @@ class SmartRouter(
                 prefetchPreviews(repo, ref, ranked.take(PREVIEW_FILES).mapNotNull { byPath[it] })
                 files = ranked.map { p -> FilePreview(p, byPath[p]?.sha?.let { previewCache[it] }) }
             }
-            val questions = listOf(RouterLogic.routeQuestion()) + files.mapIndexed { i, f -> RouterLogic.fileQuestion(i, f) }
+            val questions = listOf(RouterLogic.routeQuestion(), RouterLogic.complexityQuestion()) +
+                files.mapIndexed { i, f -> RouterLogic.fileQuestion(i, f) }
             val input = RouterLogic.buildInput(request, recent, repo, files.map { it.path })
             RouterLogic.interpret(decide(input, questions), files, manualFiles, repo, ref)
         } catch (e: TimeoutCancellationException) {

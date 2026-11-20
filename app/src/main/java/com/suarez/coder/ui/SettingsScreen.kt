@@ -86,6 +86,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var escalation by remember { mutableStateOf(s.escalationModel) }
     var economy by remember { mutableStateOf(s.economyMode) }
     var timeoutSec by remember { mutableStateOf(s.requestTimeoutSec.toString()) }
+    var singleShot by remember { mutableStateOf(s.architectSingleShot) }
+    var archMedium by remember { mutableStateOf(s.architectModelMedium) }
     var pingResult by remember { mutableStateOf("") }
     var decisionTimeout by remember { mutableStateOf((s.decisionTimeoutMs / 1000.0).toString()) }
 
@@ -123,6 +125,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         s.escalationModel = escalation
         s.economyMode = economy
         s.requestTimeoutSec = timeoutSec.toIntOrNull() ?: 180
+        s.architectSingleShot = singleShot
+        s.architectModelMedium = archMedium
         s.decisionTimeoutMs = ((decisionTimeout.replace(',', '.').toDoubleOrNull() ?: 2.0) * 1000).toLong()
     }
 
@@ -245,6 +249,10 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 placeholder = { Text("gemini/gemini-3.8-flash") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             ToggleRow("Ekonomi modu (Flex, %50)", "Gemini istekleri Flex kademesinden gider: yarı fiyat, ama yanıtlar dakikalar sürebilir ve kapasite dolabilir.", economy) { economy = it }
             ToggleRow("Proje notları (.coder/NOTES.md)", "Repodaki kalıcı proje notları sabit bağlama eklenir; ajan önemli değişikliklerde günceller.", notes) { notes = it }
+            ToggleRow("Mimar tek seferde planlasın", "Mimar önce araçsız tek çağrıda plan yapar; yalnızca bilgi yetmezse dosya okuma adımlarına geçer.", singleShot) { singleShot = it }
+            OutlinedTextField(archMedium, { archMedium = it }, label = { Text("Orta zorlukta Mimar modeli (boş = kapalı)") },
+                placeholder = { Text("gemini/gemini-3.8-flash") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("Decision 1 işin zorluğunu 0-3 arası puanlar; 1.5'in altındaysa bu model ve düşük düşünme kullanılır.", style = MaterialTheme.typography.bodySmall)
             ToggleRow("Mimar için Repo Haritası kullan", "Mimar'a ham kod yerine dosya yolları, sınıflar ve fonksiyon imzalarından oluşan hafif bir harita gönderilir.", repoMap) { repoMap = it }
 
             HorizontalDivider()

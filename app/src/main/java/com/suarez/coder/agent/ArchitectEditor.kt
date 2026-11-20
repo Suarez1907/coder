@@ -87,15 +87,24 @@ class ArchitectEditor(private val agent: Agent) {
         val stable = agent.stableContext("architect", history, ui)
         var plan: ToolCall? = null
         var parsed: ParsedPlan? = null
+        var pending: ToolCall? = null
+        if (agent.settings.architectSingleShot) {
+            when (val shot = singleShot(history, ui, stable)) {
+                is Shot.Answered -> return
+                is Shot.Plan -> pending = shot.call
+                is Shot.NeedMore -> Unit
+            }
+        }
         for (attempt in 0..PLAN_FIX_ATTEMPTS) {
-            val call = agent.agentLoop(
+            val call = pending ?: agent.agentLoop(
                 history, ui, agent.architectRef(), "architect", agent.architectSystem(agent.architectHasMap), "architect",
                 agent.tools.architectSpecs, readOnly = true, stopTool = "submit_plan",
                 maxOut = agent.settings.maxOutArchitect,
                 maxReads = if (agent.architectHasMap && stable != null) Agent.MAX_ARCHITECT_READS else null,
-                thinking = agent.settings.thinkingArchitect,
+                thinking = agent.architectThinking(),
                 allowOps = true,
             ) ?: return
+            pending = null
             val p = parsePlan(call.args, agent.settings.defaultRepo)
             if (p.error == null) { plan = call; parsed = p; break }
             // Send the problem back so the architect fixes its plan instead of the run failing.
@@ -120,6 +129,45 @@ class ArchitectEditor(private val agent: Agent) {
             model = "coder",
         )
         ui.update()
+    }
+
+    private sealed class Shot {
+        data class Plan(val call: ToolCall) : Shot()
+        object Answered : Shot()
+        object NeedMore : Shot()
+    }
+
+    /**
+     * One call with only submit_plan / need_more_info: most plans need just the map and the context, so the usual
+     * multi-step exploration (each step re-sending the whole context) is skipped. need_more_info opens the full tool loop,
+     * with the requested files already read.
+     */
+    private suspend fun singleShot(history: MutableList<ChatMessage>, ui: AgentUi, stable: String?): Shot {
+        val prepared = com.suarez.coder.context.HistoryPruner.prepare(history, agent.settings.keepTurns)
+        val reply = agent.callModel(
+            history, prepared.messages, agent.architectRef(), "architect",
+            agent.architectSystem(agent.architectHasMap, singleShot = true), agent.tools.singleShotSpecs, ui,
+            maxOut = agent.settings.maxOutArchitect, thinking = agent.architectThinking(), stable = stable,
+        )
+        history += reply
+        ui.update()
+        if (reply.toolCalls.isEmpty()) return Shot.Answered
+        val plan = reply.toolCalls.firstOrNull { it.name == "submit_plan" }
+        val repo = agent.context.repo.takeIf { it.isNotBlank() }?.let { agent.tools.normalizeRepo(it) }
+        for (c in reply.toolCalls) {
+            if (c === plan) continue
+            val paths = Args.stringList(c.args, "paths").orEmpty().take(Agent.MAX_ARCHITECT_READS)
+            val files = if (repo != null && paths.isNotEmpty()) {
+                runCatching { agent.tools.readFilesText(repo, paths, agent.context.ref) }.getOrElse { "(okunamadı: ${it.message})" }
+            } else ""
+            history += ChatMessage.ToolResult(c.id, c.name,
+                "Araçların açıldı (okuma, arama, GitHub işlemleri). İşin bitince submit_plan çağır.\n\n$files")
+        }
+        if (plan == null) {
+            history += ChatMessage.Notice("🔎 Mimar ek bilgi istedi; araçlı adımlara geçiliyor.")
+            ui.update()
+        }
+        return plan?.let { Shot.Plan(it) } ?: Shot.NeedMore
     }
 
     private fun planText(p: ParsedPlan): String = buildString {
@@ -245,7 +293,7 @@ class ArchitectEditor(private val agent: Agent) {
             }
             val reply = agent.callModel(history, convo, step.ref, step.role, agent.editorSystem, emptyList(), ui,
                 useCache = false, maxOut = agent.settings.maxOutEditor,
-                thinking = if (step.role == "architect") agent.settings.thinkingArchitect else agent.settings.thinkingEditor)
+                thinking = if (step.role == "architect") agent.architectThinking() else agent.settings.thinkingEditor)
             convo += reply
             outputs.append(reply.text).append("\n\n")
 

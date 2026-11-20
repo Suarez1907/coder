@@ -106,7 +106,7 @@ class DecisionTest {
         val router = SmartRouter(github, tree) { _, q -> asked = q; DecisionClient.parse(sample, 5) }
         val d = router.route("x", null, "o/r", null, manualFiles = true)
         assertNull(d.fallbackReason)
-        assertEquals(1, asked.size) // only the route question
+        assertEquals(listOf("route", "complexity"), asked.map { it.key }) // no file questions
         assertTrue(d.manualFiles)
         assertTrue(d.selected.isEmpty())
     }

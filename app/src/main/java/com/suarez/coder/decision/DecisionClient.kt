@@ -15,6 +15,8 @@ data class DecisionQuestion(
     val instructions: String,
     /** Option key → description (choice), or optional "true"/"false" descriptions (noul). */
     val criteria: Map<String, String>? = null,
+    /** Ordered rubric levels for "score" questions (level 0 first). */
+    val levels: List<String>? = null,
 )
 
 data class DecisionAnswer(
@@ -22,6 +24,8 @@ data class DecisionAnswer(
     /** Probability of "yes" for noul questions (0.01–0.99). */
     val noul: Double? = null,
     val choice: String? = null,
+    /** Probability-weighted expected level for score questions. */
+    val score: Double? = null,
     val probabilities: Map<String, Double> = emptyMap(),
     /** Probability that the top answer is right (0–1). */
     val confidence: Double,
@@ -53,6 +57,7 @@ class DecisionClient(
                 require(KEY_RE.matches(q.key)) { "Geçersiz soru anahtarı: ${q.key}" }
                 val o = JSONObject().put("type", q.type).put("instructions", q.instructions)
                 q.criteria?.let { c -> o.put("criteria", JSONObject().also { j -> c.forEach { (k, v) -> j.put(k, v) } }) }
+                q.levels?.let { l -> o.put("criteria", org.json.JSONArray(l)) }
                 qs.put(q.key, o)
             }
             return JSONObject().put("model", model).put("input", input).put("questions", qs)
@@ -76,6 +81,7 @@ class DecisionClient(
                     type = a.optString("type"),
                     noul = noul,
                     choice = a.optString("choice").takeIf { a.has("choice") && it.isNotBlank() },
+                    score = if (a.has("score") && !a.isNull("score")) a.getDouble("score") else null,
                     probabilities = probs,
                     confidence = conf,
                 )

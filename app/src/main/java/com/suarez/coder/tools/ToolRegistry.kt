@@ -119,6 +119,15 @@ class ToolRegistry(private val settings: Settings) {
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
     val readOnlySpecs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors, githubApi, submitPlan)
 
+    private val needMoreInfo = ToolSpec("need_more_info",
+        "Plan için harita ve bağlam yetmiyorsa çağır: istediğin dosyalar (en fazla 3) verilir ve okuma/GitHub araçların açılır.",
+        obj("reason" to str("Neden daha fazla bilgi gerekiyor (kısa)"),
+            "paths" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Okunacak dosya yolları (en fazla 3)"),
+            required = listOf("reason")))
+
+    /** Architect's first, single-shot call: plan now, or ask for more. */
+    val singleShotSpecs: List<ToolSpec> = listOf(submitPlan, needMoreInfo)
+
     /** Architect: read tools + repository operations (PRs, merges, workflows, API writes), but no direct code edits. */
     val architectSpecs: List<ToolSpec> = readOnlySpecs + listOf(createBranch, createPr, mergePr, runWorkflow, ciWait)
 
@@ -272,6 +281,8 @@ class ToolRegistry(private val settings: Settings) {
         val stale = paths.filter { isInSnapshot(it) }
         return if (stale.isEmpty()) "" else "\nNot: proje bağlamındaki ${stale.joinToString()} kopyası artık eski; güncel hali bu değişiklikle oluştu."
     }
+
+    suspend fun readFilesText(repo: String, paths: List<String>, ref: String?): String = readMany(repo, paths, ref)
 
     private suspend fun readMany(repo: String, paths: List<String>, ref: String?): String {
         val sb = StringBuilder()
