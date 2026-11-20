@@ -106,14 +106,22 @@ class GitHub(private val token: () -> String) {
         val r = call("GET", "/repos/$repo/contents/${encPath(path)}$q", accept = "application/vnd.github.raw+json")
         if (r.code == 404) return null
         if (r.code !in 200..299) throw ToolException("GitHub -> ${r.code}: ${r.body.take(500)}")
-        if (r.body.trimStart().startsWith("[")) {
-            // It's a directory listing.
-            val arr = JSONArray(r.body)
-            return "(Bu bir klasör)\n" + (0 until arr.length()).joinToString("\n") {
-                val e = arr.getJSONObject(it); "${e.getString("type")}: ${e.getString("path")}"
-            }
-        }
+        directoryListing(r.body)?.let { return it }
         return r.body
+    }
+
+    companion object {
+        /**
+         * A contents request for a folder returns a JSON array of entries. Files may also start with '['
+         * (TOML sections like `[versions]`, JSON arrays), so only a real array of {type, path} objects counts.
+         */
+        fun directoryListing(body: String): String? {
+            if (!body.trimStart().startsWith("[")) return null
+            val arr = runCatching { JSONArray(body) }.getOrNull() ?: return null
+            val entries = (0 until arr.length()).map { arr.opt(it) }
+            if (entries.isEmpty() || entries.any { it !is JSONObject || !it.has("type") || !it.has("path") }) return null
+            return "(Bu bir klasör)\n" + entries.joinToString("\n") { e -> (e as JSONObject).let { "${it.getString("type")}: ${it.getString("path")}" } }
+        }
     }
 
     /**
