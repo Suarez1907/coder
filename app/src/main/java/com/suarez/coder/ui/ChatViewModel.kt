@@ -35,7 +35,7 @@ class PendingConfirm(
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val settings = Settings(app)
-    val agent = Agent(settings)
+    val agent = Agent(settings, app.filesDir)
     private val chatFile = File(app.filesDir, "chat.json")
 
     val messages = mutableStateListOf<ChatMessage>()

@@ -34,9 +34,10 @@ interface AgentUi {
 
 class StopException(message: String) : Exception(message)
 
-class Agent(val settings: Settings) {
+class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     val tools = ToolRegistry(settings)
     val context = ContextProvider(settings, tools.github)
+    val repoMaps = com.suarez.coder.repomap.RepoMapService(tools.github, filesDir)
     private val cache = GeminiCacheManager(settings)
     private var budgetApprovedUpTo = 0.0
     private val router = SmartRouter(
@@ -476,7 +477,8 @@ class Agent(val settings: Settings) {
     suspend fun preview(history: List<ChatMessage>, input: String): Preview {
         val ref = mainRef()
         val ctx = context.load()?.text
-        val system = if (settings.architectMode) architectSystem(ctx) else agentSystem(ctx)
+        val map = if (settings.repoMapForArchitect) context.repo.takeIf { it.isNotBlank() }?.let { repoMaps.peek(tools.normalizeRepo(it)) } else null
+        val system = if (settings.architectMode) architectSystem(ctx, map) else agentSystem(ctx)
         val toolSpecs = if (settings.architectMode) tools.readOnlySpecs else tools.specs
         val msgs = HistoryPruner.prepare(history + ChatMessage.User(input), settings.keepTurns).messages
         val client = client(ref)

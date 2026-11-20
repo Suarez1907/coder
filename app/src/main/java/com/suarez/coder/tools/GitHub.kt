@@ -15,6 +15,25 @@ class GitHub(private val token: () -> String) {
 
     data class FileChange(val path: String, val content: String?, val delete: Boolean)
 
+    /** Builds an authenticated request (for streaming downloads). */
+    fun request(method: String, path: String, accept: String = "application/vnd.github+json"): Request {
+        val t = token()
+        if (t.isBlank()) throw ToolException("GitHub token girilmemiş.")
+        val url = if (path.startsWith("http")) path else api + (if (path.startsWith("/")) path else "/$path")
+        return Request.Builder().url(url)
+            .header("Authorization", "Bearer $t").header("Accept", accept)
+            .header("X-GitHub-Api-Version", "2022-11-28").header("User-Agent", "Coder-Android")
+            .method(method, null).build()
+    }
+
+    /** Commit sha of a branch/tag (default branch when [ref] is null). */
+    suspend fun headSha(repo: String, ref: String?): String {
+        val r = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
+        val res = call("GET", "/repos/$repo/commits/${enc(r)}", accept = "application/vnd.github.sha")
+        if (res.code !in 200..299) throw ToolException("Commit bulunamadı ($r): HTTP ${res.code}")
+        return res.body.trim()
+    }
+
     private suspend fun call(method: String, path: String, body: Any? = null, accept: String = "application/vnd.github+json"): Http.Result {
         val t = token()
         if (t.isBlank()) throw ToolException("GitHub token girilmemiş. Kullanıcıdan Ayarlar'a GitHub token eklemesini iste.")

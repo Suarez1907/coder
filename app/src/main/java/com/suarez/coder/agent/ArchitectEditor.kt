@@ -41,8 +41,30 @@ class ArchitectEditor(private val agent: Agent) {
         ui.update()
     }
 
-    /** Placeholder until the repo map step; returns null (no map). */
-    private suspend fun repoMap(history: MutableList<ChatMessage>, ui: AgentUi): String? = null
+    /** Repo map for the architect, or null when disabled/unavailable (the architect then reads files with tools). */
+    private suspend fun repoMap(history: MutableList<ChatMessage>, ui: AgentUi): String? {
+        if (!agent.settings.repoMapForArchitect) return null
+        val repo = agent.context.repo.takeIf { it.isNotBlank() }?.let { agent.tools.normalizeRepo(it) } ?: return null
+        return try {
+            val r = kotlinx.coroutines.withTimeout(45_000) { agent.repoMaps.get(repo, agent.context.ref) }
+            val tokens = r.map.length / 4
+            history += ChatMessage.Notice(
+                "🗺 Repo haritası: ${r.files} dosya, ~${com.suarez.coder.cost.Pricing.formatTokens(tokens.toLong())} token" +
+                    (if (r.fromCache) " (önbellekten, ${r.sha.take(7)})" else " (oluşturuldu, ${r.sha.take(7)})"),
+                r.map.take(20_000),
+            )
+            ui.update()
+            r.map
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            if (e is kotlinx.coroutines.TimeoutCancellationException) {
+                history += ChatMessage.Notice("Repo haritası zamanında hazırlanamadı; Mimar dosyaları araçlarla okuyacak.")
+                null
+            } else throw e
+        } catch (e: Exception) {
+            history += ChatMessage.Notice("Repo haritası oluşturulamadı (${e.message?.take(100)}); Mimar dosyaları araçlarla okuyacak.")
+            null
+        }
+    }
 
     private fun planText(planArgs: org.json.JSONObject, files: List<PlanFile>): String = buildString {
         append("Commit: ").append(planArgs.optString("commit_message")).append('\n')
