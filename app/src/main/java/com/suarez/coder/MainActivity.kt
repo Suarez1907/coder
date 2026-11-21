@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Edge-to-edge: system bars blend with the CoderTheme canvas.
         enableEdgeToEdge()
         handleInstallIntent(intent)
         setContent {
