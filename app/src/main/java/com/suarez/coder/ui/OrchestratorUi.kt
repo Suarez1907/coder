@@ -2,12 +2,15 @@ package com.suarez.coder.ui
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -29,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -45,27 +49,37 @@ fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
     var editing by remember { mutableStateOf(false) }
     var expanded by remember(plan.id) { mutableStateOf(!plan.state.finished) }
     val accent = when (plan.state) {
-        PlanState.RUNNING -> coder.architect
-        PlanState.DONE -> coder.cacheGood
-        PlanState.FAILED, PlanState.CANCELLED -> coder.warn
-        else -> coder.cost
+        PlanState.RUNNING, PlanState.DONE -> coder.editor
+        PlanState.FAILED, PlanState.CANCELLED, PlanState.PAUSED -> coder.warn
+        else -> coder.architect
     }
+    val done = plan.tasks.count { it.status == TaskStatus.DONE }
+    val fraction = if (plan.tasks.isEmpty()) 0f else done.toFloat() / plan.tasks.size
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.6f)),
+        shape = RoundedCornerShape(16.dp),
+        color = coder.codeBg,
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.7f)),
         modifier = Modifier.fillMaxWidth().animateContentSize(),
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
                 Text("🗂 ", style = MaterialTheme.typography.titleSmall)
-                Column(Modifier.weight(1f)) {
-                    Text("Orkestratör · ${plan.mode.label}", style = MaterialTheme.typography.titleSmall)
-                    Text("${plan.repo}@${plan.branch} · ${plan.tasks.count { it.status == TaskStatus.DONE }}/${plan.tasks.size} · ${plan.state.label}",
-                        style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Orkestratör", style = MaterialTheme.typography.titleSmall)
+                        Pill(plan.mode.label, coder.architect)
+                        Pill(plan.state.label, accent)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Pill("${plan.repo} · ${plan.branch}", coder.muted)
+                        Pill("$done/${plan.tasks.size}", accent)
+                    }
                 }
-                Text(Pricing.formatUsd(plan.totalCost), style = Mono.small, color = coder.cost)
+                Pill(Pricing.formatUsd(plan.totalCost), coder.cost)
                 Text(if (expanded) " ▴" else " ▾", color = coder.muted)
+            }
+            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(coder.border)) {
+                Box(Modifier.fillMaxWidth(fraction).height(6.dp).clip(RoundedCornerShape(3.dp)).background(accent))
             }
             plan.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (plan.state == PlanState.PAUSED) coder.cost else coder.muted) }
             if (expanded) {
@@ -105,6 +119,19 @@ fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
     if (editing) PlanEditor(plan, onSave = { vm.editPlan(it); editing = false }, onDismiss = { editing = false })
 }
 
+/** Compact rounded status/tag chip used in the mission-control header and task rows. */
+@Composable
+private fun Pill(text: String, color: Color) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = color.copy(alpha = 0.14f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.4f)),
+    ) {
+        Text(text, style = Mono.tiny, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+    }
+}
+
 @Composable
 private fun TaskRow(t: SubTask) {
     val color = when (t.status) {
@@ -113,19 +140,31 @@ private fun TaskRow(t: SubTask) {
         TaskStatus.FAILED -> coder.warn
         else -> coder.muted
     }
-    Row(verticalAlignment = Alignment.Top) {
-        Text(t.status.icon, color = color, style = Mono.body, modifier = Modifier.width(22.dp))
-        Column(Modifier.weight(1f)) {
-            Text((if (t.fix) "🔧 " else "") + "${t.id} · ${t.title}", style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(listOfNotNull(
-                t.ownedFiles.joinToString { it.substringAfterLast('/') },
-                t.dependsOn.takeIf { it.isNotEmpty() }?.let { "← ${it.joinToString()}" },
-                if (t.requiresCi) "CI" else null,
-                t.costUsd.takeIf { it > 0 }?.let { Pricing.formatUsd(it) },
-                t.status.label,
-            ).joinToString(" · "), style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            t.error?.takeIf { t.status == TaskStatus.FAILED || t.status == TaskStatus.PENDING }?.let {
-                Text(it.lines().first().take(160), style = Mono.tiny, color = coder.warn, maxLines = 2)
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
+            Text(t.status.icon, color = color, style = Mono.body, modifier = Modifier.width(22.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text((if (t.fix) "🔧 " else "") + "${t.id} · ${t.title}",
+                    style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (t.ownedFiles.isNotEmpty() || t.dependsOn.isNotEmpty() || t.requiresCi) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        t.ownedFiles.take(3).forEach { f -> Pill(f.substringAfterLast('/'), coder.architect) }
+                        t.dependsOn.takeIf { it.isNotEmpty() }?.let { Pill("← ${it.joinToString()}", coder.muted) }
+                        if (t.requiresCi) Pill("CI", coder.cost)
+                    }
+                }
+                Text(listOfNotNull(
+                    Pricing.formatUsd(t.costUsd).takeIf { t.costUsd > 0 },
+                    t.status.label,
+                ).joinToString(" · "), style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                t.error?.takeIf { t.status == TaskStatus.FAILED || t.status == TaskStatus.PENDING }?.let {
+                    Text(it.lines().first().take(160), style = Mono.tiny, color = coder.warn, maxLines = 2)
+                }
             }
         }
     }
