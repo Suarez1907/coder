@@ -2,6 +2,7 @@ package com.suarez.coder.agent
 
 import com.suarez.coder.context.ContextProvider
 import com.suarez.coder.context.HistoryPruner
+import com.suarez.coder.cost.Price
 import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
@@ -17,6 +18,8 @@ import com.suarez.coder.llm.GeminiClient
 import com.suarez.coder.llm.LlmClient
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.OpenAiCompatClient
+import com.suarez.coder.llm.OpenRouterCatalog
+import com.suarez.coder.llm.OpenRouterModel
 import com.suarez.coder.llm.ToolCall
 import com.suarez.coder.llm.ToolSpec
 import com.suarez.coder.llm.Usage
@@ -110,7 +113,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     // ---- Models ----
 
-    fun singleRef(p: Provider = settings.provider) = ModelRef(p, if (p == Provider.GEMINI) settings.geminiModel else settings.deepseekModel)
+    fun singleRef(p: Provider = settings.provider) = ModelRef(p, settings.modelFor(p))
     /** Per-request override chosen from Decision 1's difficulty score (cleared after each run). */
     private var architectOverride: ModelRef? = null
     private var architectThinkingOverride: String? = null
@@ -123,12 +126,38 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     fun client(ref: ModelRef): LlmClient = when (ref.provider) {
         Provider.GEMINI -> GeminiClient(settings.geminiKey, ref.model)
         Provider.DEEPSEEK -> OpenAiCompatClient("DeepSeek", settings.deepseekBaseUrl, settings.deepseekKey, ref.model)
+        Provider.OPENROUTER -> OpenAiCompatClient("OpenRouter", OpenRouterCatalog.BASE_URL, settings.openrouterKey, ref.model,
+            vision = openRouterModels()[ref.model]?.vision == true,
+            cacheControl = OpenRouterCatalog.needsCacheControl(ref.model),
+            extraHeaders = mapOf("X-Title" to "Coder"))
+    }
+
+    private var orMetaRaw: String? = null
+    private var orMeta: Map<String, OpenRouterModel> = emptyMap()
+
+    /** Prices and capabilities from the last OpenRouter model-list fetch (parsed once per change). */
+    fun openRouterModels(): Map<String, OpenRouterModel> {
+        val raw = settings.openrouterMeta
+        if (raw != orMetaRaw) { orMeta = OpenRouterCatalog.fromMeta(raw); orMetaRaw = raw }
+        return orMeta
+    }
+
+    /** True when [ref] can read screenshots. */
+    fun supportsVision(ref: ModelRef) = when (ref.provider) {
+        Provider.GEMINI -> true
+        Provider.DEEPSEEK -> false
+        Provider.OPENROUTER -> openRouterModels()[ref.model]?.vision == true
     }
 
     // ---- Cost ----
 
     private fun overrides() = Pricing.parseOverrides(settings.priceOverrides)
-    fun price(model: String) = Pricing.priceFor(model, overrides())
+    fun price(model: String): Price {
+        val o = overrides()
+        val m = model.lowercase()
+        if (o.keys.none { m.contains(it) }) openRouterModels()[model]?.let { return it.price }
+        return Pricing.priceFor(model, o)
+    }
     fun costOf(r: ChatMessage.UsageRecord) = Pricing.cost(r.usage, price(r.model)) * r.discount + r.extraCostUsd
 
     /** Share of input tokens served from cache (implicit or explicit) across [records]. */
@@ -558,7 +587,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         val candidates = (settings.modelCatalog + listOf("gemini/gemini-3.8-flash", "gemini/gemini-2.5-flash"))
             .distinct().mapNotNull { ModelRef.parse(it) }
             .filter { !skip.containsMatchIn(it.model) }
-            .filter { (it.provider == Provider.GEMINI && settings.geminiKey.isNotBlank()) || (it.provider == Provider.DEEPSEEK && settings.deepseekKey.isNotBlank()) }
+            .filter { settings.keyFor(it.provider).isNotBlank() }
             .filter { it.key != editorRef().key && it.key != architectRef().key }
             .filter { Pricing.blended(price(it.model)) in (lo * 1.2)..(hi * 0.8) }
         val catalog = settings.modelCatalog.toSet()
@@ -571,7 +600,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         ModelRef.parse(settings.routerModel)?.let { return it }
         val candidates = (settings.modelCatalog + listOf("gemini/gemini-2.5-flash-lite", "gemini/gemini-3.1-flash-lite", "deepseek/deepseek-chat"))
             .distinct().mapNotNull { ModelRef.parse(it) }
-            .filter { (it.provider == Provider.GEMINI && settings.geminiKey.isNotBlank()) || (it.provider == Provider.DEEPSEEK && settings.deepseekKey.isNotBlank()) }
+            .filter { settings.keyFor(it.provider).isNotBlank() }
             .filter { Pricing.canNearlyDisableThinking(it.model) }
         val catalog = settings.modelCatalog.toSet()
         // Prefer models the account actually listed; fall back to the built-in candidates.
@@ -656,7 +685,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         val recs = history.drop(from).filterIsInstance<ChatMessage.UsageRecord>()
         if (recs.isEmpty()) return null
         val overrides = Pricing.parseOverrides(settings.priceOverrides)
-        fun estimated(model: String) = !Pricing.isKnown(model) && overrides.keys.none { model.lowercase().contains(it) }
+        fun estimated(model: String) = !Pricing.isKnown(model) && model !in openRouterModels() && overrides.keys.none { model.lowercase().contains(it) }
         val parts = recs.groupBy { it.role to it.model }.map { (k, list) ->
             val (role, model) = k
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
@@ -677,7 +706,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
             "${roleLabel(k.first)} (${k.second}), ${list.size} çağrı: giriş ${u.input} (önbellekten ${u.cached}), " +
                 "çıkış ${u.output}, düşünme ${u.thoughts}, maliyet ${money(list.sumOf { costOf(it) })}"
-        } + "\n" + recs.groupBy { if (it.model.startsWith("deepseek")) "DeepSeek" else "Gemini" }.entries.joinToString("\n") { (p, l) ->
+        } + "\n" + recs.groupBy { if (it.model.contains('/')) "OpenRouter" else if (it.model.startsWith("deepseek")) "DeepSeek" else "Gemini" }.entries.joinToString("\n") { (p, l) ->
             "$p toplamı: ${money(l.sumOf { costOf(it) })}"
         } + "\nOturum toplamı: ${money(sessionCost(history))}" +
             (if (recs.any { estimated(it.model) }) "\n* Tahmini fiyat: bu model fiyat tablosunda yok; Ayarlar > Fiyat düzeltmeleri'nden girin." else "")

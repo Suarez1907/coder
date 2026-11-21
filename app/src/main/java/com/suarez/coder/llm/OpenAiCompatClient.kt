@@ -6,13 +6,23 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-/** Client for DeepSeek (and any other OpenAI-compatible chat/completions API). */
+/** Client for DeepSeek, OpenRouter and any other OpenAI-compatible chat/completions API. */
 class OpenAiCompatClient(
     private val name: String,
     private val baseUrl: String,
     private val apiKey: String,
     override val model: String,
+    /** Send screenshots as image_url parts (only for models that accept images). */
+    private val vision: Boolean = false,
+    /** Mark the stable prefix with cache_control breakpoints (Anthropic models via OpenRouter). */
+    private val cacheControl: Boolean = false,
+    private val extraHeaders: Map<String, String> = emptyMap(),
 ) : LlmClient {
+
+    private fun Request.Builder.withHeaders(): Request.Builder = apply {
+        header("Authorization", "Bearer $apiKey")
+        extraHeaders.forEach { (k, v) -> header(k, v) }
+    }
 
     override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
         if (apiKey.isBlank()) throw LlmException("$name API anahtarı girilmemiş. Ayarlar'dan ekleyin.")
@@ -30,7 +40,7 @@ class OpenAiCompatClient(
         }
         val req = Request.Builder()
             .url("$baseUrl/chat/completions")
-            .header("Authorization", "Bearer $apiKey")
+            .withHeaders()
             .post(body.toString().toRequestBody(Http.JSON))
             .build()
         var res = Http.execute(req)
@@ -55,15 +65,42 @@ class OpenAiCompatClient(
     private fun errorMessage(body: String): String =
         runCatching { JSONObject(body).getJSONObject("error").getString("message") }.getOrDefault(body.take(500))
 
+    private fun cachedText(text: String) = JSONArray().put(
+        JSONObject().put("type", "text").put("text", text).put("cache_control", JSONObject().put("type", "ephemeral")))
+
+    private fun userContent(m: ChatMessage.User, breakpoint: Boolean): Any {
+        if (m.images.isNotEmpty() && vision) {
+            val parts = JSONArray()
+            val text = JSONObject().put("type", "text").put("text", m.text.ifBlank { "(ekran görüntüsü)" })
+            if (breakpoint) text.put("cache_control", JSONObject().put("type", "ephemeral"))
+            parts.put(text)
+            m.images.forEach { path ->
+                val f = java.io.File(path)
+                if (!f.isFile) return@forEach
+                val mime = if (path.endsWith(".png", true)) "image/png" else "image/jpeg"
+                val data = java.util.Base64.getEncoder().encodeToString(f.readBytes())
+                parts.put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:$mime;base64,$data")))
+            }
+            return parts
+        }
+        val text = if (m.images.isEmpty()) m.text
+            else m.text + "\n[Not: kullanıcı ${m.images.size} ekran görüntüsü ekledi; bu model görselleri göremiyor.]"
+        return if (breakpoint) cachedText(text) else text
+    }
+
+    /** Visible for tests. */
+    internal fun messagesForTest(system: String, history: List<ChatMessage>) = buildMessages(system, history)
+
     private fun buildMessages(system: String, history: List<ChatMessage>): JSONArray {
         val out = JSONArray()
-        out.put(JSONObject().put("role", "system").put("content", system))
+        out.put(JSONObject().put("role", "system").put("content", if (cacheControl) cachedText(system) else system))
         val lastUser = history.indexOfLast { it is ChatMessage.User }
+        val firstUser = history.indexOfFirst { it is ChatMessage.User }
         history.forEachIndexed { index, m ->
             when (m) {
-                is ChatMessage.User -> out.put(JSONObject().put("role", "user").put("content",
-                    if (m.images.isEmpty()) m.text
-                    else m.text + "\n[Not: kullanıcı ${m.images.size} ekran görüntüsü ekledi; bu model görselleri göremiyor.]"))
+                // Breakpoints (max 4): system, the stable context (first user turn) and the latest user turn.
+                is ChatMessage.User -> out.put(JSONObject().put("role", "user")
+                    .put("content", userContent(m, cacheControl && (index == firstUser || index == lastUser))))
                 is ChatMessage.Assistant -> {
                     val o = JSONObject().put("role", "assistant").put("content", m.text)
                     // Thinking models need their reasoning back while the current tool-calling turn is in progress.
@@ -93,7 +130,8 @@ class OpenAiCompatClient(
         if (choices == null || choices.length() == 0) throw LlmException("$name boş yanıt döndü.")
         val msg = choices.getJSONObject(0).getJSONObject("message")
         val text = if (msg.isNull("content")) "" else msg.optString("content")
-        val reasoning = if (msg.isNull("reasoning_content")) null else msg.optString("reasoning_content").ifBlank { null }
+        val reasoning = listOf("reasoning_content", "reasoning")
+            .firstNotNullOfOrNull { k -> if (msg.isNull(k)) null else msg.optString(k).ifBlank { null } }
         val calls = ArrayList<ToolCall>()
         msg.optJSONArray("tool_calls")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -112,12 +150,17 @@ class OpenAiCompatClient(
         )
     }
 
-    override suspend fun listModels(): List<String> {
+    /** Raw body of GET /models (OpenRouter puts prices and capabilities in it). */
+    suspend fun modelsBody(): String {
         if (apiKey.isBlank()) throw LlmException("Önce $name API anahtarını girin.")
-        val req = Request.Builder().url("$baseUrl/models").header("Authorization", "Bearer $apiKey").get().build()
+        val req = Request.Builder().url("$baseUrl/models").withHeaders().get().build()
         val res = Http.execute(req)
         if (res.code !in 200..299) throw LlmException("$name hatası (${res.code}): ${errorMessage(res.body)}")
-        val arr = JSONObject(res.body).optJSONArray("data") ?: return emptyList()
+        return res.body
+    }
+
+    override suspend fun listModels(): List<String> {
+        val arr = JSONObject(modelsBody()).optJSONArray("data") ?: return emptyList()
         return (0 until arr.length()).map { arr.getJSONObject(it).getString("id") }.sorted()
     }
 }

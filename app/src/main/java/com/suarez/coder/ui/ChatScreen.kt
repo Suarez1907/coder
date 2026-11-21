@@ -545,6 +545,10 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
     val s = vm.settings
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion
     val options = vm.modelOptions()
+    val priceOf: (ModelRef) -> String = { ref ->
+        val p = vm.agent.price(ref.model)
+        String.format(Locale.US, "$%.2f / $%.2f 1M", p.input, p.output) + if (vm.agent.supportsVision(ref)) " · 🖼" else ""
+    }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).navigationBarsPadding()
             .padding(bottom = 16.dp),
@@ -557,10 +561,10 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
 
         HorizontalDivider(color = coder.border)
         if (s.architectMode) {
-            ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options) { vm.selectArchitect(it) }
-            ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options) { vm.selectEditor(it) }
+            ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options, priceOf) { vm.selectArchitect(it) }
+            ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options, priceOf) { vm.selectEditor(it) }
         } else {
-            ModelSelect("Model", vm.agent.singleRef(), coder.architect, options) { vm.selectSingle(it) }
+            ModelSelect("Model", vm.agent.singleRef(), coder.architect, options, priceOf) { vm.selectSingle(it) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { vm.refreshCatalog() }) { Text("↻ Model listesini güncelle") }
@@ -616,29 +620,52 @@ private fun SheetSwitch(title: String, subtitle: String, value: Boolean, onChang
 }
 
 @Composable
-private fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, onPick: (ModelRef) -> Unit) {
+private fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, priceOf: (ModelRef) -> String, onPick: (ModelRef) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    Box {
-        Row(
-            Modifier.fillMaxWidth()
-                .border(1.dp, coder.border, RoundedCornerShape(10.dp))
-                .clickable { open = true }
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(label, style = MaterialTheme.typography.bodyMedium, color = coder.muted, modifier = Modifier.width(92.dp))
-            Text(current.model, style = Mono.body, color = accent, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(current.provider.label, style = Mono.tiny, color = coder.muted)
-            Text(" ▾", color = coder.muted)
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            options.forEach { ref ->
-                DropdownMenuItem(
-                    text = { Text("${ref.model}  ·  ${ref.provider.label}", style = Mono.small) },
-                    onClick = { onPick(ref); open = false },
-                )
-            }
-        }
+    Row(
+        Modifier.fillMaxWidth()
+            .border(1.dp, coder.border, RoundedCornerShape(10.dp))
+            .clickable { open = true }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = coder.muted, modifier = Modifier.width(92.dp))
+        Text(current.model, style = Mono.body, color = accent, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(current.provider.label, style = Mono.tiny, color = coder.muted)
+        Text(" ▾", color = coder.muted)
+    }
+    if (open) {
+        var q by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { open = false },
+            title = { Text("$label modeli") },
+            text = {
+                Column {
+                    if (options.size > 12) {
+                        OutlinedTextField(q, { q = it }, singleLine = true, placeholder = { Text("Ara: claude, flash, openrouter…") },
+                            textStyle = Mono.small, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.size(8.dp))
+                    }
+                    val shown = options.filter { q.isBlank() || it.key.contains(q.trim(), ignoreCase = true) || it.provider.label.contains(q.trim(), true) }
+                    LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                        items(shown, key = { it.key }) { ref ->
+                            val selected = ref.key == current.key
+                            Column(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                    .clickable { onPick(ref); open = false }
+                                    .padding(horizontal = 8.dp, vertical = 7.dp),
+                            ) {
+                                Text(ref.model, style = Mono.small, color = if (selected) accent else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${ref.provider.label} · ${priceOf(ref)}", style = Mono.tiny, color = coder.muted)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { open = false }) { Text("Kapat") } },
+        )
     }
 }
 

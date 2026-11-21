@@ -127,6 +127,7 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
     val status = listOf(
         "Gemini" to s.geminiKey.isNotBlank(),
         "DeepSeek" to s.deepseekKey.isNotBlank(),
+        "OpenRouter" to s.openrouterKey.isNotBlank(),
         "GitHub" to s.githubToken.isNotBlank(),
     )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -162,6 +163,7 @@ private fun ProvidersPage(vm: ChatViewModel) {
     var provider by remember { mutableStateOf(s.provider) }
     var gModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var dModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var oModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var fetchStatus by remember { mutableStateOf("") }
     var modelVersion by remember { mutableIntStateOf(0) }
     var ping by remember { mutableStateOf("") }
@@ -201,6 +203,24 @@ private fun ProvidersPage(vm: ChatViewModel) {
             }
         }
     }
+    Group {
+        Title("OpenRouter", "Tek anahtarla Claude, GPT, Llama, Qwen ve diğer yüzlerce model. Liste alınınca fiyatlar ve görsel desteği otomatik öğrenilir; " +
+            "yalnızca araç çağırabilen modeller listelenir. Mimar/Uygulayıcı seçiminde de kullanılabilir.")
+        TextSetting("API anahtarı", s.openrouterKey, secret = true) { s.openrouterKey = it; vm.refreshSettings() }
+        TextButton(onClick = { uri.openUri("https://openrouter.ai/settings/keys") }) { Text("Anahtar al: openrouter.ai") }
+        key(modelVersion) {
+            TextSetting("Model", s.openrouterModel, mono = true, placeholder = "anthropic/claude-sonnet-4.5") {
+                s.openrouterModel = it.ifBlank { "deepseek/deepseek-chat" }; vm.refreshSettings()
+            }
+        }
+        ModelFetch(oModels, onPick = { s.openrouterModel = it; modelVersion++; vm.refreshSettings() }) {
+            scope.launch {
+                fetchStatus = "OpenRouter modelleri alınıyor…"
+                fetchStatus = runCatching { oModels = vm.fetchModels(Provider.OPENROUTER); vm.mergeCatalog(Provider.OPENROUTER, oModels); "${oModels.size} OpenRouter modeli (araç destekli)" }
+                    .getOrElse { it.message ?: "Hata" }
+            }
+        }
+    }
     if (fetchStatus.isNotBlank()) Text(fetchStatus, style = Mono.tiny, color = coder.muted)
 
     Group {
@@ -214,8 +234,12 @@ private fun ProvidersPage(vm: ChatViewModel) {
 private fun ModelFetch(models: List<String>, onPick: (String) -> Unit, onFetch: () -> Unit) {
     OutlinedButton(onClick = onFetch) { Text("Modelleri getir") }
     if (models.isNotEmpty()) {
+        var q by remember { mutableStateOf("") }
+        if (models.size > 20) OutlinedTextField(q, { q = it }, singleLine = true, placeholder = { Text("Model ara (ör. claude, qwen)") },
+            textStyle = Mono.small, modifier = Modifier.fillMaxWidth())
+        val shown = models.filter { q.isBlank() || it.contains(q.trim(), ignoreCase = true) }.take(40)
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            models.forEach { m -> AssistChip(onClick = { onPick(m) }, label = { Text(m, style = Mono.tiny) }) }
+            shown.forEach { m -> AssistChip(onClick = { onPick(m) }, label = { Text(m, style = Mono.tiny) }) }
         }
     }
 }

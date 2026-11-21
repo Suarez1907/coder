@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 
-enum class Provider(val label: String) { GEMINI("Gemini"), DEEPSEEK("DeepSeek") }
+enum class Provider(val label: String) { GEMINI("Gemini"), DEEPSEEK("DeepSeek"), OPENROUTER("OpenRouter") }
 
 /** Stores API keys and preferences, encrypted on the device. */
 class Settings(context: Context) {
@@ -35,6 +35,38 @@ class Settings(context: Context) {
     var deepseekBaseUrl: String
         get() = str("deepseek_base", "https://api.deepseek.com")
         set(v) = put("deepseek_base", v.trim().trimEnd('/'))
+
+    var openrouterKey: String
+        get() = str("openrouter_key")
+        set(v) = put("openrouter_key", v.trim())
+
+    /** OpenRouter model id, e.g. anthropic/claude-sonnet-4.5 (the provider prefix is part of the id). */
+    var openrouterModel: String
+        get() = str("openrouter_model", "deepseek/deepseek-chat")
+        set(v) = put("openrouter_model", v.trim())
+
+    /** Prices and image support fetched from OpenRouter's model list (JSON, see OpenRouterCatalog). */
+    var openrouterMeta: String
+        get() = str("openrouter_meta")
+        set(v) = put("openrouter_meta", v)
+
+    fun keyFor(p: Provider): String = when (p) {
+        Provider.GEMINI -> geminiKey
+        Provider.DEEPSEEK -> deepseekKey
+        Provider.OPENROUTER -> openrouterKey
+    }
+
+    fun modelFor(p: Provider): String = when (p) {
+        Provider.GEMINI -> geminiModel
+        Provider.DEEPSEEK -> deepseekModel
+        Provider.OPENROUTER -> openrouterModel
+    }
+
+    fun setModelFor(p: Provider, model: String) = when (p) {
+        Provider.GEMINI -> geminiModel = model
+        Provider.DEEPSEEK -> deepseekModel = model
+        Provider.OPENROUTER -> openrouterModel = model
+    }
 
     var githubToken: String
         get() = str("github_token")
@@ -85,7 +117,7 @@ class Settings(context: Context) {
     }
 
     val currentModel: String
-        get() = if (provider == Provider.GEMINI) geminiModel else deepseekModel
+        get() = modelFor(provider)
 
     private fun bool(key: String, def: Boolean) = prefs.getBoolean(key, def)
     private fun putBool(key: String, v: Boolean) = prefs.edit().putBoolean(key, v).apply()

@@ -108,7 +108,7 @@ fun CoderTheme(mode: String, content: @Composable () -> Unit) {
 
 /** Short model names for the compact control bar: gemini-4-hydrogen → H4, gemini-3.8-flash → 3.8F. */
 fun shortModel(model: String): String {
-    val m = model.lowercase()
+    val m = model.lowercase().substringAfterLast('/') // OpenRouter ids: vendor/model
     Regex("^gemini-4-([a-z])").find(m)?.let { return it.groupValues[1].uppercase() + "4" }
     Regex("^gemini-(\\d+(?:\\.\\d+)?)-(flash-lite|flash|pro)").find(m)?.let {
         val suffix = when (it.groupValues[2]) { "flash-lite" -> "FL"; "flash" -> "F"; else -> "P" }

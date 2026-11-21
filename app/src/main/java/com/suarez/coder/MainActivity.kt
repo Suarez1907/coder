@@ -64,5 +64,5 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun needsSetup() = vm.settings.geminiKey.isBlank() && vm.settings.deepseekKey.isBlank()
+    private fun needsSetup() = vm.settings.geminiKey.isBlank() && vm.settings.deepseekKey.isBlank() && vm.settings.openrouterKey.isBlank()
 }

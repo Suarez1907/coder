@@ -32,6 +32,8 @@ import com.suarez.coder.decision.Route
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.MessageJson
 import com.suarez.coder.llm.ModelRef
+import com.suarez.coder.llm.OpenAiCompatClient
+import com.suarez.coder.llm.OpenRouterCatalog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -147,13 +149,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         keys += settings.modelCatalog
         keys += listOf("gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash", "gemini/gemini-2.5-flash-lite",
             "deepseek/deepseek-chat", "deepseek/deepseek-reasoner")
+        if (settings.openrouterKey.isNotBlank()) keys += "openrouter/" + settings.openrouterModel
         keys += listOf(agent.singleRef(Provider.GEMINI).key, agent.singleRef(Provider.DEEPSEEK).key, settings.architectModel, settings.editorModel)
         return keys.mapNotNull { ModelRef.parse(it) }.sortedWith(compareBy({ it.provider.ordinal }, { it.model }))
     }
 
     fun selectSingle(ref: ModelRef) {
         settings.provider = ref.provider
-        if (ref.provider == Provider.GEMINI) settings.geminiModel = ref.model else settings.deepseekModel = ref.model
+        settings.setModelFor(ref.provider, ref.model)
         refreshSettings()
     }
 
@@ -193,8 +196,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if ((text.isBlank() && attachments.isEmpty()) || running) return
         if (attachments.isNotEmpty() && !visionSupported()) {
             pendingSendText = text
-            visionWarning = "Seçili model(ler)den biri görselleri göremiyor (DeepSeek). Görseller bu modellere gönderilmez; " +
-                "yalnızca bir not eklenir. Yine de gönderilsin mi? Görsel için Gemini model seçin."
+            visionWarning = "Seçili model(ler)den biri görselleri göremiyor. Görseller bu modellere gönderilmez; " +
+                "yalnızca bir not eklenir. Yine de gönderilsin mi? Görsel için Gemini veya görsel destekli bir OpenRouter modeli seçin."
             return
         }
         doSend(text)
@@ -213,7 +216,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             add(agent.mainRef())
             if (settings.smartRouting) add(agent.editorRef())
         }
-        return refs.all { it.provider == Provider.GEMINI }
+        return refs.all { agent.supportsVision(it) }
     }
 
     private fun doSend(text: String) {
@@ -415,7 +418,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    suspend fun fetchModels(provider: Provider): List<String> = agent.client(agent.singleRef(provider)).listModels()
+    suspend fun fetchModels(provider: Provider): List<String> {
+        val client = agent.client(agent.singleRef(provider))
+        if (provider != Provider.OPENROUTER || client !is OpenAiCompatClient) return client.listModels()
+        // OpenRouter lists hundreds of models with prices: keep those that can call tools and remember their prices.
+        val models = withContext(Dispatchers.IO) { OpenRouterCatalog.parse(client.modelsBody()) }.filter { it.tools }
+        settings.openrouterMeta = OpenRouterCatalog.toMeta(models)
+        return models.map { it.id }.sorted()
+    }
 
     /** Stores fetched models; picks architect/editor defaults by price when the current ones are not available. */
     fun mergeCatalog(p: Provider, models: List<String>) {
@@ -442,7 +452,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val parts = ArrayList<String>()
             for (p in Provider.entries) {
-                val hasKey = if (p == Provider.GEMINI) settings.geminiKey.isNotBlank() else settings.deepseekKey.isNotBlank()
+                val hasKey = settings.keyFor(p).isNotBlank()
                 if (!hasKey) continue
                 parts += runCatching { fetchModels(p).also { mergeCatalog(p, it) }.size.let { "${p.label}: $it" } }
                     .getOrElse { "${p.label}: hata" }
