@@ -2,9 +2,12 @@ package com.suarez.coder.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -21,7 +24,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,23 +63,31 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.suarez.coder.data.Provider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private enum class Page(val title: String, val icon: String, val blurb: String) {
-    HOME("Ayarlar", "", ""),
-    PROVIDERS("Sağlayıcılar & API", "🔑", "Anahtarlar, varsayılan modeller, bağlantı testi"),
-    ARCHITECT("Mimar & Yönlendirme", "🧭", "Düşünme, çıktı sınırları, Decision 1, Flex"),
-    CACHE("Önbellek & Bağlam", "🗄", "Context Caching, sıkıştırma, geçmiş"),
-    GITHUB("GitHub & Bütçe", "💳", "Token, repo, onay, bütçe ve fiyatlar"),
-    TEMPLATES("Komut şablonları", "⌨", "Sohbette / ile açılan hazır istemler"),
+private enum class Page(
+    val title: String,
+    val vectorIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    val blurb: String,
+) {
+    HOME("Ayarlar", Icons.Outlined.Tune, ""),
+    PROVIDERS("Sağlayıcılar & API", Icons.Outlined.Key, "Anahtarlar, varsayılan modeller, bağlantı testi"),
+    ARCHITECT("Mimar & Yönlendirme", Icons.Outlined.Tune, "Düşünme, çıktı sınırları, Decision 1, Flex"),
+    CACHE("Önbellek & Bağlam", Icons.Outlined.Layers, "Context Caching, sıkıştırma, geçmiş"),
+    GITHUB("GitHub & Bütçe", Icons.Outlined.AccountBalanceWallet, "Token, repo, onay, bütçe ve fiyatlar"),
+    TEMPLATES("Komut şablonları", Icons.Outlined.Terminal, "Sohbette / ile açılan hazır istemler"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -118,36 +135,73 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
 private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
     val s = vm.settings
     var theme by remember { mutableStateOf(s.themeMode) }
-    Group {
-        Title("Görünüm", "Koyu: IDE teması. OLED: saf siyah arka plan, AMOLED ekranlarda pil tasarrufu. Sistem: telefonun açık/koyu ayarını izler.")
-        Segmented(listOf("dark" to "Koyu", "oled" to "OLED", "light" to "Açık", "system" to "Sistem"), theme) {
-            theme = it; s.themeMode = it; vm.refreshSettings()
-        }
-    }
+    ViewSelector(
+        options = listOf("dark" to "Koyu", "oled" to "OLED", "light" to "Açık", "system" to "Sistem"),
+        selected = theme,
+    ) { theme = it; s.themeMode = it; vm.refreshSettings() }
     val status = listOf(
         "Gemini" to s.geminiKey.isNotBlank(),
         "DeepSeek" to s.deepseekKey.isNotBlank(),
         "OpenRouter" to s.openrouterKey.isNotBlank(),
         "GitHub" to s.githubToken.isNotBlank(),
     )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        status.forEach { (name, ok) -> Badge("$name ${if (ok) "✓" else "–"}", if (ok) coder.cacheGood else coder.muted) }
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        status.forEach { (name, ok) ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(6.dp).clip(RoundedCornerShape(3.dp))
+                        .background(if (ok) coder.cacheGood else coder.muted.copy(alpha = 0.35f)),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(name, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
-    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES).forEach { p ->
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, coder.border),
-            modifier = Modifier.fillMaxWidth().clickable { open(p) },
-        ) {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.icon, style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.width(14.dp))
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, shape),
+    ) {
+        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES)
+        pages.forEachIndexed { i, p ->
+            Row(
+                Modifier.fillMaxWidth().clickable { open(p) }.padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(p.vectorIcon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(p.title, style = MaterialTheme.typography.titleMedium)
-                    Text(p.blurb, style = MaterialTheme.typography.bodySmall, color = coder.muted)
+                    Text(p.title, style = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = MaterialTheme.colorScheme.onSurface)
+                    Text(p.blurb, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp), color = coder.muted)
                 }
-                Text("›", style = MaterialTheme.typography.titleLarge, color = coder.muted)
+                Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = coder.muted, modifier = Modifier.size(20.dp))
+            }
+            if (i < pages.lastIndex) HorizontalDivider(color = coder.border, thickness = 0.5.dp)
+        }
+    }
+}
+
+@Composable
+private fun ViewSelector(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, RoundedCornerShape(10.dp)).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        options.forEach { (value, label) ->
+            val isSelected = value == selected
+            Box(
+                Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                    .background(if (isSelected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
+                    .clickable { onSelect(value) }.padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                )
             }
         }
     }
@@ -345,7 +399,7 @@ private fun CachePage(vm: ChatViewModel) {
             info = "Açık önbellek yalnızca sistem talimatı + araçlar + sabit bağlam bu boyutu aşarsa oluşturulur.") { s.cacheMinTokens = it }
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(onClick = { scope.launch { cacheMsg = runCatching { vm.agent.clearCache() }.getOrElse { it.message ?: "Hata" } } }) {
-                Text("🧹 Önbelleği Temizle")
+                Text("Önbelleği Temizle")
             }
         }
         Text(cacheMsg, style = Mono.tiny, color = coder.muted)

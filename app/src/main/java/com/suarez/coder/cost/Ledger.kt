@@ -67,12 +67,14 @@ class Ledger(private val file: File) {
         }
 
         fun monthKey(at: Long): String {
+            if (at <= 0L) return "Önceki kayıtlar"
             val c = Calendar.getInstance().apply { timeInMillis = at }
             return "%04d-%02d".format(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1)
         }
 
         fun aggregate(entries: List<LedgerEntry>, now: Long = System.currentTimeMillis()): CostBreakdown {
             val month = monthKey(now)
+            val validMonth = now > 0L
             fun hit(list: List<LedgerEntry>): Double? {
                 val calls = list.filter { it.role != "cache" && it.role != "decision" }
                 val input = calls.sumOf { it.input }
@@ -80,11 +82,12 @@ class Ledger(private val file: File) {
             }
             return CostBreakdown(
                 totalUsd = entries.sumOf { it.usd },
-                monthUsd = entries.filter { monthKey(it.at) == month }.sumOf { it.usd },
-                byRepo = entries.groupBy { it.repo.ifBlank { "(repo yok)" } }
+                monthUsd = entries.filter { it.at > 0L && validMonth && monthKey(it.at) == month }.sumOf { it.usd },
+                byRepo = entries.groupBy { it.repo.ifBlank { "Genel" } }
                     .map { (r, l) -> Triple(r, l.sumOf { it.usd }, hit(l)) }.sortedByDescending { it.second },
                 byRole = entries.groupBy { roleGroup(it.role) }.map { (g, l) -> g to l.sumOf { it.usd } }.sortedByDescending { it.second },
-                byMonth = entries.groupBy { monthKey(it.at) }.map { (m, l) -> m to l.sumOf { it.usd } }.sortedByDescending { it.first },
+                byMonth = entries.groupBy { monthKey(it.at) }.map { (m, l) -> m to l.sumOf { it.usd } }
+                    .sortedWith(compareBy<Pair<String, Double>> { it.first == "Önceki kayıtlar" }.thenByDescending { it.first }),
                 cacheHitRate = hit(entries),
             )
         }
