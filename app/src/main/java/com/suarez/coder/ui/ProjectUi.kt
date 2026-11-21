@@ -2,6 +2,7 @@ package com.suarez.coder.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,6 +24,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Analytics
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -43,6 +46,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -72,6 +77,7 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
     val fmt = remember { SimpleDateFormat("d MMM HH:mm", Locale("tr")) }
 
     ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
+        SystemBarsEffect()
         Column(Modifier.fillMaxHeight().padding(horizontal = 12.dp).navigationBarsPadding()) {
             Spacer(Modifier.height(16.dp))
             Text("Sohbetler", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 4.dp))
@@ -114,7 +120,11 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
                 }
             }
             HorizontalDivider(color = coder.border)
-            TextButton(onClick = onDashboard, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) { Text("📊 Maliyet Panosu") }
+            TextButton(onClick = onDashboard, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Icon(Icons.Outlined.Analytics, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Maliyet Panosu")
+            }
         }
     }
     confirmDelete?.let { s ->
@@ -132,6 +142,7 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
 
 @Composable
 fun ProfileSheet(vm: ChatViewModel, onDone: () -> Unit) {
+    SystemBarsEffect()
     var editing by remember { mutableStateOf<ProjectProfile?>(null) }
     val activeId = vm.settings.activeProfileId
     Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 16.dp).navigationBarsPadding(),
@@ -152,16 +163,18 @@ fun ProfileSheet(vm: ChatViewModel, onDone: () -> Unit) {
                         Text(p.repo.ifBlank { "(repo yok)" }, style = Mono.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
                             listOfNotNull(
-                                p.branch.ifBlank { null }?.let { "⎇ $it" },
+                                p.branch.ifBlank { null },
                                 p.architectModel.ifBlank { null }?.let { "Mimar ${shortModel(it.substringAfter('/'))}" },
                                 p.editorModel.ifBlank { null }?.let { "Uyg ${shortModel(it.substringAfter('/'))}" },
-                                p.contextFiles.size.takeIf { it > 0 }?.let { "📎 $it" },
-                                p.instructions.ifBlank { null }?.let { "talimat ✓" },
+                                p.contextFiles.size.takeIf { it > 0 }?.let { "$it dosya" },
+                                p.instructions.ifBlank { null }?.let { "talimat" },
                             ).joinToString(" · ").ifBlank { "varsayılan ayarlar" },
                             style = Mono.tiny, color = coder.muted, maxLines = 1,
                         )
                     }
-                    TextButton(onClick = { editing = p }) { Text("✎") }
+                    TextButton(onClick = { editing = p }) {
+                        Icon(Icons.Outlined.Edit, contentDescription = "Düzenle", tint = coder.muted, modifier = Modifier.size(18.dp))
+                    }
                 }
             }
         }
@@ -215,6 +228,7 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
     LaunchedEffect(Unit) { data = vm.costBreakdown() }
     val rate = vm.settings.usdTry
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        SystemBarsEffect()
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxWidth().padding(start = 4.dp, top = 8.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -232,7 +246,7 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
                         StatCard("Bu ay", d.monthUsd, rate, Modifier.weight(1f))
                     }
                     DashGroup("Önbellek isabeti") {
-                        Text(d.cacheHitRate?.let { "%${(it * 100).toInt()}" } ?: "–", style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize),
+                        Text(d.cacheHitRate?.let { "%${(it * 100).toInt()}" } ?: "–", style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize, fontFeatureSettings = "tnum"),
                             color = d.cacheHitRate?.let { if (it >= 0.6) coder.cacheGood else if (it >= 0.3) coder.cacheMid else coder.muted } ?: coder.muted)
                         Text("Önbellekten okunan giriş tokenı oranı (karar ve depolama hariç).", style = MaterialTheme.typography.bodySmall, color = coder.muted)
                     }
@@ -258,22 +272,27 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
 
 @Composable
 private fun StatCard(title: String, usd: Double, rate: Double, modifier: Modifier) {
-    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, coder.border), modifier = modifier) {
-        Column(Modifier.padding(14.dp)) {
-            Text(title, style = MaterialTheme.typography.labelLarge, color = coder.muted)
-            Text(Pricing.formatUsd(usd), style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize), color = coder.cost)
-            Text(Pricing.formatTry(usd * rate), style = Mono.small, color = coder.muted)
-        }
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        modifier = modifier.clip(shape).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, shape).padding(16.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.labelLarge, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(Pricing.formatUsd(usd), style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize, fontFeatureSettings = "tnum"), color = coder.cost, maxLines = 1)
+        Text(Pricing.formatTry(usd * rate), style = Mono.small.copy(fontFeatureSettings = "tnum"), color = coder.muted, maxLines = 1)
     }
 }
 
 @Composable
 private fun DashGroup(title: String, content: @Composable () -> Unit) {
-    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, coder.border), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            content()
-        }
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        modifier = Modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, shape).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
+        content()
     }
 }
 
@@ -281,14 +300,14 @@ private fun DashGroup(title: String, content: @Composable () -> Unit) {
 private fun BarRow(label: String, usd: Double, max: Double, rate: Double, extra: String?) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, style = Mono.small, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(Pricing.formatUsd(usd), style = Mono.small, color = coder.cost)
-            Text(" · " + Pricing.formatTry(usd * rate), style = Mono.tiny, color = coder.muted)
+            Text(label, style = Mono.small.copy(fontFeatureSettings = "tnum"), modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(Pricing.formatUsd(usd), style = Mono.small.copy(fontFeatureSettings = "tnum"), color = coder.cost)
+            Text(" · " + Pricing.formatTry(usd * rate), style = Mono.tiny.copy(fontFeatureSettings = "tnum"), color = coder.muted)
         }
-        Box(Modifier.fillMaxWidth().height(6.dp).background(coder.border, RoundedCornerShape(3.dp))) {
+        Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.06f))) {
             val f = if (max > 0) (usd / max).toFloat().coerceIn(0f, 1f) else 0f
-            Box(Modifier.fillMaxWidth(f).height(6.dp).background(coder.architect, RoundedCornerShape(3.dp)))
+            Box(Modifier.fillMaxWidth(f).height(4.dp).clip(RoundedCornerShape(2.dp)).background(coder.architect))
         }
-        if (extra != null) Text(extra, style = Mono.tiny, color = coder.muted)
+        if (extra != null) Text(extra, style = Mono.tiny.copy(fontFeatureSettings = "tnum"), color = coder.muted)
     }
 }
