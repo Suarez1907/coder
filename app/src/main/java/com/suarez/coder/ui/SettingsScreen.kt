@@ -2,6 +2,8 @@ package com.suarez.coder.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -118,6 +120,20 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
 private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
     val s = vm.settings
     var theme by remember { mutableStateOf(s.themeMode) }
+    StudioCard(elevated = true) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(46.dp).background(coder.accentSoft, RoundedCornerShape(16.dp))
+                    .border(1.dp, coder.borderHighlight, RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center,
+            ) { Text("⚙", style = MaterialTheme.typography.titleLarge) }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Coder Studio", style = MaterialTheme.typography.titleMedium)
+                Text("Ajanı, sağlayıcıları ve bağlamı tek yerden yönet.", style = MaterialTheme.typography.bodySmall, color = coder.muted)
+            }
+        }
+    }
     Group {
         Title("Görünüm", "Koyu: IDE teması. OLED: saf siyah arka plan, AMOLED ekranlarda pil tasarrufu. Sistem: telefonun açık/koyu ayarını izler.")
         Segmented(listOf("dark" to "Koyu", "oled" to "OLED", "light" to "Açık", "system" to "Sistem"), theme) {
@@ -134,14 +150,13 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
         status.forEach { (name, ok) -> Badge("$name ${if (ok) "✓" else "–"}", if (ok) coder.cacheGood else coder.muted) }
     }
     listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES).forEach { p ->
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, coder.border),
-            modifier = Modifier.fillMaxWidth().clickable { open(p) },
-        ) {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.icon, style = MaterialTheme.typography.titleLarge)
+        StudioCard(modifier = Modifier.fillMaxWidth().clickable { open(p) }) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(40.dp).background(coder.accentSoft, RoundedCornerShape(12.dp))
+                        .border(1.dp, coder.borderHighlight, RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center,
+                ) { Text(p.icon, style = MaterialTheme.typography.titleMedium) }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(p.title, style = MaterialTheme.typography.titleMedium)
@@ -440,12 +455,7 @@ private fun TemplatesPage(vm: ChatViewModel) {
 
 @Composable
 private fun Group(content: @Composable ColumnScope.() -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, coder.border),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+    StudioCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
     }
 }
@@ -560,7 +570,11 @@ private fun TextSetting(
             else -> null
         },
         supportingText = if (justSaved) { { Text("✓ Kaydedildi", color = coder.cacheGood, style = MaterialTheme.typography.labelSmall) } } else null,
-        colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border),
+        shape = RoundedCornerShape(12.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            unfocusedBorderColor = coder.border,
+            focusedBorderColor = MaterialTheme.colorScheme.primary,
+        ),
         modifier = Modifier.fillMaxWidth(),
     )
 }

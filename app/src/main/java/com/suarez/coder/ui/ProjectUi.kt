@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -72,49 +73,84 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
     val fmt = remember { SimpleDateFormat("d MMM HH:mm", Locale("tr")) }
 
     ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
-        Column(Modifier.fillMaxHeight().padding(horizontal = 12.dp).navigationBarsPadding()) {
-            Spacer(Modifier.height(16.dp))
-            Text("Sohbetler", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 4.dp))
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(
-                query, { query = it },
-                placeholder = { Text("Ara: başlık, repo, içerik") },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onNewChat, modifier = Modifier.fillMaxWidth()) { Text("+ Yeni sohbet") }
-            Spacer(Modifier.height(8.dp))
-            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (list.isEmpty()) item {
-                    Text(if (query.isBlank()) "Henüz kayıtlı sohbet yok." else "Sonuç yok.", style = MaterialTheme.typography.bodySmall,
-                        color = coder.muted, modifier = Modifier.padding(8.dp))
+        Row(Modifier.fillMaxHeight()) {
+            Column(Modifier.weight(1f).fillMaxHeight().padding(horizontal = 14.dp).navigationBarsPadding()) {
+                Spacer(Modifier.height(20.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).background(coder.architect, RoundedCornerShape(4.dp)))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Sohbetler", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                 }
-                items(list, key = { it.id }) { s ->
-                    val active = s.id == vm.currentSessionId
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .background(if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
-                            .clickable { onOpen(s.id) }
-                            .padding(start = 10.dp, top = 8.dp, bottom = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    query, { query = it },
+                    placeholder = { Text("Ara: başlık, repo, içerik") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(20.dp),
+                    colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = coder.accentSoft,
+                        border = BorderStroke(1.dp, coder.borderHighlight),
+                        modifier = Modifier.weight(1f).clickable { onNewChat() },
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(s.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(
-                                listOfNotNull(s.repo.substringAfterLast('/').ifBlank { null }, fmt.format(Date(s.updatedAt)), Pricing.formatUsd(s.costUsd))
-                                    .joinToString(" · "),
-                                style = Mono.tiny, color = coder.muted, maxLines = 1,
-                            )
+                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                            Text("+ Yeni sohbet", style = MaterialTheme.typography.labelLarge)
                         }
-                        IconButton(onClick = { confirmDelete = s }) { Icon(Icons.Default.Close, "Sil", tint = coder.muted, modifier = Modifier.size(16.dp)) }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, coder.border),
+                        modifier = Modifier.weight(1f).clickable { onDashboard() },
+                    ) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                            Text("📊 Maliyet Panosu", style = MaterialTheme.typography.labelLarge)
+                        }
                     }
                 }
+                Spacer(Modifier.height(12.dp))
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (list.isEmpty()) item {
+                        Text(if (query.isBlank()) "Henüz kayıtlı sohbet yok." else "Sonuç yok.", style = MaterialTheme.typography.bodySmall,
+                            color = coder.muted, modifier = Modifier.padding(8.dp))
+                    }
+                    items(list, key = { it.id }) { s ->
+                        val active = s.id == vm.currentSessionId
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (active) coder.accentSoft else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, if (active) coder.borderHighlight else coder.border),
+                            modifier = Modifier.fillMaxWidth().clickable { onOpen(s.id) },
+                        ) {
+                            Row(Modifier.height(IntrinsicSize.Min), verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.width(3.dp).fillMaxHeight().background(if (active) coder.architect else coder.border))
+                                Column(Modifier.weight(1f).padding(start = 10.dp, top = 8.dp, bottom = 8.dp, end = 4.dp)) {
+                                    Text(s.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Spacer(Modifier.height(4.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        s.repo.substringAfterLast('/').ifBlank { null }?.let { Badge(it, coder.architect) }
+                                        Text(fmt.format(Date(s.updatedAt)), style = Mono.tiny, color = coder.muted)
+                                    }
+                                }
+                                Text(
+                                    Pricing.formatUsd(s.costUsd),
+                                    style = Mono.tiny, color = coder.cost,
+                                    modifier = Modifier.background(coder.cost.copy(alpha = 0.14f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                                )
+                                IconButton(onClick = { confirmDelete = s }) { Icon(Icons.Default.Close, "Sil", tint = coder.muted, modifier = Modifier.size(16.dp)) }
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider(color = coder.border)
             }
-            HorizontalDivider(color = coder.border)
-            TextButton(onClick = onDashboard, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) { Text("📊 Maliyet Panosu") }
+            Box(Modifier.fillMaxHeight().width(1.dp).background(coder.border))
         }
     }
     confirmDelete?.let { s ->
@@ -139,27 +175,31 @@ fun ProfileSheet(vm: ChatViewModel, onDone: () -> Unit) {
         Text("Projeler", style = MaterialTheme.typography.titleMedium)
         vm.profiles.forEach { p ->
             val active = p.id == activeId
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, if (active) coder.architect.copy(alpha = 0.6f) else coder.border),
+            StudioCard(
+                elevated = active,
                 modifier = Modifier.fillMaxWidth().clickable { vm.activateProfile(p.id); onDone() },
             ) {
-                Row(Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (active) "●" else "○", color = if (active) coder.architect else coder.muted)
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(p.repo.ifBlank { "(repo yok)" }, style = Mono.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            listOfNotNull(
-                                p.branch.ifBlank { null }?.let { "⎇ $it" },
-                                p.architectModel.ifBlank { null }?.let { "Mimar ${shortModel(it.substringAfter('/'))}" },
-                                p.editorModel.ifBlank { null }?.let { "Uyg ${shortModel(it.substringAfter('/'))}" },
-                                p.contextFiles.size.takeIf { it > 0 }?.let { "📎 $it" },
-                                p.instructions.ifBlank { null }?.let { "talimat ✓" },
-                            ).joinToString(" · ").ifBlank { "varsayılan ayarlar" },
-                            style = Mono.tiny, color = coder.muted, maxLines = 1,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(p.repo.ifBlank { "(repo yok)" }, style = Mono.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (active) Badge("etkin", coder.architect)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            p.branch.ifBlank { null }?.let { Badge(it, coder.editor) }
+                            Text(
+                                listOfNotNull(
+                                    p.architectModel.ifBlank { null }?.let { "Mimar ${shortModel(it.substringAfter('/'))}" },
+                                    p.editorModel.ifBlank { null }?.let { "Uyg ${shortModel(it.substringAfter('/'))}" },
+                                    p.contextFiles.size.takeIf { it > 0 }?.let { "📎 $it" },
+                                    p.instructions.ifBlank { null }?.let { "talimat ✓" },
+                                ).joinToString(" · ").ifBlank { "varsayılan ayarlar" },
+                                style = Mono.tiny, color = coder.muted, maxLines = 1,
+                            )
+                        }
                     }
                     TextButton(onClick = { editing = p }) { Text("✎") }
                 }
@@ -187,13 +227,18 @@ private fun ProfileEditor(p: ProjectProfile, canDelete: Boolean, onSave: (Projec
         title = { Text(if (p.repo.isBlank()) "Yeni profil" else "Profili düzenle") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(repo, { repo = it }, label = { Text("Repo (sahip/isim)") }, singleLine = true, textStyle = Mono.body)
-                OutlinedTextField(branch, { branch = it }, label = { Text("Varsayılan branch (isteğe bağlı)") }, singleLine = true, textStyle = Mono.body)
-                OutlinedTextField(instr, { instr = it }, label = { Text("Proje talimatları") }, minLines = 3)
+                OutlinedTextField(repo, { repo = it }, label = { Text("Repo (sahip/isim)") }, singleLine = true, textStyle = Mono.body,
+                    shape = RoundedCornerShape(12.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border))
+                OutlinedTextField(branch, { branch = it }, label = { Text("Varsayılan branch (isteğe bağlı)") }, singleLine = true, textStyle = Mono.body,
+                    shape = RoundedCornerShape(12.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border))
+                OutlinedTextField(instr, { instr = it }, label = { Text("Proje talimatları") }, minLines = 3,
+                    shape = RoundedCornerShape(12.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border))
                 OutlinedTextField(arch, { arch = it }, label = { Text("Mimar modeli (boş = genel ayar)") }, singleLine = true, textStyle = Mono.small,
-                    placeholder = { Text("gemini/gemini-4-hydrogen", style = Mono.small) })
+                    placeholder = { Text("gemini/gemini-4-hydrogen", style = Mono.small) },
+                    shape = RoundedCornerShape(12.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border))
                 OutlinedTextField(editor, { editor = it }, label = { Text("Uygulayıcı modeli (boş = genel ayar)") }, singleLine = true, textStyle = Mono.small,
-                    placeholder = { Text("gemini/gemini-3.8-flash", style = Mono.small) })
+                    placeholder = { Text("gemini/gemini-3.8-flash", style = Mono.small) },
+                    shape = RoundedCornerShape(12.dp), colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border))
                 if (canDelete) TextButton(onClick = onDelete) { Text("Profili sil", color = coder.warn) }
             }
         },
@@ -226,27 +271,46 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Hesaplanıyor…", color = coder.muted) }
                     return@Column
                 }
+                val maxRole = d.byRole.maxOfOrNull { it.second } ?: 0.0
+                val maxRepo = d.byRepo.maxOfOrNull { it.second } ?: 0.0
+                val maxMonth = d.byMonth.maxOfOrNull { it.second } ?: 0.0
                 Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         StatCard("Toplam", d.totalUsd, rate, Modifier.weight(1f))
                         StatCard("Bu ay", d.monthUsd, rate, Modifier.weight(1f))
                     }
-                    DashGroup("Önbellek isabeti") {
-                        Text(d.cacheHitRate?.let { "%${(it * 100).toInt()}" } ?: "–", style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize),
-                            color = d.cacheHitRate?.let { if (it >= 0.6) coder.cacheGood else if (it >= 0.3) coder.cacheMid else coder.muted } ?: coder.muted)
+                    StudioCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Önbellek isabeti", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+                            Text(d.cacheHitRate?.let { "%${(it * 100).toInt()}" } ?: "–",
+                                style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize),
+                                color = cacheColor(d.cacheHitRate))
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        val hr = d.cacheHitRate?.toFloat()?.coerceIn(0f, 1f) ?: 0f
+                        Box(Modifier.fillMaxWidth().height(10.dp).background(coder.border, RoundedCornerShape(5.dp))) {
+                            Box(Modifier.fillMaxWidth(hr).height(10.dp).background(cacheColor(d.cacheHitRate), RoundedCornerShape(5.dp)))
+                        }
+                        Spacer(Modifier.height(6.dp))
                         Text("Önbellekten okunan giriş tokenı oranı (karar ve depolama hariç).", style = MaterialTheme.typography.bodySmall, color = coder.muted)
                     }
-                    DashGroup("Repo bazında") {
+                    StudioCard {
+                        Text("Repo bazında", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(8.dp))
                         if (d.byRepo.isEmpty()) Text("Kayıt yok.", color = coder.muted)
                         d.byRepo.forEach { (repo, usd, hit) ->
-                            BarRow(repo, usd, d.totalUsd, rate, hit?.let { "önbellek %${(it * 100).toInt()}" })
+                            BarRow(repo, usd, maxRepo, rate, hit?.let { "önbellek %${(it * 100).toInt()}" }, coder.architect)
                         }
                     }
-                    DashGroup("Rol dağılımı") {
-                        d.byRole.forEach { (role, usd) -> BarRow(role, usd, d.totalUsd, rate, null) }
+                    StudioCard {
+                        Text("Rol dağılımı", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(8.dp))
+                        d.byRole.forEach { (role, usd) -> BarRow(role, usd, maxRole, rate, null, coder.editor) }
                     }
-                    DashGroup("Aylar") {
-                        d.byMonth.forEach { (m, usd) -> BarRow(m, usd, d.byMonth.maxOf { it.second }, rate, null) }
+                    StudioCard {
+                        Text("Aylar", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(8.dp))
+                        d.byMonth.forEach { (m, usd) -> BarRow(m, usd, maxMonth, rate, null, coder.cost) }
                     }
                     Text("Tutarlar kayıt anındaki fiyatlarla hesaplanır; TL karşılığı Ayarlar'daki kurdan (1 USD = ₺$rate).",
                         style = MaterialTheme.typography.bodySmall, color = coder.muted)
@@ -258,37 +322,38 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
 
 @Composable
 private fun StatCard(title: String, usd: Double, rate: Double, modifier: Modifier) {
-    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, coder.border), modifier = modifier) {
-        Column(Modifier.padding(14.dp)) {
-            Text(title, style = MaterialTheme.typography.labelLarge, color = coder.muted)
-            Text(Pricing.formatUsd(usd), style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize), color = coder.cost)
-            Text(Pricing.formatTry(usd * rate), style = Mono.small, color = coder.muted)
-        }
+    StudioCard(elevated = true, modifier = modifier) {
+        Text(title, style = MaterialTheme.typography.labelLarge, color = coder.muted)
+        Spacer(Modifier.height(6.dp))
+        Text(Pricing.formatUsd(usd), style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize), color = coder.cost)
+        Text(Pricing.formatTry(usd * rate), style = Mono.small, color = coder.muted)
     }
 }
 
 @Composable
-private fun DashGroup(title: String, content: @Composable () -> Unit) {
-    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, coder.border), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            content()
-        }
-    }
+private fun cacheColor(rate: Double?) = when {
+    rate == null -> coder.muted
+    rate >= 0.6 -> coder.cacheGood
+    rate >= 0.3 -> coder.cacheMid
+    else -> coder.warn
 }
 
 @Composable
-private fun BarRow(label: String, usd: Double, max: Double, rate: Double, extra: String?) {
-    Column {
+private fun BarRow(label: String, usd: Double, max: Double, rate: Double, extra: String?, color: androidx.compose.ui.graphics.Color) {
+    Column(Modifier.padding(vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(label, style = Mono.small, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(Pricing.formatUsd(usd), style = Mono.small, color = coder.cost)
             Text(" · " + Pricing.formatTry(usd * rate), style = Mono.tiny, color = coder.muted)
         }
-        Box(Modifier.fillMaxWidth().height(6.dp).background(coder.border, RoundedCornerShape(3.dp))) {
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(8.dp).background(coder.border, RoundedCornerShape(4.dp))) {
             val f = if (max > 0) (usd / max).toFloat().coerceIn(0f, 1f) else 0f
-            Box(Modifier.fillMaxWidth(f).height(6.dp).background(coder.architect, RoundedCornerShape(3.dp)))
+            Box(Modifier.fillMaxWidth(f).height(8.dp).background(color, RoundedCornerShape(4.dp)))
         }
-        if (extra != null) Text(extra, style = Mono.tiny, color = coder.muted)
+        if (extra != null) {
+            Spacer(Modifier.height(2.dp))
+            Text(extra, style = Mono.tiny, color = coder.muted)
+        }
     }
 }
