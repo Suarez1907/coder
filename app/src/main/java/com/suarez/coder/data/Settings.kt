@@ -184,6 +184,11 @@ class Settings(context: Context) {
         get() = str("architect_model_medium", "gemini/gemini-3.8-flash")
         set(v) = put("architect_model_medium", v.trim())
 
+    /** "dark" (IDE theme, default), "oled", "light" or "system". */
+    var themeMode: String
+        get() = str("theme_mode", "dark")
+        set(v) = put("theme_mode", v)
+
     // ---- Output limits ----
 
     /** "Sadece Diff (Açıklamasız Mod)" */

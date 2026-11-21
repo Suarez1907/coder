@@ -1,6 +1,9 @@
 package com.suarez.coder.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,26 +31,33 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,187 +67,369 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.suarez.coder.cost.Pricing
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
+
+// ---- Display model: consecutive tool calls are grouped into one collapsible card ----
+
+private sealed class DItem {
+    abstract val key: String
+
+    data class Msg(val m: ChatMessage, override val key: String) : DItem()
+
+    data class Tools(val calls: List<Pair<ToolCall, ChatMessage.ToolResult?>>, override val key: String) : DItem()
+}
+
+private fun buildItems(messages: List<ChatMessage>): List<DItem> {
+    val results = messages.filterIsInstance<ChatMessage.ToolResult>().associateBy { it.callId }
+    val out = ArrayList<DItem>()
+    var group: MutableList<Pair<ToolCall, ChatMessage.ToolResult?>>? = null
+    fun close() {
+        group?.let { g -> if (g.isNotEmpty()) out += DItem.Tools(g.toList(), "g" + g.first().first.id) }
+        group = null
+    }
+    messages.forEachIndexed { i, m ->
+        when (m) {
+            is ChatMessage.ToolResult, is ChatMessage.UsageRecord, ChatMessage.CompactMark -> Unit // hidden; do not break a group
+            is ChatMessage.Assistant -> {
+                if (m.text.isNotBlank()) {
+                    close()
+                    out += DItem.Msg(m.copy(toolCalls = emptyList()), "a$i")
+                }
+                if (m.toolCalls.isNotEmpty()) {
+                    val g = group ?: ArrayList<Pair<ToolCall, ChatMessage.ToolResult?>>().also { group = it }
+                    m.toolCalls.forEach { c -> g += c to results[c.id] }
+                }
+            }
+            else -> {
+                close()
+                out += DItem.Msg(m, "m$i")
+            }
+        }
+    }
+    close()
+    return out
+}
+
+// ---- Screen ----
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     var input by rememberSaveable { mutableStateOf("") }
     var showContext by remember { mutableStateOf(false) }
+    var showSheet by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion // recompose when settings change
 
-    val results = vm.messages.filterIsInstance<ChatMessage.ToolResult>().associateBy { it.callId }
-    val visible = vm.messages.filter { it !is ChatMessage.ToolResult && it !is ChatMessage.UsageRecord && it !is ChatMessage.CompactMark }
+    val items = buildItems(vm.messages)
     val lastRoute = vm.messages.lastOrNull { it is ChatMessage.RouteInfo }
+    val lastToolsKey = items.lastOrNull { it is DItem.Tools }?.key
 
     LaunchedEffect(vm.messages.size, vm.running) {
-        val count = visible.size + if (vm.running) 1 else 0
+        val count = items.size + if (vm.running) 1 else 0
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Coder")
-                        Text(vm.sessionCostText, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Yeni sohbet") }
-                    IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "Ayarlar") }
-                },
-            )
-        },
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = { ChatTopBar(vm, onOpenSettings) },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize().imePadding()) {
-            ControlBar(vm, onOpenContext = { showContext = true })
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (visible.isEmpty()) item { EmptyState() }
-                items(visible) { m ->
-                    when (m) {
-                        is ChatMessage.User -> UserBubble(m.text)
-                        is ChatMessage.Assistant -> AssistantItem(m, results)
-                        is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
-                        is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi (token tasarrufu)", m.text, false)
-                        is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
-                        is ChatMessage.ContextBlock -> NoticeItem("📎 Bu istek için bağlam: ${m.label}", m.text.take(20_000), false)
-                        else -> Unit
+                if (items.isEmpty()) item { EmptyState() }
+                items(items, key = { it.key }) { item ->
+                    when (item) {
+                        is DItem.Tools -> ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
+                        is DItem.Msg -> when (val m = item.m) {
+                            is ChatMessage.User -> UserBubble(m.text)
+                            is ChatMessage.Assistant -> MarkdownText(m.text)
+                            is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
+                            is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi", m.text, false)
+                            is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
+                            is ChatMessage.ContextBlock -> NoticeItem("📎 Bağlam: ${m.label}", m.text.take(20_000), false)
+                            else -> Unit
+                        }
                     }
                 }
-                if (vm.running) item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        var now by remember { mutableStateOf(System.currentTimeMillis()) }
-                        LaunchedEffect(vm.status) { while (true) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
-                        val secs = ((now - vm.statusSince) / 1000).coerceAtLeast(0)
-                        Text(
-                            when {
-                                vm.pending != null -> "Onay bekleniyor…"
-                                vm.status != null -> "${vm.status} · $secs sn"
-                                else -> "Çalışıyor…"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
+                if (vm.running) item(key = "running") { RunningRow(vm) }
             }
             vm.preview?.let {
-                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.padding(horizontal = 12.dp), maxLines = 2)
+                Text(it, style = Mono.tiny, color = coder.muted, maxLines = 2,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
             }
-            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.Bottom) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it; vm.onInputChanged(it) },
-                    modifier = Modifier.weight(1f).heightIn(max = 180.dp),
-                    placeholder = { Text("Ne yapmamı istersin?") },
-                )
-                Spacer(Modifier.width(8.dp))
-                if (vm.running) {
-                    FilledIconButton(onClick = { vm.stop() }) { Icon(Icons.Default.Close, "Durdur") }
-                } else {
-                    FilledIconButton(onClick = { vm.send(input); input = "" }, enabled = input.isNotBlank()) {
-                        Icon(Icons.AutoMirrored.Filled.Send, "Gönder")
-                    }
-                }
-            }
+            ControlBar(vm) { showSheet = true }
+            InputRow(input, running = vm.running,
+                onChange = { input = it; vm.onInputChanged(it) },
+                onSend = { vm.send(input); input = "" },
+                onStop = { vm.stop() })
         }
     }
 
+    if (showSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            ControlSheet(vm, onOpenContext = { showSheet = false; showContext = true })
+        }
+    }
     vm.pending?.let { p -> ConfirmDialog(p, onAnswer = { vm.answer(it) }) }
     if (showContext) ContextDialog(vm, onDismiss = { showContext = false })
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ControlBar(vm: ChatViewModel, onOpenContext: () -> Unit) {
+private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val s = vm.settings
+    val repo = s.contextRepo.ifBlank { s.defaultRepo }.substringAfterLast('/').ifBlank { null }
+    val cost = vm.agent.sessionCost(vm.messages)
+    val calls = vm.messages.filterIsInstance<ChatMessage.UsageRecord>().filter { it.role != "cache" && it.role != "decision" }
+    val hit = vm.agent.cacheHitRate(calls)
+    TopAppBar(
+        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+        title = {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Coder", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(8.dp))
+                    Badge(repo ?: "repo yok", if (repo != null) coder.editor else coder.muted)
+                }
+                Row {
+                    Text(Pricing.formatUsd(cost), style = Mono.small, color = coder.cost)
+                    Text(" · ${Pricing.formatTry(cost * s.usdTry)}", style = Mono.small, color = coder.muted)
+                    if (hit != null) {
+                        val pct = (hit * 100).toInt()
+                        Text(" · Önbellek ", style = Mono.small, color = coder.muted)
+                        Text("%$pct", style = Mono.small, color = cacheColor(hit))
+                    }
+                }
+            }
+        },
+        actions = {
+            IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Yeni sohbet") }
+            IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "Ayarlar") }
+        },
+    )
+}
+
+@Composable
+private fun cacheColor(rate: Double): Color = when {
+    rate >= 0.6 -> coder.cacheGood
+    rate >= 0.3 -> coder.cacheMid
+    else -> coder.muted
+}
+
+@Composable
+fun Badge(text: String, color: Color) {
+    Text(
+        text,
+        style = Mono.tiny,
+        color = color,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+            .background(color.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 6.dp, vertical = 1.dp),
+    )
+}
+
+// ---- Bottom: compact control bar + input ----
+
+private fun thinkingShort(level: String) = when (level) {
+    "minimal" -> "Min"; "low" -> "Low"; "medium" -> "Med"; "high" -> "High"; else -> level
+}
+
+@Composable
+private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
+    val s = vm.settings
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .border(1.dp, coder.border, RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
+            .clickable(onClick = onOpen)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
+            if (s.architectMode) {
+                Text("Mimar: ", style = Mono.small, color = coder.muted)
+                Text(shortModel(vm.agent.architectRef().model), style = Mono.small, color = coder.architect)
+                Text(" · Uyg: ", style = Mono.small, color = coder.muted)
+                Text(shortModel(vm.agent.editorRef().model), style = Mono.small, color = coder.editor)
+            } else {
+                Text("Model: ", style = Mono.small, color = coder.muted)
+                Text(shortModel(vm.agent.singleRef().model), style = Mono.small, color = coder.architect)
+            }
+            Text(" · ${thinkingShort(s.thinkingLevel)} · Bağlam: ${s.contextFiles.size}", style = Mono.small, color = coder.muted)
+            if (s.smartRouting) Text(" · ⚡", style = Mono.small)
+            if (s.economyMode) Text(" · Flex", style = Mono.small, color = coder.cost)
+        }
+        Icon(Icons.Default.KeyboardArrowUp, "Kontroller", tint = coder.muted, modifier = Modifier.size(18.dp))
+    }
+}
+
+@Composable
+private fun InputRow(text: String, running: Boolean, onChange: (String) -> Unit, onSend: () -> Unit, onStop: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp, top = 2.dp), verticalAlignment = Alignment.Bottom) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = onChange,
+            modifier = Modifier.weight(1f).heightIn(max = 180.dp),
+            placeholder = { Text("Ne yapmamı istersin?") },
+            shape = RoundedCornerShape(14.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                unfocusedBorderColor = coder.border,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                focusedContainerColor = MaterialTheme.colorScheme.surface,
+            ),
+        )
+        Spacer(Modifier.width(8.dp))
+        if (running) {
+            FilledIconButton(onClick = onStop, modifier = Modifier.size(52.dp)) { Icon(Icons.Default.Close, "Durdur") }
+        } else {
+            FilledIconButton(onClick = onSend, enabled = text.isNotBlank(), modifier = Modifier.size(52.dp)) {
+                Icon(Icons.AutoMirrored.Filled.Send, "Gönder")
+            }
+        }
+    }
+}
+
+// ---- Bottom sheet: every control within thumb reach ----
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
+    val s = vm.settings
+    @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion
     val options = vm.modelOptions()
-    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            FilterChip(
-                selected = s.architectMode,
-                onClick = { vm.setArchitectMode(!s.architectMode) },
-                label = { Text("Mimar Modu (Maliyet Tasarrufu)") },
-            )
-            if (!s.architectMode) {
-                ModelChip("Model", vm.agent.singleRef(), options, vm::refreshCatalog) { vm.selectSingle(it) }
-            }
-            FilterChip(
-                selected = s.smartRouting,
-                onClick = { vm.setSmartRouting(!s.smartRouting) },
-                label = { Text("Akıllı Yönlendirme") },
-            )
-            FilterChip(
-                selected = s.economyMode,
-                onClick = { vm.setEconomy(!s.economyMode) },
-                label = { Text("💸 Ekonomi (Flex %50)") },
-            )
-            ChoiceChip("Düşünme", s.thinkingLevel, listOf("low", "medium", "high")) { vm.setThinking(it) }
-            AssistChip(onClick = onOpenContext, label = { Text("📎 Bağlam: ${s.contextFiles.size}") })
-            vm.catalogStatus?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
-            AssistChip(onClick = { vm.clearCache() }, enabled = !vm.running, label = { Text("🧹 Önbelleği Temizle") })
-        }
+    Column(
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).navigationBarsPadding()
+            .padding(bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Çalışma ayarları", style = MaterialTheme.typography.titleMedium)
+        SheetSwitch("Mimar Modu", "Planı güçlü model, kodu ucuz model yazar", s.architectMode) { vm.setArchitectMode(it) }
+        SheetSwitch("Akıllı Yönlendirme", "Yerel kural → Decision 1 → ucuz model", s.smartRouting) { vm.setSmartRouting(it) }
+        SheetSwitch("Ekonomi (Flex %50)", "Yarı fiyat; yanıtlar dakikalar sürebilir", s.economyMode) { vm.setEconomy(it) }
+
+        HorizontalDivider(color = coder.border)
         if (s.architectMode) {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                ModelChip("Mimar", vm.agent.architectRef(), options, vm::refreshCatalog) { vm.selectArchitect(it) }
-                ModelChip("Uygulayıcı", vm.agent.editorRef(), options, vm::refreshCatalog) { vm.selectEditor(it) }
+            ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options) { vm.selectArchitect(it) }
+            ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options) { vm.selectEditor(it) }
+        } else {
+            ModelSelect("Model", vm.agent.singleRef(), coder.architect, options) { vm.selectSingle(it) }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { vm.refreshCatalog() }) { Text("↻ Model listesini güncelle") }
+            vm.catalogStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
+        }
+
+        Text("Düşünme", style = MaterialTheme.typography.labelLarge, color = coder.muted)
+        val levels = listOf("low", "medium", "high")
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            levels.forEachIndexed { i, lv ->
+                SegmentedButton(
+                    selected = s.thinkingLevel == lv,
+                    onClick = { vm.setThinking(lv) },
+                    shape = SegmentedButtonDefaults.itemShape(i, levels.size),
+                    colors = SegmentedButtonDefaults.colors(
+                        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        inactiveContainerColor = MaterialTheme.colorScheme.surface,
+                        activeBorderColor = coder.border, inactiveBorderColor = coder.border,
+                    ),
+                ) { Text(lv) }
             }
+        }
+
+        HorizontalDivider(color = coder.border)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Bağlam dosyaları", style = MaterialTheme.typography.bodyLarge)
+                Text(if (s.contextFiles.isEmpty()) "Seçili dosya yok" else "${s.contextFiles.size} dosya sabitlendi",
+                    style = MaterialTheme.typography.bodySmall, color = coder.muted)
+            }
+            OutlinedButton(onClick = onOpenContext) { Text("📎 Düzenle") }
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Önbellek", style = MaterialTheme.typography.bodyLarge)
+                Text(vm.agent.cacheStatus, style = Mono.tiny, color = coder.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            OutlinedButton(onClick = { vm.clearCache() }, enabled = !vm.running) { Text("🧹 Temizle") }
         }
     }
 }
 
 @Composable
-private fun ModelChip(label: String, current: ModelRef, options: List<ModelRef>, onRefresh: () -> Unit, onPick: (ModelRef) -> Unit) {
+private fun SheetSwitch(title: String, subtitle: String, value: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable { onChange(!value) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Switch(value, onChange)
+    }
+}
+
+@Composable
+private fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, onPick: (ModelRef) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        AssistChip(onClick = { open = true }, label = { Text("$label: ${current.model} ▾", maxLines = 1) })
+        Row(
+            Modifier.fillMaxWidth()
+                .border(1.dp, coder.border, RoundedCornerShape(10.dp))
+                .clickable { open = true }
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = coder.muted, modifier = Modifier.width(92.dp))
+            Text(current.model, style = Mono.body, color = accent, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(current.provider.label, style = Mono.tiny, color = coder.muted)
+            Text(" ▾", color = coder.muted)
+        }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(text = { Text("↻ Gemini + DeepSeek listesini güncelle") }, onClick = { onRefresh(); open = false })
             options.forEach { ref ->
-                DropdownMenuItem(text = { Text(ref.label) }, onClick = { onPick(ref); open = false })
+                DropdownMenuItem(
+                    text = { Text("${ref.model}  ·  ${ref.provider.label}", style = Mono.small) },
+                    onClick = { onPick(ref); open = false },
+                )
             }
         }
     }
 }
 
-@Composable
-private fun ChoiceChip(label: String, current: String, options: List<String>, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        AssistChip(onClick = { open = true }, label = { Text("$label: $current ▾") })
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            options.forEach { o -> DropdownMenuItem(text = { Text(o) }, onClick = { onPick(o); open = false }) }
-        }
-    }
-}
+// ---- Message items ----
 
 @Composable
 private fun EmptyState() {
-    Column(Modifier.fillMaxWidth().padding(top = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("</>", fontSize = 40.sp, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
+    Column(Modifier.fillMaxWidth().padding(top = 56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("</>", fontSize = 40.sp, color = coder.architect, style = Mono.body.copy(fontSize = 40.sp))
         Spacer(Modifier.size(12.dp))
         Text("Telefonundan kod yaz", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.size(8.dp))
+        Spacer(Modifier.size(10.dp))
         Text(
-            "Örnekler:\n• \"Repolarımı listele\"\n• \"dino reposuna skor tablosu ekle\"\n• \"Son Actions derlemesi neden başarısız oldu, düzelt\"\n\n" +
-                "İpucu: Mimar Modu planı güçlü modele, kodlamayı ucuz modele yaptırır.",
+            "• \"Repolarımı listele\"\n• \"dino reposuna skor tablosu ekle\"\n• \"Son derleme neden başarısız oldu, düzelt\"\n\n" +
+                "Modeller ve modlar alttaki çubuktan.",
             style = MaterialTheme.typography.bodySmall,
+            color = coder.muted,
         )
     }
 }
@@ -244,30 +437,55 @@ private fun EmptyState() {
 @Composable
 private fun UserBubble(text: String) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-            SelectionContainer { Text(text, Modifier.padding(10.dp), style = MaterialTheme.typography.bodyMedium) }
+        Surface(
+            shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.padding(start = 40.dp),
+        ) {
+            SelectionContainer { Text(text, Modifier.padding(horizontal = 12.dp, vertical = 9.dp), style = MaterialTheme.typography.bodyMedium) }
         }
+    }
+}
+
+@Composable
+private fun RunningRow(vm: ChatViewModel) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
+        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.architect)
+        Spacer(Modifier.width(8.dp))
+        var now by remember { mutableStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(vm.status) { while (true) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
+        val secs = ((now - vm.statusSince) / 1000).coerceAtLeast(0)
+        Text(
+            when {
+                vm.pending != null -> "Onay bekleniyor…"
+                vm.status != null -> "${vm.status} · ${secs} sn"
+                else -> "Çalışıyor…"
+            },
+            style = Mono.tiny,
+            color = coder.muted,
+        )
     }
 }
 
 @Composable
 private fun RouteBar(m: ChatMessage.RouteInfo, isLatest: Boolean, onOverride: () -> Unit) {
     var open by remember { mutableStateOf(false) }
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
-        modifier = Modifier.fillMaxWidth().animateContentSize(),
+    Column(
+        Modifier.fillMaxWidth()
+            .border(1.dp, coder.architect.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+            .background(coder.architect.copy(alpha = 0.07f), RoundedCornerShape(10.dp))
+            .clickable(enabled = m.detail != null) { open = !open }
+            .padding(horizontal = 10.dp, vertical = 7.dp)
+            .animateContentSize(),
     ) {
-        Column(Modifier.clickable(enabled = m.detail != null) { open = !open }.padding(horizontal = 10.dp, vertical = 6.dp)) {
-            Text("⚡ " + m.text + if (m.detail != null) (if (open) "  ▴" else "  ▾") else "",
-                style = MaterialTheme.typography.labelMedium)
-            if (open && m.detail != null) {
-                Text(m.detail, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-            }
-            if (isLatest && m.canOverride) {
-                TextButton(onClick = onOverride, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)) {
-                    Text("↻ Mimar Modu'nda yeniden çalıştır", style = MaterialTheme.typography.labelMedium)
-                }
+        Text("⚡ " + m.text + if (m.detail != null) (if (open) "  ▴" else "  ▾") else "", style = Mono.small, color = MaterialTheme.colorScheme.onSurface)
+        if (open && m.detail != null) {
+            Spacer(Modifier.size(4.dp))
+            Text(m.detail, style = Mono.tiny, color = coder.muted)
+        }
+        if (isLatest && m.canOverride) {
+            TextButton(onClick = onOverride, contentPadding = PaddingValues(0.dp)) {
+                Text("↻ Mimar Modu'nda yeniden çalıştır", style = MaterialTheme.typography.labelMedium, color = coder.architect)
             }
         }
     }
@@ -276,55 +494,79 @@ private fun RouteBar(m: ChatMessage.RouteInfo, isLatest: Boolean, onOverride: ()
 @Composable
 private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
     var open by remember { mutableStateOf(false) }
+    val isCost = text.startsWith("💰")
     Column(Modifier.fillMaxWidth().animateContentSize().clickable(enabled = detail != null) { open = !open }) {
         Text(
             text + if (detail != null) (if (open) "  ▴" else "  ▾") else "",
-            color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.secondary,
-            style = MaterialTheme.typography.bodySmall,
+            style = if (isCost) Mono.tiny else MaterialTheme.typography.bodySmall,
+            color = when {
+                isError -> coder.warn
+                isCost -> coder.cost
+                else -> coder.muted
+            },
         )
-        if (open && detail != null) CodeBox(detail.take(30_000))
+        if (open && detail != null) {
+            Spacer(Modifier.size(4.dp))
+            CodeBox(detail.take(30_000))
+        }
     }
 }
 
-@Composable
-private fun AssistantItem(m: ChatMessage.Assistant, results: Map<String, ChatMessage.ToolResult>) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (m.text.isNotBlank()) MarkdownText(m.text)
-        m.toolCalls.forEach { ToolCard(it, results[it.id]) }
-    }
-}
+// ---- Collapsible tool-call group ----
 
 private fun summarize(call: ToolCall): String {
     val a = call.args
-    return listOf("repo", "path", "branch", "query", "url", "method", "title", "commit_message")
+    return listOf("path", "query", "url", "method", "title", "branch", "commit_message", "workflow")
         .mapNotNull { k -> a.optString(k).takeIf { a.has(k) && it.isNotBlank() } }
         .joinToString("  ")
-        .ifBlank { a.toString().take(80) }
+        .ifBlank {
+            a.optJSONArray("paths")?.let { p -> (0 until p.length()).joinToString(", ") { p.optString(it) } } ?: ""
+        }
 }
 
 @Composable
-private fun ToolCard(call: ToolCall, result: ChatMessage.ToolResult?) {
-    var open by remember { mutableStateOf(false) }
-    val status = when {
-        result == null -> "⏳"
-        result.isError -> "⚠️"
-        else -> "✓"
-    }
-    Card(
-        modifier = Modifier.fillMaxWidth().animateContentSize().clickable { open = !open },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+private fun ToolGroupCard(item: DItem.Tools, active: Boolean) {
+    val total = item.calls.size
+    val errors = item.calls.count { it.second?.isError == true }
+    val pending = item.calls.firstOrNull { it.second == null }
+    val inProgress = active && pending != null
+    var userOpen by remember(item.key) { mutableStateOf<Boolean?>(null) }
+    // Open while running, fold into a one-line summary when done (unless the user toggled it).
+    val expanded = userOpen ?: inProgress
+    val repo = item.calls.firstNotNullOfOrNull { it.first.args.optString("repo").takeIf { r -> r.isNotBlank() } }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier.fillMaxWidth().animateContentSize(),
     ) {
-        Column(Modifier.padding(10.dp)) {
-            Text("$status ${call.name}", style = MaterialTheme.typography.labelLarge)
-            Text(summarize(call), style = MaterialTheme.typography.bodySmall, maxLines = if (open) 10 else 1, overflow = TextOverflow.Ellipsis)
-            if (open) {
-                Spacer(Modifier.size(6.dp))
-                Text("Parametreler", style = MaterialTheme.typography.labelSmall)
-                CodeBox(call.args.toString(2).take(6000))
-                if (result != null) {
-                    Spacer(Modifier.size(6.dp))
-                    Text(if (result.isError) "Hata" else "Sonuç", style = MaterialTheme.typography.labelSmall)
-                    CodeBox(result.content.take(8000))
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable { userOpen = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                when {
+                    inProgress -> CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.editor)
+                    errors > 0 -> Text("⚠", color = coder.warn)
+                    pending != null -> Text("■", color = coder.muted)
+                    else -> Text("✓", color = coder.cacheGood)
+                }
+                Spacer(Modifier.width(8.dp))
+                val headline = when {
+                    inProgress -> "${pending!!.first.name} çalışıyor (${total - item.calls.count { it.second == null } + 1}/$total)"
+                    pending != null -> "${item.calls.count { it.second != null }}/$total işlem · durduruldu"
+                    else -> "$total işlem tamamlandı" + if (errors > 0) " · $errors hata" else ""
+                }
+                Text(headline + (repo?.let { " · $it" } ?: ""), style = Mono.small, modifier = Modifier.weight(1f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = if (errors > 0 && !inProgress) coder.warn else MaterialTheme.colorScheme.onSurface)
+                Text(if (expanded) "▴" else "▾", color = coder.muted)
+            }
+            if (expanded) {
+                HorizontalDivider(color = coder.border)
+                Column(Modifier.padding(vertical = 4.dp)) {
+                    item.calls.forEach { (call, result) -> ToolRow(call, result, isActive = inProgress && call === pending?.first) }
                 }
             }
         }
@@ -332,10 +574,45 @@ private fun ToolCard(call: ToolCall, result: ChatMessage.ToolResult?) {
 }
 
 @Composable
+private fun ToolRow(call: ToolCall, result: ChatMessage.ToolResult?, isActive: Boolean) {
+    var open by remember(call.id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 5.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            when {
+                isActive -> CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp, color = coder.editor)
+                result == null -> Text("·", style = Mono.small, color = coder.muted)
+                result.isError -> Text("⚠", style = Mono.small, color = coder.warn)
+                else -> Text("✓", style = Mono.small, color = coder.cacheGood)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(call.name, style = Mono.small, color = coder.editor)
+            Spacer(Modifier.width(8.dp))
+            Text(summarize(call), style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+        if (open) {
+            Spacer(Modifier.size(4.dp))
+            Text("Parametreler", style = MaterialTheme.typography.labelSmall, color = coder.muted)
+            CodeBox(call.args.toString(2).take(6000))
+            if (result != null) {
+                Spacer(Modifier.size(4.dp))
+                Text(if (result.isError) "Hata" else "Sonuç", style = MaterialTheme.typography.labelSmall,
+                    color = if (result.isError) coder.warn else coder.muted)
+                CodeBox(result.content.take(8000))
+            }
+        }
+    }
+}
+
+@Composable
 fun CodeBox(text: String) {
-    Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth()) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = coder.codeBg,
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         SelectionContainer {
-            Text(text, fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+            Text(text, style = Mono.tiny,
                 modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())
                     .horizontalScroll(rememberScrollState()).padding(8.dp))
         }

@@ -50,6 +50,8 @@ android {
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.isIncludeAndroidResources = true
+        unitTests.all { it.systemProperty("roborazzi.test.record", "true") }
     }
     packaging {
         resources {
@@ -74,6 +76,12 @@ dependencies {
     implementation("org.jsoup:jsoup:1.18.1")
 
     testImplementation("junit:junit:4.13.2")
+    // Screenshot tests on the JVM (Robolectric + Roborazzi), used to check the UI without an emulator.
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi:1.32.2")
+    testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.32.2")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     // Real org.json on the JVM test classpath (Android's version is only a stub there).
     testImplementation("org.json:json:20240303")
 }
