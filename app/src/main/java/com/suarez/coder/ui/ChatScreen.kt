@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -180,6 +181,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val items = buildItems(vm.messages)
     val lastRoute = vm.messages.lastOrNull { it is ChatMessage.RouteInfo }
     val lastToolsKey = items.lastOrNull { it is DItem.Tools }?.key
+    // APK links already shown on an assistant bubble; the tool-output card must not repeat them.
+    val shownApkUrls = remember(items) {
+        items.filterIsInstance<DItem.Msg>().mapNotNull { (it.m as? ChatMessage.Assistant)?.text }
+            .flatMap { ApkLinks.find(it) }.map { it.first }.toSet()
+    }
 
     LaunchedEffect(vm.messages.size, vm.running) {
         val count = items.size + if (vm.running) 1 else 0
@@ -212,7 +218,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     when (item) {
                         is DItem.Tools -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
-                            ApkActions(vm, item.calls.mapNotNull { it.second?.content }.joinToString("\n"))
+                            ApkActions(vm, item.calls.mapNotNull { it.second?.content }.joinToString("\n"), skipUrls = shownApkUrls)
                         }
                         is DItem.Msg -> when (val m = item.m) {
                             is ChatMessage.User -> UserBubble(m.text, m.images)
@@ -326,7 +332,7 @@ private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit, onMenu: ()
         append(" · ").append(Pricing.formatTry(cost * s.usdTry))
         if (hit != null) append(" · Önbellek %").append((hit * 100).toInt())
     }
-    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -390,7 +396,7 @@ private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
         } else {
             add("Model: ${shortModel(vm.agent.singleRef().model)}")
         }
-        add("Med: ${thinkingShort(s.thinkingLevel)}")
+        add("Düşünme: ${thinkingShort(s.thinkingLevel)}")
         add("Bağlam: ${s.contextFiles.size}")
         if (s.smartRouting) add("Akıllı")
         if (s.economyMode) add("Flex")
@@ -543,9 +549,9 @@ private fun AttachmentRow(paths: List<String>, onRemove: (String) -> Unit) {
 
 /** "Download & install" buttons for APK links found in [text]. */
 @Composable
-private fun ApkActions(vm: ChatViewModel, text: String) {
+private fun ApkActions(vm: ChatViewModel, text: String, skipUrls: Set<String> = emptySet()) {
     if (!text.contains("http")) return
-    val links = remember(text) { ApkLinks.find(text) }
+    val links = remember(text, skipUrls) { ApkLinks.find(text).filter { it.first !in skipUrls } }
     if (links.isEmpty()) return
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
