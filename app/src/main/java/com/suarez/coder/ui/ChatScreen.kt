@@ -208,6 +208,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                         }
                     }
                 }
+                vm.activePlan?.let { plan -> item(key = "plan-${plan.id}") { PlanCard(vm, plan) } }
                 if (vm.running) item(key = "running") { RunningRow(vm) }
             }
             vm.preview?.let {
@@ -382,6 +383,8 @@ private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
             Text(" · ${thinkingShort(s.thinkingLevel)} · Bağlam: ${s.contextFiles.size}", style = Mono.small, color = coder.muted)
             if (s.smartRouting) Text(" · ⚡", style = Mono.small)
             if (s.economyMode) Text(" · Flex", style = Mono.small, color = coder.cost)
+            val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
+            if (orch != com.suarez.coder.orchestrator.OrchestratorMode.OFF) Text(" · Ork: ${orch.short}", style = Mono.small, color = coder.architect)
         }
         Icon(Icons.Default.KeyboardArrowUp, "Kontroller", tint = coder.muted, modifier = Modifier.size(18.dp))
     }
@@ -570,6 +573,31 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
             TextButton(onClick = { vm.refreshCatalog() }) { Text("↻ Model listesini güncelle") }
             vm.catalogStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
         }
+
+        Text("Orkestratör", style = MaterialTheme.typography.labelLarge, color = coder.muted)
+        val modes = com.suarez.coder.orchestrator.OrchestratorMode.entries
+        val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            modes.forEachIndexed { i, m ->
+                SegmentedButton(
+                    selected = orch == m,
+                    onClick = { vm.setOrchestratorMode(m) },
+                    shape = SegmentedButtonDefaults.itemShape(i, modes.size),
+                    colors = SegmentedButtonDefaults.colors(
+                        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        inactiveContainerColor = MaterialTheme.colorScheme.surface,
+                        activeBorderColor = coder.border, inactiveBorderColor = coder.border,
+                    ),
+                ) { Text("Ork: " + m.short) }
+            }
+        }
+        Text(when (orch) {
+            com.suarez.coder.orchestrator.OrchestratorMode.OFF -> "Normal akış; ek çağrı yok."
+            com.suarez.coder.orchestrator.OrchestratorMode.LIGHT_SEQUENTIAL -> "Mimar'a giden işler alt görevlere bölünür, sırayla ve ayrı commit'lerle yapılır."
+            com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT -> "⚠️ Tam mod daha pahalıdır: Planlayıcı + paralel işçiler + İnceleyici ayrı çağrılar yapar."
+        }, style = MaterialTheme.typography.bodySmall,
+            color = if (orch == com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT) coder.cost else coder.muted)
 
         Text("Düşünme", style = MaterialTheme.typography.labelLarge, color = coder.muted)
         val levels = listOf("low", "medium", "high")

@@ -131,6 +131,33 @@ class ScreenshotTest {
         compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].captureRoboImage("build/outputs/roborazzi/profile_sheet.png")
     }
 
+    @Test fun orchestratorPlanCard() {
+        val vm = vm()
+        vm.setOrchestratorMode(com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT)
+        val t = com.suarez.coder.orchestrator.TaskStatus.entries
+        vm.editPlan(com.suarez.coder.orchestrator.OrchestratorPlan(
+            mode = com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT, request = "Skor tablosu",
+            repo = "Suarez1907/kay-p-kuleler", branch = "feat/skor", base = null, commitMessage = "Skor tablosu",
+            tasks = listOf(
+                com.suarez.coder.orchestrator.SubTask("t1", "Skor modeli", "d", listOf(com.suarez.coder.orchestrator.TaskFile("web/js/score.js", "create", "x")),
+                    status = com.suarez.coder.orchestrator.TaskStatus.DONE, costUsd = 0.004),
+                com.suarez.coder.orchestrator.SubTask("t2", "Tablo arayüzü", "d", listOf(com.suarez.coder.orchestrator.TaskFile("web/js/ui.js", "modify", "x")),
+                    dependsOn = listOf("t1"), status = com.suarez.coder.orchestrator.TaskStatus.FAILED, error = "Uygulayıcı 2 denemede bloğu eşleştiremedi"),
+                com.suarez.coder.orchestrator.SubTask("t3", "Seviye kaydı", "d", listOf(com.suarez.coder.orchestrator.TaskFile("tools/levels.src.mjs", "modify", "x")),
+                    requiresCi = true),
+            ),
+            state = com.suarez.coder.orchestrator.PlanState.PAUSED,
+            note = "Başarısız: t2. Devam Et bunları hatalarıyla yeniden dener; diğer değişiklikler bekliyor.",
+            roleCosts = mapOf("Planlayıcı" to 0.012, "İşçi #1" to 0.004, "İşçi #2" to 0.003),
+        ))
+        compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/orchestrator_card.png")
+        compose.onNode(androidx.compose.ui.test.hasText("Ork: Tam", substring = true)).performClick()
+        compose.waitForIdle()
+        compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].captureRoboImage("build/outputs/roborazzi/orchestrator_sheet.png")
+    }
+
     @Test fun settingsHome() {
         val vm = vm()
         compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }

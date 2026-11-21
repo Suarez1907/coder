@@ -31,7 +31,7 @@ data class ParsedPlan(
 
 class ArchitectEditor(private val agent: Agent) {
 
-    private data class Outcome(val ok: Boolean, val text: String)
+    data class Outcome(val ok: Boolean, val text: String)
 
     companion object {
         const val GROUP_CHARS = 100_000
@@ -190,39 +190,12 @@ class ArchitectEditor(private val agent: Agent) {
         ui.update()
 
         val originals = HashMap<String, String?>()
-        for (f in files.filter { it.action != "delete" }) {
-            originals[f.path] = agent.tools.readForEdit(repo, branch, base, f.path)
-        }
-        val state = HashMap(originals)
-        val editable = files.filter { it.action != "delete" }
-        val text = planText(plan)
-
-        val groups = ArrayList<MutableList<PlanFile>>()
-        var size = 0
-        for (f in editable) {
-            val len = originals[f.path]?.length ?: 0
-            if (groups.isEmpty() || size + len > GROUP_CHARS) { groups += mutableListOf<PlanFile>(); size = 0 }
-            groups.last() += f; size += len
-        }
+        val state = HashMap<String, String?>()
         val editorOutputs = StringBuilder()
-        for (group in groups) {
-            val ok = editGroup(history, ui, text, group, originals, state, editorOutputs)
-            if (!ok.ok) return ok
-        }
+        val edited = editFiles(history, ui, planText(plan), files, repo, branch, base, originals, state, editorOutputs)
+        if (!edited.ok) return edited
 
-        val changes = ArrayList<GitHub.FileChange>()
-        val summary = StringBuilder()
-        for (f in editable) {
-            val before = originals[f.path]; val after = state[f.path]
-            if (after != null && after != before) {
-                changes += GitHub.FileChange(f.path, after, false)
-                val (add, rem) = SearchReplace.lineDelta(before, after)
-                summary.append("${f.path} +$add −$rem\n")
-            }
-        }
-        files.filter { it.action == "delete" }.forEach {
-            changes += GitHub.FileChange(it.path, null, true); summary.append("${it.path} (silinecek)\n")
-        }
+        val (changes, summary) = changesFor(files.map { it.path to (it.action == "delete") }, originals, state)
         if (changes.isEmpty()) return Outcome(false, "Uygulayıcı hiçbir değişiklik üretmedi.")
 
         if (!agent.settings.autoApprove) {
@@ -239,6 +212,60 @@ class ArchitectEditor(private val agent: Agent) {
         val applied = editorOutputs.toString().take(APPLIED_IN_RESULT_CHARS)
         return Outcome(true, result + "\n" + summary + "\nUYGULANAN DEĞİŞİKLİKLER:\n" + applied)
     }
+
+    /**
+     * Reads the files not yet in [originals] and lets the editor ladder apply [planText] to them; results land in
+     * [state] (shared with other subtasks in orchestrator mode). Nothing is committed here.
+     */
+    suspend fun editFiles(
+        history: MutableList<ChatMessage>,
+        ui: AgentUi,
+        planText: String,
+        files: List<PlanFile>,
+        repo: String,
+        branch: String,
+        base: String?,
+        originals: MutableMap<String, String?>,
+        state: MutableMap<String, String?>,
+        outputs: StringBuilder,
+    ): Outcome {
+        val editable = files.filter { it.action != "delete" }
+        for (f in editable) {
+            if (!originals.containsKey(f.path)) originals[f.path] = agent.tools.readForEdit(repo, branch, base, f.path)
+            if (!state.containsKey(f.path)) state[f.path] = originals[f.path]
+        }
+        val groups = ArrayList<MutableList<PlanFile>>()
+        var size = 0
+        for (f in editable) {
+            val len = state[f.path]?.length ?: 0
+            if (groups.isEmpty() || size + len > GROUP_CHARS) { groups += mutableListOf<PlanFile>(); size = 0 }
+            groups.last() += f; size += len
+        }
+        for (group in groups) {
+            val ok = editGroup(history, ui, planText, group, originals, state, outputs)
+            if (!ok.ok) return ok
+        }
+        return Outcome(true, "")
+    }
+
+    /** File changes between [originals] and [state] for (path, delete) pairs, plus a "+add −rem" summary. */
+    fun changesFor(paths: List<Pair<String, Boolean>>, originals: Map<String, String?>, state: Map<String, String?>): Pair<List<GitHub.FileChange>, String> {
+        val changes = ArrayList<GitHub.FileChange>()
+        val summary = StringBuilder()
+        for ((path, delete) in paths.distinctBy { it.first }) {
+            if (delete) { changes += GitHub.FileChange(path, null, true); summary.append("$path (silinecek)\n"); continue }
+            val before = originals[path]; val after = state[path]
+            if (after != null && after != before) {
+                changes += GitHub.FileChange(path, after, false)
+                val (add, rem) = SearchReplace.lineDelta(before, after)
+                summary.append("$path +$add −$rem\n")
+            }
+        }
+        return changes to summary.toString()
+    }
+
+    fun planTextFor(message: String, notes: String, files: List<PlanFile>) =
+        planText(ParsedPlan("", "", null, message, notes, files))
 
     /** Validates edited files locally; returns problems keyed by path. */
     private fun validate(paths: Collection<String>, originals: Map<String, String?>, state: Map<String, String?>): Map<String, String> =

@@ -6,6 +6,14 @@ import com.suarez.coder.cost.Price
 import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.orchestrator.MultiAgentOrchestrator
+import com.suarez.coder.orchestrator.OrchestratorHooks
+import com.suarez.coder.orchestrator.OrchestratorMode
+import com.suarez.coder.orchestrator.OrchestratorPlan
+import com.suarez.coder.orchestrator.OrchestratorPlanner
+import com.suarez.coder.orchestrator.PlanState
+import com.suarez.coder.orchestrator.SequentialOrchestrator
+import com.suarez.coder.orchestrator.TaskStatus
 import com.suarez.coder.decision.DecisionChain
 import com.suarez.coder.decision.DecisionClient
 import com.suarez.coder.decision.DecisionProvider
@@ -111,6 +119,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             "decision" -> "Karar"
             "router" -> "Yönlendirici"
             "escalation" -> "Yükseltme"
+            "planner" -> "Planlayıcı"
+            "reviewer" -> "İnceleyici"
             else -> "Ajan"
         }
     }
@@ -192,7 +202,74 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     fun sessionCost(history: List<ChatMessage>) = history.filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
     fun money(usd: Double) = "${Pricing.formatUsd(usd)} (${Pricing.formatTry(usd * settings.usdTry)})"
 
+    /** Orchestrator: the budget is checked between subtasks (and the run paused) instead of asking mid-task. */
+    var budgetDeferred = false
+
+    fun budgetExceeded(history: List<ChatMessage>): Boolean {
+        val budget = settings.budgetUsd
+        return budget > 0 && sessionCost(history) >= maxOf(budget, budgetApprovedUpTo)
+    }
+
+    /** Resuming a plan paused at the budget counts as approving one more budget step. */
+    fun approveBudget(history: List<ChatMessage>) { budgetApprovedUpTo = sessionCost(history) + settings.budgetUsd }
+
+    var orchestratorHooks: OrchestratorHooks? = null
+
+    private fun orchestratorMode() = OrchestratorMode.of(settings.orchestratorMode)
+
+    /** Architect route: the normal two-phase flow, or the orchestrator the user picked. */
+    private suspend fun architectFlow(history: MutableList<ChatMessage>, ui: AgentUi) {
+        val mode = orchestratorMode()
+        val hooks = orchestratorHooks
+        if (mode == OrchestratorMode.OFF || hooks == null) { ArchitectEditor(this).run(history, ui); return }
+        val plan = OrchestratorPlanner(this).plan(history, ui, mode) ?: return
+        hooks.save(plan)
+        history += ChatMessage.Notice("🗂 ${mode.label} plan: ${plan.tasks.size} alt görev → ${plan.repo}@${plan.branch}",
+            plan.tasks.joinToString("\n\n") { t -> "${t.id}. ${t.title} [${t.ownedFiles.joinToString()}]" +
+                (if (t.dependsOn.isNotEmpty()) " ← ${t.dependsOn.joinToString()}" else "") + "\n${t.description}" })
+        ui.update()
+        if (!settings.autoApprove) {
+            history += ChatMessage.Assistant("🗂 Plan hazır. Aşağıdaki kartta inceleyip **Planı Başlat**'a dokunun (veya düzenleyin / iptal edin).", model = "coder")
+            return
+        }
+        runPlanSteps(history, ui, plan)
+    }
+
+    /** Starts or resumes a saved plan (the card's start / resume buttons). */
+    suspend fun executePlan(history: MutableList<ChatMessage>, ui: AgentUi, plan: OrchestratorPlan) {
+        flexDisabledForRun = false
+        val start = history.size
+        try {
+            history += ChatMessage.Notice("▶️ Plan ${if (plan.state == PlanState.AWAITING_APPROVAL) "başlatıldı" else "devam ediyor"}: ${plan.tasks.count { it.status != TaskStatus.DONE }} alt görev kaldı")
+            ui.update()
+            runPlanSteps(history, ui, plan)
+        } finally {
+            usageSummary(history, start)?.let { history += it }
+            ui.update()
+        }
+    }
+
+    private suspend fun runPlanSteps(history: MutableList<ChatMessage>, ui: AgentUi, plan0: OrchestratorPlan) {
+        val hooks = orchestratorHooks ?: return
+        hooks.clearPause()
+        if (budgetExceeded(history)) approveBudget(history)
+        // Failed or interrupted subtasks go back to the queue (their error is kept as context for the retry).
+        val plan = plan0.copy(tasks = plan0.tasks.map { if (it.status == TaskStatus.FAILED || it.status == TaskStatus.RUNNING) it.copy(status = TaskStatus.PENDING) else it })
+        val runner = if (plan.mode == OrchestratorMode.FULL_MULTI_AGENT) MultiAgentOrchestrator(this, hooks) else null
+        val seq = if (runner == null) SequentialOrchestrator(this, hooks) else null
+        try {
+            if (runner != null) runner.run(history, ui, plan) else seq!!.run(history, ui, plan)
+        } catch (e: Throwable) {
+            // Stopped or crashed mid-step: keep the plan resumable.
+            val last = runner?.current ?: seq?.current ?: plan
+            if (!last.state.finished) hooks.save(last.copy(state = PlanState.PAUSED, note = "Durduruldu: ${e.message ?: e.javaClass.simpleName}".take(200),
+                tasks = last.tasks.map { if (it.status == TaskStatus.RUNNING) it.copy(status = TaskStatus.PENDING) else it }))
+            throw e
+        }
+    }
+
     private suspend fun checkBudget(history: List<ChatMessage>, ui: AgentUi) {
+        if (budgetDeferred) return
         val budget = settings.budgetUsd
         if (budget <= 0) return
         val cost = sessionCost(history)
@@ -563,7 +640,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             }
             val questionSpecs = tools.readOnlySpecs.filter { it.name != "submit_plan" }
             when (route) {
-                Route.COMPLEX_ARCHITECT -> ArchitectEditor(this).run(history, ui)
+                Route.COMPLEX_ARCHITECT -> architectFlow(history, ui)
                 Route.SIMPLE_EDIT ->
                     agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
@@ -571,7 +648,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                     agentLoop(history, ui, editorRef(), "agent", questionSystem(), "agent", questionSpecs, readOnly = true, stopTool = null,
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
                 null ->
-                    if (settings.architectMode) ArchitectEditor(this).run(history, ui)
+                    if (settings.architectMode) architectFlow(history, ui)
                     else agentLoop(history, ui, singleRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
             }
@@ -720,7 +797,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             val (role, model) = k
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
             val c = list.sumOf { costOf(it) }
-            val name = if (role in setOf("architect", "editor", "router")) "${roleLabel(role)} ($model)" else roleLabel(role)
+            val name = if (role in setOf("architect", "editor", "router", "planner", "reviewer")) "${roleLabel(role)} ($model)" else roleLabel(role)
             if (role == "cache") "$name ${Pricing.formatUsd(c)}"
             else "$name ${Pricing.formatTokens(u.input)}→${Pricing.formatTokens(u.output + u.thoughts)} ${Pricing.formatUsd(c)}" +
                 if (estimated(model)) "*" else ""
@@ -742,7 +819,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             (if (recs.any { estimated(it.model) }) "\n* Tahmini fiyat: bu model fiyat tablosunda yok; Ayarlar > Fiyat düzeltmeleri'nden girin." else "")
         val hitText = hit?.let { " · önbellek %${(it * 100).roundToInt()}" } ?: ""
         val counters = HashMap<String, Int>()
-        val steps = recs.filter { it.role in setOf("architect", "agent", "editor", "escalation") }.joinToString("\n") { r ->
+        val steps = recs.filter { it.role in setOf("architect", "agent", "editor", "escalation", "planner", "reviewer") }.joinToString("\n") { r ->
             val n = counters.merge(r.role, 1, Int::plus)
             val u = r.usage
             val cachePct = if (u.input > 0) (u.cached * 100 / u.input) else 0

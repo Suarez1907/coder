@@ -297,6 +297,19 @@ class Settings(context: Context) {
         get() = str("decision_model", "gemini-decision-1")
         set(v) = put("decision_model", v.trim())
 
+    /** OrchestratorMode name; OFF keeps the normal flow untouched. */
+    var orchestratorMode: String
+        get() = str("orchestrator_mode", "OFF")
+        set(v) = put("orchestrator_mode", v)
+
+    var orchMaxParallel: Int
+        get() = prefs.getInt("orch_max_parallel", 2).coerceIn(1, 3)
+        set(v) = prefs.edit().putInt("orch_max_parallel", v.coerceIn(1, 3)).apply()
+
+    var orchMaxReviewRounds: Int
+        get() = prefs.getInt("orch_max_review_rounds", 2).coerceIn(0, 5)
+        set(v) = prefs.edit().putInt("orch_max_review_rounds", v.coerceIn(0, 5)).apply()
+
     /** "gemini", "openrouter" or "auto" (primary + backup). */
     var decisionProvider: String
         get() = str("decision_provider", "auto")

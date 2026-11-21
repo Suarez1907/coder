@@ -57,8 +57,9 @@ class Ledger(private val file: File) {
         fun key(session: String, at: Long, role: String, model: String) = "$session|$at|$role|$model"
 
         fun roleGroup(role: String) = when (role) {
-            "architect" -> "Mimar"
+            "architect", "planner" -> "Mimar"
             "editor", "escalation" -> "Uygulayıcı"
+            "reviewer" -> "İnceleyici"
             "router", "decision" -> "Yönlendirici"
             "summary" -> "Özet"
             "cache" -> "Önbellek depolama"

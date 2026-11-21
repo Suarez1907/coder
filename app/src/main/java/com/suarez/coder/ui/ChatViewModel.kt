@@ -32,6 +32,11 @@ import com.suarez.coder.decision.Route
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.MessageJson
 import com.suarez.coder.llm.ModelRef
+import com.suarez.coder.orchestrator.OrchestratorHooks
+import com.suarez.coder.orchestrator.OrchestratorMode
+import com.suarez.coder.orchestrator.OrchestratorPlan
+import com.suarez.coder.orchestrator.OrchestratorStore
+import com.suarez.coder.orchestrator.PlanState
 import com.suarez.coder.llm.OpenAiCompatClient
 import com.suarez.coder.llm.OpenRouterCatalog
 import kotlinx.coroutines.CancellationException
@@ -63,6 +68,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val sessionStore = SessionStore(File(app.filesDir, "chats"), legacyChat = File(app.filesDir, "chat.json"))
     private val ledger = Ledger(File(app.filesDir, "ledger.jsonl"))
     private val loggedKeys = HashSet<String>()
+    private val planStore = OrchestratorStore(File(app.filesDir, "orchestrator"))
+
+    /** Orchestrator plan of the chat on screen (shown as a card), or null. */
+    var activePlan by mutableStateOf<OrchestratorPlan?>(null)
+        private set
+    /** Set by "Duraklat": the run stops after the current subtask. */
+    var pauseRequested by mutableStateOf(false)
+        private set
+    /** Session the running job belongs to (the user may switch chats while it finishes). */
+    private var jobSession = ""
 
     /** Id of the chat on screen. */
     var currentSessionId by mutableStateOf("")
@@ -115,6 +130,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (latest != null) messages.addAll(sessionStore.load(latest.id))
         sessions = sessionStore.list()
         profiles = settings.profiles()
+        activePlan = planStore.recover(currentSessionId)
+        agent.orchestratorHooks = object : OrchestratorHooks {
+            override fun save(plan: OrchestratorPlan) {
+                val session = jobSession.ifBlank { currentSessionId }
+                planStore.save(session, plan)
+                if (session == currentSessionId) activePlan = plan
+            }
+            override fun pauseRequested() = pauseRequested
+            override fun clearPause() { pauseRequested = false }
+        }
         viewModelScope.launch(Dispatchers.IO) { initLedger() }
         agent.tools.ciListener = object : ToolRegistry.CiListener {
             override fun started(repo: String, label: String) {
@@ -282,15 +307,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun start(override: Route?) {
+    private fun start(override: Route?) = launchRun { work, agentUi -> agent.run(work, agentUi, override) }
+
+    private fun launchRun(block: suspend (MutableList<ChatMessage>, AgentUi) -> Unit) {
         running = true
+        jobSession = currentSessionId
         job = viewModelScope.launch {
             val work = messages.toMutableList()
             val agentUi = object : AgentUi by ui {
                 override fun update() { sync(work); save() }
             }
             try {
-                agent.run(work, agentUi, override)
+                block(work, agentUi)
             } catch (e: CancellationException) {
                 work += ChatMessage.Notice("Durduruldu.")
             } catch (e: StopException) {
@@ -317,6 +345,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun answer(ok: Boolean) { pending?.answer?.complete(ok) }
 
+    // ---- Orchestrator ----
+
+    fun setOrchestratorMode(mode: OrchestratorMode) { settings.orchestratorMode = mode.name; refreshSettings() }
+
+    /** "Planı Başlat" / "Devam Et". */
+    fun startPlan() {
+        val p = activePlan ?: return
+        if (running || p.state.finished || p.state == PlanState.RUNNING) return
+        pauseRequested = false
+        launchRun { work, agentUi -> agent.executePlan(work, agentUi, p) }
+    }
+
+    /** "Duraklat": finishes the current subtask, then stops cleanly. */
+    fun pausePlan() { if (activePlan?.state == PlanState.RUNNING) pauseRequested = true }
+
+    fun cancelPlan() {
+        val p = activePlan ?: return
+        if (p.state == PlanState.RUNNING) stop()
+        pauseRequested = false
+        val cancelled = p.copy(state = PlanState.CANCELLED, note = "İptal edildi.", staged = emptyMap())
+        planStore.save(currentSessionId, cancelled)
+        activePlan = cancelled
+    }
+
+    /** Saves the user's edits (skipped subtasks, changed descriptions) before starting. */
+    fun editPlan(updated: OrchestratorPlan) {
+        if (running) return
+        planStore.save(currentSessionId, updated)
+        activePlan = updated
+    }
+
+    fun dismissPlan() {
+        if (activePlan?.state == PlanState.RUNNING) return
+        planStore.delete(currentSessionId)
+        activePlan = null
+    }
+
     fun stop() { job?.cancel() }
 
     /** Starts a fresh chat; the current one stays in the history. */
@@ -327,6 +392,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         messages.clear()
         agent.resetSession()
         preview = null
+        activePlan = null
+        pauseRequested = false
     }
 
     fun openSession(id: String) {
@@ -338,14 +405,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         messages.addAll(sessionStore.load(id))
         agent.resetSession()
         preview = null
+        activePlan = planStore.recover(id)
+        pauseRequested = false
     }
 
     fun deleteSession(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
             sessionStore.delete(id)
+            planStore.delete(id)
             withContext(Dispatchers.Main) {
                 sessions = sessionStore.list()
-                if (id == currentSessionId) { currentSessionId = sessionStore.newId(); messages.clear(); agent.resetSession() }
+                if (id == currentSessionId) { currentSessionId = sessionStore.newId(); messages.clear(); agent.resetSession(); activePlan = null }
             }
         }
     }

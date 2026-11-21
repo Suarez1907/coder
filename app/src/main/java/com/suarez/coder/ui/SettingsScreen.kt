@@ -288,6 +288,20 @@ private fun ArchitectPage(vm: ChatViewModel) {
     }
 
     Group {
+        Title("Orkestratör", "Yalnızca Mimar'a giden (çok dosyalı) işlerde kullanılır. Kapalı: normal akış, ek çağrı yok. " +
+            "Hafif Sıralı: plan → alt görevler sırayla, her biri ayrı commit. Tam: plan → dosyaları çakışmayan işçiler paralel → " +
+            "İnceleyici → tek commit. Sohbet ekranındaki kontrol panelinden görev başına değiştirilebilir.")
+        var orch by remember { mutableStateOf(s.orchestratorMode) }
+        Segmented(com.suarez.coder.orchestrator.OrchestratorMode.entries.map { it.name to it.label }, orch) {
+            orch = it; s.orchestratorMode = it; vm.refreshSettings()
+        }
+        NumberSetting("Tam mod: en fazla paralel işçi (1-3)", s.orchMaxParallel,
+            info = "Mobil ağ ve hız sınırları için 2 önerilir.") { s.orchMaxParallel = it }
+        NumberSetting("Tam mod: en fazla inceleme turu", s.orchMaxReviewRounds,
+            info = "İnceleyici'nin açabileceği düzeltme turu; sınırda durup size sorar.") { s.orchMaxReviewRounds = it }
+    }
+
+    Group {
         Title("Yönlendirme", "Akıllı Yönlendirme açıkken sıra: yerel kural ($0) → Decision 1 → ucuz model → manuel ayar.")
         SwitchSetting("Akıllı Yönlendirme", "Görevi otomatik sınıflandır", s.smartRouting) { s.smartRouting = it; vm.refreshSettings() }
         SwitchSetting("Decision 1 kullan", "Sınıflandırma + dosya seçimi + zorluk", s.useDecision1,
