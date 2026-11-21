@@ -1,5 +1,8 @@
 package com.suarez.coder.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -8,11 +11,14 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 
 /** Semantic colours that Material's scheme has no slot for. */
 @Immutable
@@ -29,61 +35,65 @@ data class CoderColors(
 )
 
 private val DarkCoder = CoderColors(
-    architect = Color(0xFF8B9CFF), editor = Color(0xFF34D399), cost = Color(0xFFF5B451),
-    cacheGood = Color(0xFF4ADE80), cacheMid = Color(0xFFFACC15), warn = Color(0xFFF87171),
-    border = Color(0xFF262C3D), muted = Color(0xFF7C8599), codeBg = Color(0xFF0D1017),
+    architect = Color(0xFF5E9EFF), editor = Color(0xFFA1A1AA), cost = Color(0xFFE4E4E7),
+    cacheGood = Color(0xFF34D399), cacheMid = Color(0xFFFBBF24), warn = Color(0xFFF87171),
+    border = Color.White.copy(alpha = 0.07f), muted = Color(0xFF71717A), codeBg = Color(0xFF0E0E11),
 )
 
-private val OledCoder = DarkCoder.copy(border = Color(0xFF1F2433), codeBg = Color(0xFF07080C))
+private val OledCoder = DarkCoder.copy(
+    border = Color.White.copy(alpha = 0.08f), codeBg = Color(0xFF060608),
+)
 
 private val LightCoder = CoderColors(
-    architect = Color(0xFF4F5BD5), editor = Color(0xFF0F9D74), cost = Color(0xFFB7791F),
+    architect = Color(0xFF2563EB), editor = Color(0xFF52525B), cost = Color(0xFF18181B),
     cacheGood = Color(0xFF15803D), cacheMid = Color(0xFFA16207), warn = Color(0xFFDC2626),
-    border = Color(0xFFDDE1EA), muted = Color(0xFF6B7280), codeBg = Color(0xFFF3F4F8),
+    border = Color.Black.copy(alpha = 0.08f), muted = Color(0xFF71717A), codeBg = Color(0xFFF4F4F5),
 )
 
 val LocalCoderColors = staticCompositionLocalOf { DarkCoder }
+val LocalIsDark = staticCompositionLocalOf { true }
 
 /** Shortcut: `coder.architect`, `coder.cost`, … */
 val coder: CoderColors @Composable get() = LocalCoderColors.current
 
 /** Monospace styles for costs, percentages, paths, tool names and code. */
 object Mono {
-    val body = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp)
-    val small = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
-    val tiny = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp)
+    val body = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp, fontFeatureSettings = "tnum")
+    val small = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp, fontFeatureSettings = "tnum")
+    val tiny = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp, fontFeatureSettings = "tnum")
+    val micro = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, lineHeight = 14.sp, fontFeatureSettings = "tnum")
 }
 
 private fun ideDark(oled: Boolean): ColorScheme {
-    val bg = if (oled) Color(0xFF000000) else Color(0xFF090B10)
-    val surface = if (oled) Color(0xFF0A0C12) else Color(0xFF12151E)
-    val raised = if (oled) Color(0xFF141822) else Color(0xFF1A1F2C)
-    val border = if (oled) Color(0xFF1F2433) else Color(0xFF262C3D)
+    val bg = if (oled) Color(0xFF000000) else Color(0xFF0A0A0C)
+    val surface = if (oled) Color(0xFF0B0B0E) else Color(0xFF121215)
+    val raised = if (oled) Color(0xFF16161A) else Color(0xFF1B1B1F)
+    val border = if (oled) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.07f)
     return darkColorScheme(
-        primary = Color(0xFF8B9CFF), onPrimary = Color(0xFF0B1030),
-        primaryContainer = Color(0xFF232A4D), onPrimaryContainer = Color(0xFFD6DCFF),
-        secondary = Color(0xFF34D399), onSecondary = Color(0xFF03201A),
-        secondaryContainer = Color(0xFF113328), onSecondaryContainer = Color(0xFFB4F5DA),
-        tertiary = Color(0xFFF5B451), onTertiary = Color(0xFF2A1A00),
+        primary = Color(0xFF5E9EFF), onPrimary = Color(0xFF0B1030),
+        primaryContainer = Color(0xFF1B1B1F), onPrimaryContainer = Color(0xFFF4F4F5),
+        secondary = Color(0xFFA1A1AA), onSecondary = Color(0xFF18181B),
+        secondaryContainer = Color(0xFF1B1B1F), onSecondaryContainer = Color(0xFFE4E4E7),
+        tertiary = Color(0xFFE4E4E7), onTertiary = Color(0xFF18181B),
         error = Color(0xFFF87171), onError = Color(0xFF2B0808),
-        background = bg, onBackground = Color(0xFFE6E9F2),
-        surface = surface, onSurface = Color(0xFFE6E9F2),
-        surfaceVariant = raised, onSurfaceVariant = Color(0xFF9AA3B8),
+        background = bg, onBackground = Color(0xFFF4F4F5),
+        surface = surface, onSurface = Color(0xFFF4F4F5),
+        surfaceVariant = raised, onSurfaceVariant = Color(0xFFA1A1AA),
         surfaceContainerLowest = bg, surfaceContainerLow = surface, surfaceContainer = surface,
         surfaceContainerHigh = raised, surfaceContainerHighest = raised,
         outline = border, outlineVariant = border,
-        inverseSurface = Color(0xFFE6E9F2), inverseOnSurface = Color(0xFF12151E),
+        inverseSurface = Color(0xFFF4F4F5), inverseOnSurface = Color(0xFF121215),
     )
 }
 
 private val ideLight = lightColorScheme(
-    primary = Color(0xFF4F5BD5), onPrimary = Color.White,
-    primaryContainer = Color(0xFFE0E3FF), onPrimaryContainer = Color(0xFF151C5C),
-    secondary = Color(0xFF0F9D74), onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD3F5E8), onSecondaryContainer = Color(0xFF053D2D),
-    tertiary = Color(0xFFB7791F),
-    background = Color(0xFFF7F8FB), surface = Color.White, surfaceVariant = Color(0xFFF0F2F7),
-    outline = Color(0xFFDDE1EA), outlineVariant = Color(0xFFDDE1EA),
+    primary = Color(0xFF2563EB), onPrimary = Color.White,
+    primaryContainer = Color(0xFFE4E4E7), onPrimaryContainer = Color(0xFF18181B),
+    secondary = Color(0xFF52525B), onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF4F4F5), onSecondaryContainer = Color(0xFF18181B),
+    tertiary = Color(0xFF18181B),
+    background = Color(0xFFFAFAFA), surface = Color.White, surfaceVariant = Color(0xFFF4F4F5),
+    outline = Color.Black.copy(alpha = 0.08f), outlineVariant = Color.Black.copy(alpha = 0.08f),
 )
 
 /** [mode]: "dark" (default IDE theme), "oled" (pure black), "light" or "system". */
@@ -101,9 +111,35 @@ fun CoderTheme(mode: String, content: @Composable () -> Unit) {
         oled -> OledCoder
         else -> DarkCoder
     }
-    CompositionLocalProvider(LocalCoderColors provides colors) {
+    CompositionLocalProvider(LocalCoderColors provides colors, LocalIsDark provides dark) {
+        SystemBarsEffect()
         MaterialTheme(colorScheme = scheme, content = content)
     }
+}
+
+/** Force system bar icon contrast (white on dark, dark on light) for Activity, Dialog and Sheet windows. */
+@Composable
+fun SystemBarsEffect() {
+    val view = LocalView.current
+    if (view.isInEditMode) return
+    val isDark = LocalIsDark.current
+    SideEffect {
+        val windows = buildList {
+            (view.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window?.let { add(it) }
+            view.context.findActivity()?.window?.let { add(it) }
+        }.distinct()
+        for (window in windows) {
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.isAppearanceLightStatusBars = !isDark
+            controller.isAppearanceLightNavigationBars = !isDark
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 /** Short model names for the compact control bar: gemini-4-hydrogen → H4, gemini-3.8-flash → 3.8F. */

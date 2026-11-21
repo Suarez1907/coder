@@ -150,10 +150,25 @@ class LedgerTest {
         assertEquals("me/app", d.byRepo.first().first)
         assertEquals(0.5, d.byRepo.first().third!!, 1e-9) // (800+200)/2000
         assertEquals(0.0, d.byRepo.first { it.first == "me/web" }.third!!, 1e-9) // decision excluded
-        assertNull(d.byRepo.first { it.first == "(repo yok)" }.third)
+        assertNull(d.byRepo.first { it.first == "Genel" }.third)
         assertEquals(0.30, d.byRole.first { it.first == "Uygulayıcı" }.second, 1e-9)
         assertEquals(0.30, d.byRole.first { it.first == "Mimar" }.second, 1e-9)
         assertEquals(listOf(Ledger.monthKey(now), Ledger.monthKey(at(2026, 10, 9))), d.byMonth.map { it.first })
         assertEquals(1000.0 / 4000, d.cacheHitRate!!, 1e-9)
+    }
+
+    @Test fun zeroTimestampEntriesFallUnderPreviousRecords() {
+        val now = at(2026, 11, 21)
+        val entries = listOf(
+            e(at(2026, 11, 2), "me/app", "architect", 0.30),
+            e(at(2026, 10, 9), "me/web", "editor", 0.20),
+            e(0L, "me/app", "editor", 0.05),
+        )
+        val d = Ledger.aggregate(entries, now)
+        assertEquals("Önceki kayıtlar", Ledger.monthKey(0L))
+        assertEquals("Önceki kayıtlar", d.byMonth.last().first)
+        assertFalse(d.byMonth.any { it.first == "1970-01" })
+        assertEquals(0.30, d.monthUsd, 1e-9) // the at = 0L entry is excluded from monthUsd
+        assertEquals(0.05, d.byMonth.last().second, 1e-9)
     }
 }
