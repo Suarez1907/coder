@@ -24,7 +24,7 @@ object Http {
 
     val JSON = "application/json; charset=utf-8".toMediaType()
 
-    data class Result(val code: Int, val body: String, val contentType: String?)
+    data class Result(val code: Int, val body: String, val contentType: String?, val retryAfter: String? = null)
 
     /** Executes a request; cancelling the coroutine cancels the HTTP call. */
     suspend fun execute(request: Request, client: OkHttpClient = this.client): Result =
@@ -43,7 +43,7 @@ object Http {
                                 if (cont.isActive) cont.resumeWithException(e)
                                 return
                             }
-                            if (cont.isActive) cont.resume(Result(it.code, body, it.header("Content-Type")))
+                            if (cont.isActive) cont.resume(Result(it.code, body, it.header("Content-Type"), it.header("Retry-After")))
                         }
                     }
                 })

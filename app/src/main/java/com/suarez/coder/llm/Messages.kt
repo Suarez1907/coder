@@ -50,6 +50,8 @@ sealed class ChatMessage {
         val discount: Double = 1.0,
         /** Creation time; also identifies the record in the persistent cost ledger. */
         val at: Long = System.currentTimeMillis(),
+        /** Cost reported by the API itself (OpenRouter usage.cost); replaces the price-table estimate. */
+        val actualUsd: Double? = null,
     ) : ChatMessage()
 
     /** Everything model-visible before this marker is sent compacted; everything after it in full (append-only). */
@@ -93,6 +95,8 @@ data class LlmResponse(
     val truncated: Boolean = false,
     /** Tier that actually served the request, as reported by the API. */
     val serviceTier: String? = null,
+    /** Real USD cost reported by the API (OpenRouter), when available. */
+    val costUsd: Double? = null,
 )
 
 interface LlmClient {
@@ -155,6 +159,7 @@ object MessageJson {
                 }
                 is ChatMessage.UsageRecord -> o.put("t", "usage").put("model", m.model).put("role", m.role)
                     .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label).put("disc", m.discount).put("at", m.at)
+                    .also { j -> m.actualUsd?.let { j.put("usd", it) } }
                 is ChatMessage.CompactMark -> o.put("t", "mark")
                 is ChatMessage.ContextBlock -> o.put("t", "ctx").put("text", m.text).put("label", m.label)
                 is ChatMessage.ToolResult -> o.put("t", "tool").put("id", m.callId).put("name", m.name)
@@ -190,7 +195,8 @@ object MessageJson {
                 "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,
                     o.optString("route"), o.optBoolean("ov"))
                 "usage" -> ChatMessage.UsageRecord(o.optString("model"), o.optString("role"), usageFrom(o.optJSONObject("u")),
-                    o.optDouble("extra", 0.0), o.optString("label"), o.optDouble("disc", 1.0), o.optLong("at", 0L))
+                    o.optDouble("extra", 0.0), o.optString("label"), o.optDouble("disc", 1.0), o.optLong("at", 0L),
+                    if (o.has("usd")) o.optDouble("usd") else null)
                 "mark" -> ChatMessage.CompactMark
                 "ctx" -> ChatMessage.ContextBlock(o.getString("text"), o.optString("label"))
                 "tool" -> ChatMessage.ToolResult(o.getString("id"), o.getString("name"), o.getString("content"), o.optBoolean("err"))

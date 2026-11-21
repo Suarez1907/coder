@@ -205,7 +205,8 @@ private fun ProvidersPage(vm: ChatViewModel) {
     }
     Group {
         Title("OpenRouter", "Tek anahtarla Claude, GPT, Llama, Qwen ve diğer yüzlerce model. Liste alınınca fiyatlar ve görsel desteği otomatik öğrenilir; " +
-            "yalnızca araç çağırabilen modeller listelenir. Mimar/Uygulayıcı seçiminde de kullanılabilir.")
+            "yalnızca araç çağırabilen modeller listelenir. Maliyet OpenRouter'ın bildirdiği gerçek tutardır; düşünme seviyesi destekleyen modellere gönderilir. " +
+            "Geçici hatalar (429, 502, 503…) 3 kez yeniden denenir.")
         TextSetting("API anahtarı", s.openrouterKey, secret = true) { s.openrouterKey = it; vm.refreshSettings() }
         TextButton(onClick = { uri.openUri("https://openrouter.ai/settings/keys") }) { Text("Anahtar al: openrouter.ai") }
         key(modelVersion) {

@@ -110,4 +110,103 @@ class OpenRouterTest {
             assertEquals(800L, r.usage.cached)
         } finally { server.shutdown() }
     }
+
+    private fun okBody(cost: Double? = null) = JSONObject()
+        .put("choices", JSONArray().put(JSONObject().put("finish_reason", "stop").put("message", JSONObject().put("content", "ok"))))
+        .put("usage", JSONObject().put("prompt_tokens", 100).put("completion_tokens", 5).also { u -> cost?.let { u.put("cost", it) } })
+        .toString()
+
+    private fun client(server: MockWebServer, reasoning: Boolean = false, openRouter: Boolean = true) =
+        OpenAiCompatClient("OpenRouter", server.url("/v1").toString().trimEnd('/'), "k", "qwen/qwen3-coder",
+            openRouter = openRouter, reasoning = reasoning, backoffMs = listOf(1L, 1L, 1L))
+
+    private fun <T> withServer(block: suspend (MockWebServer) -> T): T = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try { block(server) } finally { server.shutdown() }
+    }
+
+    @Test fun realCostIsReadAndUsageIncludeIsSent() = withServer { server ->
+        server.enqueue(MockResponse().setBody(okBody(cost = 0.00123)))
+        val r = client(server).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions())
+        val body = JSONObject(server.takeRequest().body.readUtf8())
+        assertTrue(body.getJSONObject("usage").getBoolean("include"))
+        assertEquals(0.00123, r.costUsd!!, 1e-12)
+    }
+
+    @Test fun noCostFieldMeansPriceTableFallback() = withServer { server ->
+        server.enqueue(MockResponse().setBody(okBody()))
+        val r = client(server, openRouter = false).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions())
+        assertEquals(null, r.costUsd)
+        assertFalse(JSONObject(server.takeRequest().body.readUtf8()).has("usage"))
+    }
+
+    @Test fun reasoningEffortOnlyForReasoningModels() = withServer { server ->
+        repeat(3) { server.enqueue(MockResponse().setBody(okBody())) }
+        client(server, reasoning = true).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(thinkingLevel = "high"))
+        assertEquals("high", JSONObject(server.takeRequest().body.readUtf8()).getJSONObject("reasoning").getString("effort"))
+        client(server, reasoning = true).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(thinkingLevel = "minimal"))
+        assertEquals("low", JSONObject(server.takeRequest().body.readUtf8()).getJSONObject("reasoning").getString("effort"))
+        client(server, reasoning = false).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(thinkingLevel = "high"))
+        assertFalse(JSONObject(server.takeRequest().body.readUtf8()).has("reasoning"))
+    }
+
+    @Test fun rejectedReasoningIsDroppedOnce() = withServer { server ->
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"reasoning is not supported"}}"""))
+        server.enqueue(MockResponse().setBody(okBody()))
+        val r = client(server, reasoning = true).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(thinkingLevel = "low"))
+        assertEquals("ok", r.message.text)
+        assertTrue(JSONObject(server.takeRequest().body.readUtf8()).has("reasoning"))
+        assertFalse(JSONObject(server.takeRequest().body.readUtf8()).has("reasoning"))
+    }
+
+    @Test fun transientErrorsAreRetriedThenSucceed() = withServer { server ->
+        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "0").setBody("""{"error":{"message":"rate limited"}}"""))
+        server.enqueue(MockResponse().setResponseCode(502).setBody("bad gateway"))
+        server.enqueue(MockResponse().setResponseCode(529).setBody("overloaded"))
+        server.enqueue(MockResponse().setBody(okBody()))
+        val r = client(server).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions())
+        assertEquals("ok", r.message.text)
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test fun transientErrorsGiveUpAfterThreeRetries() = withServer { server ->
+        repeat(5) { server.enqueue(MockResponse().setResponseCode(503).setBody("""{"error":{"message":"no capacity"}}""")) }
+        val e = runCatching { client(server).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions()) }.exceptionOrNull()
+        assertTrue(e is com.suarez.coder.llm.LlmException)
+        assertTrue(e!!.message!!.contains("geçici"))
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test fun realErrorsAreNotRetried() = withServer { server ->
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"bad key"}}"""))
+        val e = runCatching { client(server).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions()) }.exceptionOrNull()
+        assertTrue(e!!.message!!.contains("bad key"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun retryAfterParsing() {
+        assertEquals(3000L, OpenAiCompatClient.retryAfterMs("3"))
+        assertEquals(30_000L, OpenAiCompatClient.retryAfterMs("600"))
+        assertEquals(null, OpenAiCompatClient.retryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT"))
+        assertTrue(OpenAiCompatClient.isTransient(529) && !OpenAiCompatClient.isTransient(400))
+    }
+
+    @Test fun reasoningCapabilityFromModelList() {
+        val list = OpenRouterCatalog.parse("""{"data":[
+            {"id":"a/think","supported_parameters":["tools","reasoning"]},
+            {"id":"b/old","supported_parameters":["tools","include_reasoning"]},
+            {"id":"c/plain","supported_parameters":["tools"]},
+            {"id":"d/unknown"}]}""")
+        assertEquals(listOf(true, true, false, false), list.map { it.reasoning })
+        assertTrue(OpenRouterCatalog.fromMeta(OpenRouterCatalog.toMeta(list)).getValue("a/think").reasoning)
+    }
+
+    @Test fun actualCostSurvivesSaveAndLoad() {
+        val rec = ChatMessage.UsageRecord("qwen/qwen3-coder", "editor", com.suarez.coder.llm.Usage(input = 10), actualUsd = 0.0042)
+        val back = com.suarez.coder.llm.MessageJson.fromJson(com.suarez.coder.llm.MessageJson.toJson(listOf(rec))).single() as ChatMessage.UsageRecord
+        assertEquals(0.0042, back.actualUsd!!, 1e-12)
+        val old = com.suarez.coder.llm.MessageJson.fromJson(com.suarez.coder.llm.MessageJson.toJson(listOf(rec.copy(actualUsd = null)))).single()
+        assertEquals(null, (old as ChatMessage.UsageRecord).actualUsd)
+    }
 }

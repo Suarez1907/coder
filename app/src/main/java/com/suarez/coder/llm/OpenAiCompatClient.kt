@@ -17,7 +17,48 @@ class OpenAiCompatClient(
     /** Mark the stable prefix with cache_control breakpoints (Anthropic models via OpenRouter). */
     private val cacheControl: Boolean = false,
     private val extraHeaders: Map<String, String> = emptyMap(),
+    /** OpenRouter: ask for usage.cost (real USD) in every response. */
+    private val openRouter: Boolean = false,
+    /** The model accepts reasoning.effort (known from OpenRouter's model list). */
+    private val reasoning: Boolean = false,
+    /** Waits between retries of temporary errors; visible for tests. */
+    private val backoffMs: List<Long> = BACKOFF_MS,
 ) : LlmClient {
+
+    companion object {
+        /** Temporary upstream/proxy failures: retried, never treated as a model mistake. */
+        val TRANSIENT_CODES = setOf(408, 429, 500, 502, 503, 504, 520, 522, 524, 529)
+        val BACKOFF_MS = listOf(2_000L, 5_000L, 10_000L)
+        private const val MAX_RETRY_AFTER_MS = 30_000L
+
+        fun isTransient(code: Int) = code in TRANSIENT_CODES
+
+        /** Retry-After in seconds (dates are ignored); capped so a run never stalls for long. */
+        fun retryAfterMs(header: String?): Long? =
+            header?.trim()?.toLongOrNull()?.takeIf { it >= 0 }?.let { (it * 1000).coerceAtMost(MAX_RETRY_AFTER_MS) }
+    }
+
+    /**
+     * Sends [req]; 408/429/5xx/529 and dropped connections are retried after 2s → 5s → 10s (or Retry-After).
+     * These are network/provider problems, so they never reach the edit ladder as a failed attempt.
+     */
+    private suspend fun send(req: Request): Http.Result {
+        var attempt = 0
+        while (true) {
+            val res = try {
+                Http.execute(req)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: java.io.IOException) {
+                if (attempt >= backoffMs.size) throw LlmException("$name bağlantı hatası (${backoffMs.size} yeniden denemeden sonra): ${e.message}")
+                kotlinx.coroutines.delay(backoffMs[attempt++])
+                continue
+            }
+            if (!isTransient(res.code) || attempt >= backoffMs.size) return res
+            kotlinx.coroutines.delay(retryAfterMs(res.retryAfter) ?: backoffMs[attempt])
+            attempt++
+        }
+    }
 
     private fun Request.Builder.withHeaders(): Request.Builder = apply {
         header("Authorization", "Bearer $apiKey")
@@ -30,6 +71,10 @@ class OpenAiCompatClient(
             .put("model", model)
             .put("messages", buildMessages(system, history))
         options.maxOutputTokens?.let { body.put("max_tokens", it) }
+        if (openRouter) body.put("usage", JSONObject().put("include", true))
+        if (reasoning) OpenRouterCatalog.effortFor(options.thinkingLevel, options.minimalThinking)?.let {
+            body.put("reasoning", JSONObject().put("effort", it))
+        }
         if (tools.isNotEmpty()) {
             val arr = JSONArray()
             tools.forEach {
@@ -43,13 +88,21 @@ class OpenAiCompatClient(
             .withHeaders()
             .post(body.toString().toRequestBody(Http.JSON))
             .build()
-        var res = Http.execute(req)
+        var res = send(req)
         if (res.code == 400 && options.maxOutputTokens != null && errorMessage(res.body).contains("max_tokens", ignoreCase = true)) {
             // The model's own output limit is lower than the configured one: let the API use its maximum.
             body.remove("max_tokens")
-            res = Http.execute(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
         }
-        if (res.code !in 200..299) throw LlmException("$name hatası (${res.code}): ${errorMessage(res.body)}")
+        if (res.code == 400 && body.has("reasoning") && errorMessage(res.body).contains("reasoning", ignoreCase = true)) {
+            // Listed as supporting reasoning but this provider rejects it: answer without it.
+            body.remove("reasoning")
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
+        if (res.code !in 200..299) {
+            val retried = if (isTransient(res.code)) " (${backoffMs.size} yeniden denemeden sonra; geçici sağlayıcı hatası)" else ""
+            throw LlmException("$name hatası (${res.code})$retried: ${errorMessage(res.body)}")
+        }
         val json = JSONObject(res.body)
         val u = json.optJSONObject("usage")
         // prompt_tokens includes cache hits; completion_tokens already includes reasoning tokens.
@@ -59,7 +112,8 @@ class OpenAiCompatClient(
             cached = u.optLong("prompt_cache_hit_tokens", u.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L),
         )
         val finish = json.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason") ?: ""
-        return LlmResponse(parse(json), usage, truncated = finish == "length")
+        val cost = u?.takeIf { it.has("cost") && !it.isNull("cost") }?.optDouble("cost")?.takeIf { !it.isNaN() && it >= 0 }
+        return LlmResponse(parse(json), usage, truncated = finish == "length", costUsd = cost)
     }
 
     private fun errorMessage(body: String): String =
@@ -154,7 +208,7 @@ class OpenAiCompatClient(
     suspend fun modelsBody(): String {
         if (apiKey.isBlank()) throw LlmException("Önce $name API anahtarını girin.")
         val req = Request.Builder().url("$baseUrl/models").withHeaders().get().build()
-        val res = Http.execute(req)
+        val res = send(req)
         if (res.code !in 200..299) throw LlmException("$name hatası (${res.code}): ${errorMessage(res.body)}")
         return res.body
     }

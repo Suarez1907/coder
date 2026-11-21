@@ -128,6 +128,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         Provider.DEEPSEEK -> OpenAiCompatClient("DeepSeek", settings.deepseekBaseUrl, settings.deepseekKey, ref.model)
         Provider.OPENROUTER -> OpenAiCompatClient("OpenRouter", OpenRouterCatalog.BASE_URL, settings.openrouterKey, ref.model,
             vision = openRouterModels()[ref.model]?.vision == true,
+            reasoning = openRouterModels()[ref.model]?.reasoning == true,
+            openRouter = true,
             cacheControl = OpenRouterCatalog.needsCacheControl(ref.model),
             extraHeaders = mapOf("X-Title" to "Coder"))
     }
@@ -158,7 +160,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         if (o.keys.none { m.contains(it) }) openRouterModels()[model]?.let { return it.price }
         return Pricing.priceFor(model, o)
     }
-    fun costOf(r: ChatMessage.UsageRecord) = Pricing.cost(r.usage, price(r.model)) * r.discount + r.extraCostUsd
+    fun costOf(r: ChatMessage.UsageRecord) = (r.actualUsd ?: (Pricing.cost(r.usage, price(r.model)) * r.discount)) + r.extraCostUsd
 
     /** Share of input tokens served from cache (implicit or explicit) across [records]. */
     fun cacheHitRate(records: List<ChatMessage.UsageRecord>): Double? {
@@ -398,7 +400,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         fun record(resp: com.suarez.coder.llm.LlmResponse, o: CallOptions) {
             val servedFlex = resp.serviceTier?.contains("flex") ?: (o.serviceTier == "flex" && !flexDisabledForRun)
             history += ChatMessage.UsageRecord(ref.model, role, resp.usage,
-                label = if (servedFlex) "flex" else "", discount = if (servedFlex) 0.5 else 1.0)
+                label = if (servedFlex) "flex" else "", discount = if (servedFlex) 0.5 else 1.0, actualUsd = resp.costUsd)
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
         }
 
@@ -685,7 +687,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         val recs = history.drop(from).filterIsInstance<ChatMessage.UsageRecord>()
         if (recs.isEmpty()) return null
         val overrides = Pricing.parseOverrides(settings.priceOverrides)
-        fun estimated(model: String) = !Pricing.isKnown(model) && model !in openRouterModels() && overrides.keys.none { model.lowercase().contains(it) }
+        fun estimated(model: String) = !Pricing.isKnown(model) && model !in openRouterModels() && overrides.keys.none { model.lowercase().contains(it) } &&
+            recs.any { it.model == model && it.actualUsd == null }
         val parts = recs.groupBy { it.role to it.model }.map { (k, list) ->
             val (role, model) = k
             val u = list.fold(Usage()) { acc, r -> acc + r.usage }
