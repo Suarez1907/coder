@@ -15,7 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -49,7 +49,7 @@ fun DiffViewer(files: List<DiffFile>, onDismiss: () -> Unit) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column {
                 Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Kapat") }
+                    IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Close, "Kapat") }
                     Icon(Icons.Rounded.Difference, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {

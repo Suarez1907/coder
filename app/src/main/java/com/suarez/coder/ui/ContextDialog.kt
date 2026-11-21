@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -119,7 +120,11 @@ fun ContextDialog(vm: ChatViewModel, onDismiss: () -> Unit) {
                         Spacer(Modifier.width(6.dp))
                         Text("Vazgeç")
                     }
-                    Button(onClick = { vm.saveContext(repo, ref, selected.toList()); onDismiss() }) { Text("Kaydet") }
+                    Button(onClick = { vm.saveContext(repo, ref, selected.toList()); onDismiss() }) {
+                        Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Kaydet")
+                    }
                 }
             }
         }

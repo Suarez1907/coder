@@ -192,7 +192,7 @@ private fun ViewSelector(options: List<Pair<String, String>>, selected: String, 
             val isSelected = value == selected
             Box(
                 Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
-                    .background(if (isSelected) coder.surfaceElevated else Color.Transparent)
+                    .background(if (isSelected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
                     .clickable { onSelect(value) }.padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center,
             ) {

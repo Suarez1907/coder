@@ -23,9 +23,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Analytics
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -87,11 +91,16 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
                 placeholder = { Text("Ara: başlık, repo, içerik") },
                 singleLine = true,
                 shape = RoundedCornerShape(12.dp),
+                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp)) },
                 colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = coder.border),
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onNewChat, modifier = Modifier.fillMaxWidth()) { Text("+ Yeni sohbet") }
+            OutlinedButton(onClick = onNewChat, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Rounded.Add, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Yeni sohbet")
+            }
             Spacer(Modifier.height(8.dp))
             LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (list.isEmpty()) item {
@@ -115,7 +124,7 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
                                 style = Mono.tiny, color = coder.muted, maxLines = 1,
                             )
                         }
-                        IconButton(onClick = { confirmDelete = s }) { Icon(Icons.Default.Close, "Sil", tint = coder.muted, modifier = Modifier.size(16.dp)) }
+                        IconButton(onClick = { confirmDelete = s }) { Icon(Icons.Outlined.Delete, "Sil", tint = coder.muted, modifier = Modifier.size(16.dp)) }
                     }
                 }
             }
@@ -157,7 +166,7 @@ fun ProfileSheet(vm: ChatViewModel, onDone: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().clickable { vm.activateProfile(p.id); onDone() },
             ) {
                 Row(Modifier.padding(start = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (active) "●" else "○", color = if (active) coder.architect else coder.muted)
+                    Icon(Icons.Outlined.Folder, contentDescription = null, tint = if (active) coder.architect else coder.muted, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text(p.repo.ifBlank { "(repo yok)" }, style = Mono.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -178,7 +187,11 @@ fun ProfileSheet(vm: ChatViewModel, onDone: () -> Unit) {
                 }
             }
         }
-        OutlinedButton(onClick = { editing = ProjectProfile() }, modifier = Modifier.fillMaxWidth()) { Text("+ Yeni profil") }
+        OutlinedButton(onClick = { editing = ProjectProfile() }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Rounded.Add, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Yeni profil")
+        }
     }
     editing?.let { p ->
         ProfileEditor(p, canDelete = vm.profiles.size > 1 && vm.profiles.any { it.id == p.id },
@@ -232,7 +245,7 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxWidth().padding(start = 4.dp, top = 8.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Kapat") }
+                    IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Close, "Kapat") }
                     Text("Maliyet Panosu", style = MaterialTheme.typography.titleLarge)
                 }
                 val d = data
