@@ -31,25 +31,55 @@ data class DecisionAnswer(
     val confidence: Double,
 )
 
-data class DecisionResult(val answers: Map<String, DecisionAnswer>, val inputTokens: Long, val latencyMs: Long)
+data class DecisionResult(
+    val answers: Map<String, DecisionAnswer>,
+    val inputTokens: Long,
+    val latencyMs: Long,
+    /** Real USD cost when the API reports it (OpenRouter usage.cost). */
+    val costUsd: Double? = null,
+    /** Decision model that answered, e.g. gemini-decision-1 or typesafe/jev-1.14. */
+    val model: String? = null,
+)
+
+/** Where closed-set routing questions are sent. */
+enum class DecisionProvider(val label: String) {
+    GEMINI("Google (Gemini Decisions)"),
+    OPENROUTER("OpenRouter (Jev / Decisions)"),
+}
 
 class DecisionException(message: String) : Exception(message)
 
 /**
- * Client for the Gemini Decisions API (`POST v1beta/decisions`, model gemini-decision-1).
- * The model scores closed-set questions in one pass and bills no output tokens.
+ * Client for the Decisions APIs: Gemini (`POST v1beta/decisions`, gemini-decision-1) and OpenRouter
+ * (`POST api/alpha/decisions`, e.g. typesafe/jev-1.14). Both score closed-set questions in one pass and bill
+ * (almost) only input tokens. The request shapes match except that OpenRouter calls the input `state`.
  */
 class DecisionClient(
     private val apiKey: String,
     val model: String = DEFAULT_MODEL,
     private val timeoutMs: Long = 2_000,
+    val provider: DecisionProvider = DecisionProvider.GEMINI,
+    /** Visible for tests. */
+    private val url: String = if (provider == DecisionProvider.GEMINI) URL else OPENROUTER_URL,
 ) {
     companion object {
         const val DEFAULT_MODEL = "gemini-decision-1"
+        const val OPENROUTER_DEFAULT_MODEL = "typesafe/jev-1.14"
         private const val URL = "https://generativelanguage.googleapis.com/v1beta/decisions"
+        const val OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
         private val KEY_RE = Regex("^[A-Za-z0-9_-]{1,64}$")
 
-        fun buildBody(model: String, input: String, questions: List<DecisionQuestion>): JSONObject {
+        /**
+         * Jev answers quickly only while the state stays small (about 32 KB); longer text switches it to a slow
+         * long-context mode. Request first, then the file list, then recent chat: the tail is cut, never the request.
+         */
+        const val MAX_STATE_CHARS = 24_000
+
+        fun compactState(input: String): String =
+            if (input.length <= MAX_STATE_CHARS) input
+            else input.take(MAX_STATE_CHARS - 40).substringBeforeLast('\n') + "\n…(kısaltıldı)"
+
+        fun buildBody(model: String, input: String, questions: List<DecisionQuestion>, provider: DecisionProvider = DecisionProvider.GEMINI): JSONObject {
             require(questions.isNotEmpty() && questions.size <= 1000) { "1-1000 soru gerekli" }
             require(input.isNotBlank()) { "input boş olamaz" }
             val qs = JSONObject()
@@ -60,7 +90,9 @@ class DecisionClient(
                 q.levels?.let { l -> o.put("criteria", org.json.JSONArray(l)) }
                 qs.put(q.key, o)
             }
-            return JSONObject().put("model", model).put("input", input).put("questions", qs)
+            return if (provider == DecisionProvider.OPENROUTER)
+                JSONObject().put("model", model).put("state", compactState(input)).put("questions", qs)
+            else JSONObject().put("model", model).put("input", input).put("questions", qs)
         }
 
         fun parse(body: String, latencyMs: Long): DecisionResult {
@@ -86,8 +118,11 @@ class DecisionClient(
                     confidence = conf,
                 )
             }
-            val tokens = json.optJSONObject("usage")?.optLong("total_input_tokens") ?: 0L
-            return DecisionResult(answers, tokens, latencyMs)
+            val usage = json.optJSONObject("usage")
+            // Gemini: total_input_tokens; OpenRouter: input_tokens and the real cost in USD.
+            val tokens = usage?.let { u -> if (u.has("total_input_tokens")) u.optLong("total_input_tokens") else u.optLong("input_tokens") } ?: 0L
+            val cost = usage?.takeIf { it.has("cost") && !it.isNull("cost") }?.optDouble("cost")?.takeIf { !it.isNaN() && it >= 0 }
+            return DecisionResult(answers, tokens, latencyMs, cost, json.optString("model").ifBlank { null })
         }
 
         fun errorMessage(body: String): String = runCatching {
@@ -104,15 +139,47 @@ class DecisionClient(
         .build()
 
     suspend fun decide(input: String, questions: List<DecisionQuestion>): DecisionResult {
-        if (apiKey.isBlank()) throw DecisionException("Gemini API anahtarı yok")
-        val body = buildBody(model, input, questions).toString()
-        val req = Request.Builder().url(URL).header("x-goog-api-key", apiKey)
-            .post(body.toRequestBody(Http.JSON)).build()
+        if (apiKey.isBlank()) throw DecisionException("${provider.label}: API anahtarı yok")
+        val body = buildBody(model, input, questions, provider).toString()
+        val builder = Request.Builder().url(url).post(body.toRequestBody(Http.JSON))
+        val req = when (provider) {
+            DecisionProvider.GEMINI -> builder.header("x-goog-api-key", apiKey)
+            DecisionProvider.OPENROUTER -> builder.header("Authorization", "Bearer $apiKey").header("X-Title", "Coder")
+        }.build()
         val start = System.nanoTime()
         val res = withTimeout(timeoutMs + 250) { Http.execute(req, client) }
         val ms = (System.nanoTime() - start) / 1_000_000
         if (res.code == 429) throw DecisionException("kota aşıldı (429)")
         if (res.code !in 200..299) throw DecisionException("HTTP ${res.code}: ${errorMessage(res.body)}")
-        return parse(res.body, ms)
+        val result = parse(res.body, ms)
+        return result.copy(model = result.model ?: model)
+    }
+}
+
+/**
+ * Tries decision providers in order; a quota, HTTP, network or timeout failure moves to the next one at once.
+ * When all fail the last error is thrown, and the caller falls back to the cheap classifier and local rules.
+ */
+class DecisionChain(private val steps: List<Pair<String, suspend (String, List<DecisionQuestion>) -> DecisionResult>>) {
+    /** Failures of earlier providers in the last call (shown in the route info). */
+    var skipped: List<String> = emptyList()
+        private set
+
+    suspend fun decide(input: String, questions: List<DecisionQuestion>): DecisionResult {
+        if (steps.isEmpty()) throw DecisionException("karar sağlayıcısı yok (API anahtarı girilmemiş)")
+        val errors = ArrayList<String>()
+        for ((label, step) in steps) {
+            try {
+                return step(input, questions).also { skipped = errors.toList() }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                errors += "$label: zaman aşımı"
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                errors += "$label: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        skipped = errors
+        throw DecisionException(errors.joinToString("; "))
     }
 }

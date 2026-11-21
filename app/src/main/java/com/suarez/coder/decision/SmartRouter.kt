@@ -34,6 +34,9 @@ data class RoutingDecision(
     val routeProbabilities: Map<String, Double> = emptyMap(),
     /** Expected difficulty level 0 (trivial) … 3 (very hard), from the same Decision call. */
     val complexity: Double? = null,
+    /** Decision model that answered and its reported cost (null = estimate from tokens). */
+    val decisionModel: String? = null,
+    val costUsd: Double? = null,
 )
 
 /** Pure decision rules (unit-tested). */
@@ -127,7 +130,7 @@ object RouterLogic {
         }.sortedByDescending { it.yes }.take(MAX_SELECTED_FILES)
         return RoutingDecision(route, raw, conf, upgraded, selected, files.size, manualFiles,
             result.latencyMs, result.inputTokens, null, repo, ref, r?.probabilities ?: emptyMap(),
-            result.answers[COMPLEXITY_KEY]?.score)
+            result.answers[COMPLEXITY_KEY]?.score, result.model, result.costUsd)
     }
 }
 

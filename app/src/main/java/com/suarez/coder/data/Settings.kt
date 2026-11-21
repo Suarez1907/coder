@@ -297,6 +297,15 @@ class Settings(context: Context) {
         get() = str("decision_model", "gemini-decision-1")
         set(v) = put("decision_model", v.trim())
 
+    /** "gemini", "openrouter" or "auto" (primary + backup). */
+    var decisionProvider: String
+        get() = str("decision_provider", "auto")
+        set(v) = put("decision_provider", v)
+
+    var openrouterDecisionModel: String
+        get() = str("openrouter_decision_model", "typesafe/jev-1.14")
+        set(v) = put("openrouter_decision_model", v.trim())
+
     var decisionTimeoutMs: Long
         get() = prefs.getLong("decision_timeout_ms", 2_000L)
         set(v) = prefs.edit().putLong("decision_timeout_ms", v.coerceIn(500L, 30_000L)).apply()

@@ -6,7 +6,9 @@ import com.suarez.coder.cost.Price
 import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.decision.DecisionChain
 import com.suarez.coder.decision.DecisionClient
+import com.suarez.coder.decision.DecisionProvider
 import com.suarez.coder.decision.LocalRouter
 import com.suarez.coder.decision.Route
 import com.suarez.coder.decision.RoutingDecision
@@ -59,10 +61,30 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     private val router = SmartRouter(
         tools.github,
         listFiles = { repo, ref -> tools.filteredTree(repo, ref) },
-        decide = { input, questions ->
-            DecisionClient(settings.geminiKey, settings.decisionModel, settings.decisionTimeoutMs).decide(input, questions)
-        },
+        decide = { input, questions -> decisionChain().also { lastDecisionChain = it }.decide(input, questions) },
     )
+
+    private var lastDecisionChain: DecisionChain? = null
+
+    /** Decision providers to try, in order, from the setting and the keys present. */
+    fun decisionProviders(): List<DecisionProvider> {
+        val hasGemini = settings.geminiKey.isNotBlank()
+        val hasOr = settings.openrouterKey.isNotBlank()
+        return when (settings.decisionProvider) {
+            "gemini" -> listOfNotNull(DecisionProvider.GEMINI.takeIf { hasGemini })
+            "openrouter" -> listOfNotNull(DecisionProvider.OPENROUTER.takeIf { hasOr })
+            else -> listOfNotNull(DecisionProvider.GEMINI.takeIf { hasGemini }, DecisionProvider.OPENROUTER.takeIf { hasOr })
+        }
+    }
+
+    private fun decisionChain() = DecisionChain(decisionProviders().map { p ->
+        val client = when (p) {
+            DecisionProvider.GEMINI -> DecisionClient(settings.geminiKey, settings.decisionModel, settings.decisionTimeoutMs)
+            DecisionProvider.OPENROUTER -> DecisionClient(settings.openrouterKey, settings.openrouterDecisionModel,
+                settings.decisionTimeoutMs, DecisionProvider.OPENROUTER)
+        }
+        p.label to client::decide
+    })
 
     init {
         tools.onRepoChanged = {
@@ -485,11 +507,15 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                         local.route.name, local.route != Route.COMPLEX_ARCHITECT)
                 } else {
                     var decisionError: String? = null
-                    if (settings.useDecision1 && settings.geminiKey.isNotBlank()) {
+                    if (settings.useDecision1 && decisionProviders().isNotEmpty()) {
                         val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) }
                         val d = router.route(request.text, recentContext(history), repo, context.ref, context.hasManualFiles)
                         if (d.fallbackReason == null) {
-                            history += ChatMessage.UsageRecord(settings.decisionModel, "decision", Usage(input = d.inputTokens))
+                            history += ChatMessage.UsageRecord(d.decisionModel ?: settings.decisionModel, "decision",
+                                Usage(input = d.inputTokens), actualUsd = d.costUsd)
+                            lastDecisionChain?.skipped?.takeIf { it.isNotEmpty() }?.let { s ->
+                                history += ChatMessage.Notice("↪️ Yedek karar sağlayıcısı kullanıldı", s.joinToString("\n"))
+                            }
                             route = d.route
                             // Moderate work does not need the most expensive architect or deep thinking.
                             val medium = ModelRef.parse(settings.architectModelMedium)
@@ -663,7 +689,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             d.totalFiles > 0 -> "${d.selected.size}/${d.totalFiles} dosya seçildi"
             else -> null
         }
-        val text = listOfNotNull("Decision 1 → $mode", files, "${d.latencyMs} ms").joinToString(" • ")
+        val who = if (d.decisionModel?.contains('/') == true) d.decisionModel.substringAfterLast('/') else "Decision 1"
+        val text = listOfNotNull("$who → $mode", files, "${d.latencyMs} ms").joinToString(" • ")
         val detail = buildString {
             if (d.routeProbabilities.isNotEmpty()) {
                 append("Sınıflandırma olasılıkları:\n")

@@ -292,7 +292,19 @@ private fun ArchitectPage(vm: ChatViewModel) {
         SwitchSetting("Akıllı Yönlendirme", "Görevi otomatik sınıflandır", s.smartRouting) { s.smartRouting = it; vm.refreshSettings() }
         SwitchSetting("Decision 1 kullan", "Sınıflandırma + dosya seçimi + zorluk", s.useDecision1,
             "Kapalıysa yalnızca yerel kural ve ucuz model kullanılır.") { s.useDecision1 = it }
-        TextSetting("Karar modeli", s.decisionModel, mono = true) { s.decisionModel = it.ifBlank { "gemini-decision-1" } }
+        var dp by remember { mutableStateOf(s.decisionProvider) }
+        Label("Karar sağlayıcısı", coder.muted)
+        Segmented(listOf("gemini" to "Google", "openrouter" to "OpenRouter", "auto" to "Yedekli"), dp) { dp = it; s.decisionProvider = it }
+        Text(when (dp) {
+            "gemini" -> "Yalnızca Gemini Decisions (Gemini anahtarı gerekir)."
+            "openrouter" -> "Yalnızca OpenRouter Decisions, ör. Jev (OpenRouter anahtarı gerekir)."
+            else -> "Önce Gemini; kota, hata veya zaman aşımında hemen OpenRouter. İkisi de olmazsa ucuz model ve yerel kurallar."
+        }, style = MaterialTheme.typography.bodySmall, color = coder.muted)
+        TextSetting("Gemini karar modeli", s.decisionModel, mono = true) { s.decisionModel = it.ifBlank { "gemini-decision-1" } }
+        TextSetting("OpenRouter karar modeli", s.openrouterDecisionModel, mono = true, placeholder = "typesafe/jev-1.14",
+            info = "Decisions API'deki karar modelleri (ör. typesafe/jev-1.14 veya ~typesafe/jev-latest). Sohbet modeli değildir; kod yazmaz.") {
+            s.openrouterDecisionModel = it.ifBlank { "typesafe/jev-1.14" }
+        }
         TextSetting("Karar zaman aşımı (sn)", (s.decisionTimeoutMs / 1000.0).toString(), keyboard = KeyboardType.Decimal) {
             s.decisionTimeoutMs = ((it.replace(',', '.').toDoubleOrNull() ?: 2.0) * 1000).toLong()
         }

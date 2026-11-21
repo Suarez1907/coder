@@ -13,6 +13,8 @@ object Pricing {
      */
     private val TABLE: Map<String, Price> = linkedMapOf(
         "gemini-decision-1" to Price(0.10, 0.0, 0.10),
+        // OpenRouter decision models: input only (usage.cost is used when the API reports it).
+        "typesafe/jev" to Price(0.042, 0.0, 0.042),
         "gemini-4-neon" to Price(3.00, 15.00, 0.15),
         "gemini-4-hydrogen" to Price(1.50, 7.50, 0.075),
         "gemini-4-carbon" to Price(2.00, 10.00, 0.10),
@@ -46,7 +48,7 @@ object Pricing {
     fun isKnown(model: String) = lookupTable(model) != null
 
     private fun lookupTable(model: String): Price? {
-        val m = model.lowercase().removePrefix("models/")
+        val m = model.lowercase().removePrefix("models/").removePrefix("~")
         TABLE[m]?.let { return it }
         // Versioned or preview ids, e.g. gemini-2.5-flash-preview-09-2025 → longest matching prefix.
         return TABLE.entries.filter { m.startsWith(it.key) }.maxByOrNull { it.key.length }?.value
