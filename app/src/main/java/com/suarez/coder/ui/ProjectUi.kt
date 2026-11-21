@@ -2,6 +2,7 @@ package com.suarez.coder.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -77,9 +78,16 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
             Column(Modifier.weight(1f).fillMaxHeight().padding(horizontal = 14.dp).navigationBarsPadding()) {
                 Spacer(Modifier.height(20.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(8.dp).background(coder.architect, RoundedCornerShape(4.dp)))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Sohbetler", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    Box(
+                        Modifier.size(36.dp).background(coder.accentSoft, RoundedCornerShape(12.dp))
+                            .border(1.dp, coder.borderHighlight, RoundedCornerShape(12.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("💬", style = MaterialTheme.typography.titleMedium) }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Sohbetler", style = MaterialTheme.typography.titleLarge)
+                        Text("Sohbet geçmişi ve arama", style = MaterialTheme.typography.bodySmall, color = coder.muted)
+                    }
                 }
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
@@ -98,7 +106,7 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
                         border = BorderStroke(1.dp, coder.borderHighlight),
                         modifier = Modifier.weight(1f).clickable { onNewChat() },
                     ) {
-                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
                             Text("+ Yeni sohbet", style = MaterialTheme.typography.labelLarge)
                         }
                     }
@@ -108,7 +116,7 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
                         border = BorderStroke(1.dp, coder.border),
                         modifier = Modifier.weight(1f).clickable { onDashboard() },
                     ) {
-                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
                             Text("📊 Maliyet Panosu", style = MaterialTheme.typography.labelLarge)
                         }
                     }
