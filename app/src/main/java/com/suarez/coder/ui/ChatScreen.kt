@@ -30,8 +30,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -91,6 +94,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -196,7 +202,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                         }
                         is DItem.Msg -> when (val m = item.m) {
                             is ChatMessage.User -> UserBubble(m.text, m.images)
-                            is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 MarkdownText(m.text)
                                 ApkActions(vm, m.text)
                             }
@@ -299,34 +305,54 @@ private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit, onMenu: ()
     val cost = vm.agent.sessionCost(vm.messages)
     val calls = vm.messages.filterIsInstance<ChatMessage.UsageRecord>().filter { it.role != "cache" && it.role != "decision" }
     val hit = vm.agent.cacheHitRate(calls)
-    TopAppBar(
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-        navigationIcon = { IconButton(onClick = onMenu) { Icon(Icons.Default.Menu, "Sohbetler") } },
-        title = {
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Coder", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.width(8.dp))
-                    Box(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onRepo)) {
-                        Badge((repo ?: "repo yok") + " ▾", if (repo != null) coder.editor else coder.muted)
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+        TopAppBar(
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+            navigationIcon = { IconButton(onClick = onMenu) { Icon(Icons.Default.Menu, "Sohbetler") } },
+            title = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Coder", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(9.dp),
+                            color = coder.editor.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, coder.borderHighlight),
+                            modifier = Modifier.clip(RoundedCornerShape(9.dp)).clickable(onClick = onRepo),
+                        ) {
+                            Row(Modifier.padding(horizontal = 7.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(if (repo != null) coder.editor else coder.muted))
+                                Spacer(Modifier.width(6.dp))
+                                Text((repo ?: "repo yok") + " ▾", style = Mono.tiny,
+                                    color = if (repo != null) coder.editor else coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = coder.cost.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, coder.cost.copy(alpha = 0.38f)),
+                        ) {
+                            Text(Pricing.formatUsd(cost) + " · " + Pricing.formatTry(cost * s.usdTry),
+                                style = Mono.small, color = coder.cost,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp))
+                        }
+                        if (hit != null) {
+                            val pct = (hit * 100).toInt()
+                            Text("  Önbellek ", style = Mono.small, color = coder.muted)
+                            Text("%$pct", style = Mono.small, color = cacheColor(hit))
+                        }
                     }
                 }
-                Row {
-                    Text(Pricing.formatUsd(cost), style = Mono.small, color = coder.cost)
-                    Text(" · ${Pricing.formatTry(cost * s.usdTry)}", style = Mono.small, color = coder.muted)
-                    if (hit != null) {
-                        val pct = (hit * 100).toInt()
-                        Text(" · Önbellek ", style = Mono.small, color = coder.muted)
-                        Text("%$pct", style = Mono.small, color = cacheColor(hit))
-                    }
-                }
-            }
-        },
-        actions = {
-            IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Yeni sohbet") }
-            IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "Ayarlar") }
-        },
-    )
+            },
+            actions = {
+                IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Yeni sohbet") }
+                IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "Ayarlar") }
+            },
+        )
+        HorizontalDivider(color = coder.border, thickness = 1.dp)
+    }
 }
 
 @Composable
@@ -340,14 +366,14 @@ private fun cacheColor(rate: Double): Color = when {
 fun Badge(text: String, color: Color) {
     Text(
         text,
-        style = Mono.tiny,
+        style = Mono.tiny.copy(fontWeight = FontWeight.SemiBold),
         color = color,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier
-            .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-            .background(color.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 1.dp),
+            .background(color.copy(alpha = 0.14f), RoundedCornerShape(7.dp))
+            .border(1.dp, color.copy(alpha = 0.38f), RoundedCornerShape(7.dp))
+            .padding(horizontal = 7.dp, vertical = 2.dp),
     )
 }
 
@@ -360,13 +386,18 @@ private fun thinkingShort(level: String) = when (level) {
 @Composable
 private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
     val s = vm.settings
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = coder.surfaceElevated,
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .clickable(onClick = onOpen),
+    ) {
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-            .border(1.dp, coder.border, RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
-            .clickable(onClick = onOpen)
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -387,6 +418,7 @@ private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
             if (orch != com.suarez.coder.orchestrator.OrchestratorMode.OFF) Text(" · Ork: ${orch.short}", style = Mono.small, color = coder.architect)
         }
         Icon(Icons.Default.KeyboardArrowUp, "Kontroller", tint = coder.muted, modifier = Modifier.size(18.dp))
+    }
     }
 }
 
@@ -410,11 +442,12 @@ private fun InputRow(
             // Thumb-reachable extras inside the field: screenshots (left) and dictation (right).
             leadingIcon = { IconButton(onClick = onPick, enabled = !running) { Text("🖼", fontSize = 18.sp) } },
             trailingIcon = { IconButton(onClick = onMic, enabled = !running) { Text("🎙", fontSize = 18.sp) } },
-            shape = RoundedCornerShape(14.dp),
+            shape = RoundedCornerShape(22.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 unfocusedBorderColor = coder.border,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                focusedBorderColor = coder.borderHighlight,
+                unfocusedContainerColor = coder.surfaceElevated,
+                focusedContainerColor = coder.surfaceElevated,
             ),
         )
         Spacer(Modifier.width(8.dp))
@@ -436,14 +469,14 @@ private fun SlashSuggestions(input: String, templates: List<Pair<String, String>
     val matches = templates.filter { it.first.lowercase().startsWith(query) }
     if (matches.isEmpty()) return
     Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(14.dp),
+        color = coder.surfaceElevated,
         border = BorderStroke(1.dp, coder.border),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
         Column(Modifier.padding(vertical = 4.dp)) {
             matches.forEach { (name, text) ->
-                Row(Modifier.fillMaxWidth().clickable { onPick(text) }.padding(horizontal = 12.dp, vertical = 8.dp),
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onPick(text) }.padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Text("/$name", style = Mono.small, color = coder.architect, modifier = Modifier.width(96.dp))
                     Text(text, style = MaterialTheme.typography.bodySmall, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -557,81 +590,98 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
             .padding(bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Çalışma ayarları", style = MaterialTheme.typography.titleMedium)
-        SheetSwitch("Mimar Modu", "Planı güçlü model, kodu ucuz model yazar", s.architectMode) { vm.setArchitectMode(it) }
-        SheetSwitch("Akıllı Yönlendirme", "Yerel kural → Decision 1 → ucuz model", s.smartRouting) { vm.setSmartRouting(it) }
-        SheetSwitch("Ekonomi (Flex %50)", "Yarı fiyat; yanıtlar dakikalar sürebilir", s.economyMode) { vm.setEconomy(it) }
-
-        HorizontalDivider(color = coder.border)
-        if (s.architectMode) {
-            ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options, priceOf) { vm.selectArchitect(it) }
-            ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options, priceOf) { vm.selectEditor(it) }
-        } else {
-            ModelSelect("Model", vm.agent.singleRef(), coder.architect, options, priceOf) { vm.selectSingle(it) }
+        Text("Çalışma ayarları", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        SheetSection("Modlar") {
+            SheetSwitch("Mimar Modu", "Planı güçlü model, kodu ucuz model yazar", s.architectMode) { vm.setArchitectMode(it) }
+            SheetSwitch("Akıllı Yönlendirme", "Yerel kural → Decision 1 → ucuz model", s.smartRouting) { vm.setSmartRouting(it) }
+            SheetSwitch("Ekonomi (Flex %50)", "Yarı fiyat; yanıtlar dakikalar sürebilir", s.economyMode) { vm.setEconomy(it) }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { vm.refreshCatalog() }) { Text("↻ Model listesini güncelle") }
-            vm.catalogStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
-        }
-
-        Text("Orkestratör", style = MaterialTheme.typography.labelLarge, color = coder.muted)
-        val modes = com.suarez.coder.orchestrator.OrchestratorMode.entries
-        val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            modes.forEachIndexed { i, m ->
-                SegmentedButton(
-                    selected = orch == m,
-                    onClick = { vm.setOrchestratorMode(m) },
-                    shape = SegmentedButtonDefaults.itemShape(i, modes.size),
-                    colors = SegmentedButtonDefaults.colors(
-                        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        inactiveContainerColor = MaterialTheme.colorScheme.surface,
-                        activeBorderColor = coder.border, inactiveBorderColor = coder.border,
-                    ),
-                ) { Text("Ork: " + m.short) }
+        SheetSection("Model") {
+            if (s.architectMode) {
+                ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options, priceOf) { vm.selectArchitect(it) }
+                ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options, priceOf) { vm.selectEditor(it) }
+            } else {
+                ModelSelect("Model", vm.agent.singleRef(), coder.architect, options, priceOf) { vm.selectSingle(it) }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { vm.refreshCatalog() }) { Text("↻ Model listesini güncelle") }
+                vm.catalogStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
             }
         }
-        Text(when (orch) {
-            com.suarez.coder.orchestrator.OrchestratorMode.OFF -> "Normal akış; ek çağrı yok."
-            com.suarez.coder.orchestrator.OrchestratorMode.LIGHT_SEQUENTIAL -> "Mimar'a giden işler alt görevlere bölünür, sırayla ve ayrı commit'lerle yapılır."
-            com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT -> "⚠️ Tam mod daha pahalıdır: Planlayıcı + paralel işçiler + İnceleyici ayrı çağrılar yapar."
-        }, style = MaterialTheme.typography.bodySmall,
-            color = if (orch == com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT) coder.cost else coder.muted)
-
-        Text("Düşünme", style = MaterialTheme.typography.labelLarge, color = coder.muted)
-        val levels = listOf("low", "medium", "high")
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            levels.forEachIndexed { i, lv ->
-                SegmentedButton(
-                    selected = s.thinkingLevel == lv,
-                    onClick = { vm.setThinking(lv) },
-                    shape = SegmentedButtonDefaults.itemShape(i, levels.size),
-                    colors = SegmentedButtonDefaults.colors(
-                        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        inactiveContainerColor = MaterialTheme.colorScheme.surface,
-                        activeBorderColor = coder.border, inactiveBorderColor = coder.border,
-                    ),
-                ) { Text(lv) }
+        SheetSection("Orkestratör") {
+            val modes = com.suarez.coder.orchestrator.OrchestratorMode.entries
+            val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                modes.forEachIndexed { i, m ->
+                    SegmentedButton(
+                        selected = orch == m,
+                        onClick = { vm.setOrchestratorMode(m) },
+                        shape = SegmentedButtonDefaults.itemShape(i, modes.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            inactiveContainerColor = MaterialTheme.colorScheme.surface,
+                            activeBorderColor = coder.border, inactiveBorderColor = coder.border,
+                        ),
+                    ) { Text("Ork: " + m.short) }
+                }
+            }
+            Text(when (orch) {
+                com.suarez.coder.orchestrator.OrchestratorMode.OFF -> "Normal akış; ek çağrı yok."
+                com.suarez.coder.orchestrator.OrchestratorMode.LIGHT_SEQUENTIAL -> "Mimar'a giden işler alt görevlere bölünür, sırayla ve ayrı commit'lerle yapılır."
+                com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT -> "⚠️ Tam mod daha pahalıdır: Planlayıcı + paralel işçiler + İnceleyici ayrı çağrılar yapar."
+            }, style = MaterialTheme.typography.bodySmall,
+                color = if (orch == com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT) coder.cost else coder.muted)
+        }
+        SheetSection("Düşünme") {
+            val levels = listOf("low", "medium", "high")
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                levels.forEachIndexed { i, lv ->
+                    SegmentedButton(
+                        selected = s.thinkingLevel == lv,
+                        onClick = { vm.setThinking(lv) },
+                        shape = SegmentedButtonDefaults.itemShape(i, levels.size),
+                        colors = SegmentedButtonDefaults.colors(
+                            activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            inactiveContainerColor = MaterialTheme.colorScheme.surface,
+                            activeBorderColor = coder.border, inactiveBorderColor = coder.border,
+                        ),
+                    ) { Text(lv) }
+                }
             }
         }
-
-        HorizontalDivider(color = coder.border)
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Bağlam dosyaları", style = MaterialTheme.typography.bodyLarge)
-                Text(if (s.contextFiles.isEmpty()) "Seçili dosya yok" else "${s.contextFiles.size} dosya sabitlendi",
-                    style = MaterialTheme.typography.bodySmall, color = coder.muted)
+        SheetSection("Bağlam & Önbellek") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Bağlam dosyaları", style = MaterialTheme.typography.bodyLarge)
+                    Text(if (s.contextFiles.isEmpty()) "Seçili dosya yok" else "${s.contextFiles.size} dosya sabitlendi",
+                        style = MaterialTheme.typography.bodySmall, color = coder.muted)
+                }
+                OutlinedButton(onClick = onOpenContext) { Text("📎 Düzenle") }
             }
-            OutlinedButton(onClick = onOpenContext) { Text("📎 Düzenle") }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Önbellek", style = MaterialTheme.typography.bodyLarge)
+                    Text(vm.agent.cacheStatus, style = Mono.tiny, color = coder.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(onClick = { vm.clearCache() }, enabled = !vm.running) { Text("🧹 Temizle") }
+            }
         }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Önbellek", style = MaterialTheme.typography.bodyLarge)
-                Text(vm.agent.cacheStatus, style = Mono.tiny, color = coder.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            OutlinedButton(onClick = { vm.clearCache() }, enabled = !vm.running) { Text("🧹 Temizle") }
+    }
+}
+
+@Composable
+private fun SheetSection(title: String, content: @Composable () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = coder.surfaceElevated,
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(title, style = MaterialTheme.typography.labelLarge, color = coder.muted)
+            content()
         }
     }
 }
@@ -701,17 +751,36 @@ private fun ModelSelect(label: String, current: ModelRef, accent: Color, options
 
 @Composable
 private fun EmptyState() {
-    Column(Modifier.fillMaxWidth().padding(top = 56.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("</>", fontSize = 40.sp, color = coder.architect, style = Mono.body.copy(fontSize = 40.sp))
-        Spacer(Modifier.size(12.dp))
-        Text("Telefonundan kod yaz", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.size(10.dp))
-        Text(
-            "• \"Repolarımı listele\"\n• \"dino reposuna skor tablosu ekle\"\n• \"Son derleme neden başarısız oldu, düzelt\"\n\n" +
-                "Modeller ve modlar alttaki çubuktan.",
-            style = MaterialTheme.typography.bodySmall,
-            color = coder.muted,
-        )
+    val glow = coder.architect.copy(alpha = 0.12f)
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = coder.surfaceElevated,
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .drawBehind {
+                    val center = Offset(size.width / 2f, 48.dp.toPx())
+                    val radius = size.width * 0.75f
+                    drawCircle(brush = Brush.radialGradient(listOf(glow, Color.Transparent), center = center, radius = radius),
+                        radius = radius, center = center)
+                }
+                .padding(top = 40.dp, bottom = 28.dp, start = 20.dp, end = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("</>", fontSize = 40.sp, color = coder.architect, style = Mono.body.copy(fontSize = 40.sp))
+            Spacer(Modifier.size(12.dp))
+            Text("Telefonundan kod yaz", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.size(10.dp))
+            Text(
+                "• \"Repolarımı listele\"\n• \"dino reposuna skor tablosu ekle\"\n• \"Son derleme neden başarısız oldu, düzelt\"\n\n" +
+                    "Modeller ve modlar alttaki çubuktan.",
+                style = MaterialTheme.typography.bodySmall,
+                color = coder.muted,
+            )
+        }
     }
 }
 
@@ -724,8 +793,9 @@ private fun UserBubble(text: String, images: List<String> = emptyList()) {
             }
         }
         Surface(
-            shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
+            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp),
+            color = coder.userBubble,
+            border = BorderStroke(1.dp, coder.userBubbleBorder),
             modifier = Modifier.padding(start = 40.dp),
         ) {
             SelectionContainer { Text(text, Modifier.padding(horizontal = 12.dp, vertical = 9.dp), style = MaterialTheme.typography.bodyMedium) }
@@ -735,7 +805,13 @@ private fun UserBubble(text: String, images: List<String> = emptyList()) {
 
 @Composable
 private fun RunningRow(vm: ChatViewModel) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = coder.architect.copy(alpha = 0.08f),
+        border = BorderStroke(1.dp, coder.architect.copy(alpha = 0.30f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.architect)
         Spacer(Modifier.width(8.dp))
         var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -750,6 +826,7 @@ private fun RunningRow(vm: ChatViewModel) {
             style = Mono.tiny,
             color = coder.muted,
         )
+    }
     }
 }
 
@@ -784,7 +861,14 @@ private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
     val diff = rememberDiffFiles(detail)
     var showDiff by remember { mutableStateOf(false) }
     if (showDiff && diff != null) DiffViewer(diff) { showDiff = false }
-    Column(Modifier.fillMaxWidth().animateContentSize().clickable(enabled = detail != null) { open = !open }) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (isError) coder.warn.copy(alpha = 0.08f) else coder.surfaceElevated,
+        border = BorderStroke(1.dp, if (isError) coder.warn.copy(alpha = 0.35f) else coder.border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+    Column(Modifier.fillMaxWidth().animateContentSize().clickable(enabled = detail != null) { open = !open }
+        .padding(horizontal = 10.dp, vertical = 6.dp)) {
         Text(
             text + if (detail != null) (if (open) "  ▴" else "  ▾") else "",
             style = if (isCost) Mono.tiny else MaterialTheme.typography.bodySmall,
@@ -803,6 +887,7 @@ private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
             Spacer(Modifier.size(4.dp))
             CodeBox(detail.take(30_000))
         }
+    }
     }
 }
 
@@ -829,13 +914,21 @@ private fun ToolGroupCard(item: DItem.Tools, active: Boolean) {
     val expanded = userOpen ?: inProgress
     val repo = item.calls.firstNotNullOfOrNull { it.first.args.optString("repo").takeIf { r -> r.isNotBlank() } }
 
+    val railColor = when {
+        errors > 0 -> coder.warn
+        inProgress -> coder.architect
+        pending != null -> coder.muted
+        else -> coder.editor
+    }
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, coder.border),
         modifier = Modifier.fillMaxWidth().animateContentSize(),
     ) {
-        Column {
+        Row(Modifier.height(IntrinsicSize.Min)) {
+        Box(Modifier.width(3.dp).fillMaxHeight().background(railColor))
+        Column(Modifier.weight(1f)) {
             Row(
                 Modifier.fillMaxWidth().clickable { userOpen = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -863,6 +956,7 @@ private fun ToolGroupCard(item: DItem.Tools, active: Boolean) {
                     item.calls.forEach { (call, result) -> ToolRow(call, result, isActive = inProgress && call === pending?.first) }
                 }
             }
+        }
         }
     }
 }
@@ -905,7 +999,7 @@ private fun ToolRow(call: ToolCall, result: ChatMessage.ToolResult?, isActive: B
 @Composable
 fun CodeBox(text: String) {
     Surface(
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(10.dp),
         color = coder.codeBg,
         border = BorderStroke(1.dp, coder.border),
         modifier = Modifier.fillMaxWidth(),
