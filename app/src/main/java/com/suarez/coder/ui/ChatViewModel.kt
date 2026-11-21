@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.compose.runtime.mutableStateMapOf
 import com.suarez.coder.apk.ApkDownloader
 import com.suarez.coder.apk.ApkTarget
+import com.suarez.coder.ci.CiWatchService
+import com.suarez.coder.tools.ToolRegistry
 import com.suarez.coder.llm.Http
 import com.suarez.coder.media.ImagePrep
 import kotlinx.coroutines.withContext
@@ -81,8 +83,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var job: Job? = null
     private var previewJob: Job? = null
 
+    /** Set when the first CI wait starts and notifications are not allowed yet; the UI asks once. */
+    var askNotificationPermission by mutableStateOf(false)
+        private set
+    private var askedNotificationPermission = false
+
+    fun notificationPermissionAsked() { askNotificationPermission = false }
+
     init {
         runCatching { if (chatFile.exists()) messages.addAll(MessageJson.fromJson(chatFile.readText())) }
+        agent.tools.ciListener = object : ToolRegistry.CiListener {
+            override fun started(repo: String, label: String) {
+                val ctx = getApplication<Application>()
+                if (!CiWatchService.canNotify(ctx) && !askedNotificationPermission) {
+                    askedNotificationPermission = true
+                    viewModelScope.launch { askNotificationPermission = true }
+                }
+                CiWatchService.start(ctx, repo, label)
+            }
+
+            override fun finished(repo: String, success: Boolean, summary: String, apkUrl: String?) {
+                CiWatchService.finish(getApplication(), repo, success, summary, apkUrl)
+            }
+        }
     }
 
     fun refreshSettings() { settingsVersion++ }
@@ -200,17 +223,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Downloads an APK found in the chat; progress and result are exposed in [downloads]. */
     fun downloadApk(url: String, target: ApkTarget) {
         if (downloads[url] is DownloadState.Running) return
+        viewModelScope.launch { fetchApk(url, target) }
+    }
+
+    /** Downloads (or reuses) the APK and returns its file, or null on failure. */
+    suspend fun fetchApk(url: String, target: ApkTarget): File? {
+        (downloads[url] as? DownloadState.Ready)?.let { r -> File(r.path).takeIf { it.isFile }?.let { return it } }
         downloads[url] = DownloadState.Running(0)
-        viewModelScope.launch {
-            downloads[url] = try {
-                val file = apkDownloader.download(target) { pct -> viewModelScope.launch { if (downloads[url] is DownloadState.Running) downloads[url] = DownloadState.Running(pct) } }
-                DownloadState.Ready(file.absolutePath)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                DownloadState.Failed(e.message ?: e.toString())
-            }
+        val result = try {
+            val file = apkDownloader.download(target) { pct -> viewModelScope.launch { if (downloads[url] is DownloadState.Running) downloads[url] = DownloadState.Running(pct) } }
+            DownloadState.Ready(file.absolutePath)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            DownloadState.Failed(e.message ?: e.toString())
         }
+        downloads[url] = result
+        return (result as? DownloadState.Ready)?.let { File(it.path) }
     }
 
     /** Stops the current run if any and repeats the last request in Architect mode. Spent cost stays recorded. */

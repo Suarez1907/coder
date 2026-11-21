@@ -70,6 +70,7 @@ private enum class Page(val title: String, val icon: String, val blurb: String) 
     ARCHITECT("Mimar & Yönlendirme", "🧭", "Düşünme, çıktı sınırları, Decision 1, Flex"),
     CACHE("Önbellek & Bağlam", "🗄", "Context Caching, sıkıştırma, geçmiş"),
     GITHUB("GitHub & Bütçe", "💳", "Token, repo, onay, bütçe ve fiyatlar"),
+    TEMPLATES("Komut şablonları", "⌨", "Sohbette / ile açılan hazır istemler"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -103,6 +104,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.ARCHITECT -> ArchitectPage(vm)
                 Page.CACHE -> CachePage(vm)
                 Page.GITHUB -> GitHubPage(vm)
+                Page.TEMPLATES -> TemplatesPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -130,7 +132,7 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         status.forEach { (name, ok) -> Badge("$name ${if (ok) "✓" else "–"}", if (ok) coder.cacheGood else coder.muted) }
     }
-    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB).forEach { p ->
+    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES).forEach { p ->
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -342,6 +344,41 @@ private fun GitHubPage(vm: ChatViewModel) {
             "Gemini'nin ücretsiz countTokens ucuyla hesaplanır.") { s.tokenPreview = it }
         TextSetting("Fiyat düzeltmeleri", s.priceOverrides, singleLine = false, mono = true, placeholder = "gemini-2.5-pro = 1.25, 10, 0.125, 4.5",
             info = "Satır başına: model = giriş, çıkış, önbellekli giriş, saatlik depolama (1M token başına USD). Boşsa yerleşik tablo kullanılır; tabloda olmayan modeller maliyet özetinde * ile işaretlenir.") { s.priceOverrides = it }
+    }
+}
+
+// ---- 5. Slash templates ----
+
+@Composable
+private fun TemplatesPage(vm: ChatViewModel) {
+    val s = vm.settings
+    var list by remember { mutableStateOf(s.promptTemplates) }
+    var version by remember { mutableIntStateOf(0) }
+    fun save(new: List<Pair<String, String>>) { list = new; s.promptTemplates = new }
+
+    Text("Sohbette mesaj kutusuna / yazınca bu şablonlar listelenir; seçilen metin kutuya yerleşir.",
+        style = MaterialTheme.typography.bodySmall, color = coder.muted)
+    list.forEachIndexed { i, (name, text) ->
+        key(version, i) {
+            Group {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("/", style = Mono.body, color = coder.architect)
+                    Spacer(Modifier.width(4.dp))
+                    Column(Modifier.weight(1f)) {
+                        TextSetting("Ad", name, mono = true) { v ->
+                            val clean = v.trim().removePrefix("/").replace(Regex("\\s+"), "-")
+                            save(list.toMutableList().also { it[i] = clean to it[i].second })
+                        }
+                    }
+                    TextButton(onClick = { save(list.filterIndexed { j, _ -> j != i }); version++ }) { Text("Sil", color = coder.warn) }
+                }
+                TextSetting("Metin", text, singleLine = false) { v -> save(list.toMutableList().also { it[i] = it[i].first to v }) }
+            }
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = { save(list + ("yeni${list.size + 1}" to "")); version++ }) { Text("+ Şablon ekle") }
+        TextButton(onClick = { save(com.suarez.coder.data.Settings.DEFAULT_TEMPLATES); version++ }) { Text("Varsayılanlara dön") }
     }
 }
 

@@ -31,6 +31,14 @@ class ToolRegistry(private val settings: Settings) {
     /** Called after any successful write so cached file contents can be dropped. */
     var onRepoChanged: () -> Unit = {}
 
+    /** Live CI watching (the app shows a foreground notification while ci_wait runs). */
+    interface CiListener {
+        fun started(repo: String, label: String)
+        fun finished(repo: String, success: Boolean, summary: String, apkUrl: String?)
+    }
+
+    var ciListener: CiListener? = null
+
     /** Whether a path is part of the frozen stable context (so its copy there is now outdated). */
     var isInSnapshot: (String) -> Boolean = { false }
 
@@ -310,25 +318,53 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Waits inside the app (no model steps) until every workflow run for the commit has finished. */
     private suspend fun ciWait(repo: String, ref: String?, timeoutMinutes: Int): String {
-        val sha = if (ref != null && Regex("^[0-9a-f]{40}$").matches(ref)) ref else github.headSha(repo, ref)
-        val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
-        var runs: List<GitHub.Run> = emptyList()
-        var waitedForStart = 0
-        while (System.currentTimeMillis() < deadline) {
-            runs = github.runsForSha(repo, sha)
-            if (runs.isEmpty()) {
-                if (++waitedForStart > 8) return "Commit ${sha.take(7)} için başlayan bir workflow yok (2 dk beklendi)."
-            } else if (runs.all { it.status == "completed" }) break
-            delay(15_000)
+        val isSha = ref != null && Regex("^[0-9a-f]{40}$").matches(ref)
+        val sha = if (isSha) ref!! else github.headSha(repo, ref)
+        val branch = if (isSha) null else ref
+        val listener = ciListener
+        listener?.started(repo, "commit ${sha.take(7)}")
+        var success = false
+        var summary = ""
+        var apk: String? = null
+        try {
+            val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
+            var runs: List<GitHub.Run> = emptyList()
+            var waitedForStart = 0
+            var announced = ""
+            while (System.currentTimeMillis() < deadline) {
+                runs = github.runsForSha(repo, sha)
+                val names = runs.joinToString(", ") { it.name }
+                if (names.isNotBlank() && names != announced) { announced = names; listener?.started(repo, names) }
+                if (runs.isEmpty()) {
+                    if (++waitedForStart > 8) {
+                        summary = "Commit ${sha.take(7)} için başlayan bir workflow yok (2 dk beklendi)."
+                        return summary
+                    }
+                } else if (runs.all { it.status == "completed" }) break
+                delay(15_000)
+            }
+            if (runs.isEmpty() || runs.any { it.status != "completed" }) {
+                summary = "Zaman aşımı ($timeoutMinutes dk): " + runs.joinToString { "${it.name}: ${it.status}" }
+                return "$summary. Daha sonra tekrar ci_wait çağır."
+            }
+            val sb = StringBuilder("Commit ${sha.take(7)}:\n")
+            runs.forEach { sb.append("- ${it.name}: ${it.conclusion} (${it.url})\n") }
+            val failed = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" }
+            success = failed.isEmpty()
+            if (success) {
+                apk = runCatching { github.apkLinkFor(repo, sha, branch, runs.map { it.id }) }.getOrNull()
+                apk?.let { sb.append("\nAPK: ").append(it).append('\n') }
+                summary = runs.joinToString { "${it.name}: ${it.conclusion}" }
+            } else {
+                failed.forEach { r ->
+                    val errors = ciErrors(repo, r.id)
+                    if (summary.isBlank()) summary = "${r.name}: " + (errors.lines().firstOrNull { l -> l.isNotBlank() && !l.startsWith("##") && !l.startsWith("…") } ?: "başarısız")
+                    sb.append("\nHatalar (${r.name}, run_id ${r.id}):\n").append(errors)
+                }
+            }
+            return sb.toString()
+        } finally {
+            listener?.finished(repo, success, summary.ifBlank { "CI izleme durdu" }, apk)
         }
-        if (runs.isEmpty() || runs.any { it.status != "completed" }) {
-            return "Zaman aşımı ($timeoutMinutes dk): " + runs.joinToString { "${it.name}: ${it.status}" } + ". Daha sonra tekrar ci_wait çağır."
-        }
-        val sb = StringBuilder("Commit ${sha.take(7)}:\n")
-        runs.forEach { sb.append("- ${it.name}: ${it.conclusion} (${it.url})\n") }
-        runs.filter { it.conclusion != "success" && it.conclusion != "skipped" }.forEach { r ->
-            sb.append("\nHatalar (${r.name}, run_id ${r.id}):\n").append(ciErrors(repo, r.id))
-        }
-        return sb.toString()
     }
 }

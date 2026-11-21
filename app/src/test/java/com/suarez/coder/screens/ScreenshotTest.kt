@@ -12,6 +12,7 @@ import com.suarez.coder.ui.CoderTheme
 import com.suarez.coder.ui.SettingsScreen
 import org.json.JSONObject
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -86,6 +87,23 @@ class ScreenshotTest {
         compose.waitForIdle()
         // The bottom sheet is its own window: capture that root.
         compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].captureRoboImage("build/outputs/roborazzi/chat_sheet.png")
+    }
+
+    @Test fun diffViewer() {
+        val diff = "web/js/engine.js\n<<<<<<< SEARCH\nfunction startLevel(n) {\n  const speed = 1.0;\n  spawn(n);\n}\n=======\n" +
+            "function startLevel(n) {\n  const speed = 1.0 + n * 0.15;\n  spawn(n);\n  hud.show(`Seviye ${'$'}{n}`);\n}\n>>>>>>> REPLACE\n"
+        compose.setContent { CoderTheme("dark") { com.suarez.coder.ui.DiffViewer(com.suarez.coder.diff.DiffLines.fromSearchReplace(diff)) {} } }
+        compose.waitForIdle()
+        compose.onAllNodes(androidx.compose.ui.test.isRoot()).let { n -> n[n.fetchSemanticsNodes().size - 1] }
+            .captureRoboImage("build/outputs/roborazzi/diff_viewer.png")
+    }
+
+    @Test fun slashSuggestions() {
+        val vm = vm()
+        compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasSetTextAction()).performTextInput("/")
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/slash.png")
     }
 
     @Test fun settingsHome() {

@@ -246,6 +246,34 @@ class GitHub(private val token: () -> String) {
         }
     }
 
+    /**
+     * A downloadable APK built for [sha]: a release asset of a release targeting that commit (or [branch]),
+     * else the first artifact of the given runs. Returns a link the chat/installer understands, or null.
+     */
+    suspend fun apkLinkFor(repo: String, sha: String, branch: String?, runIds: List<Long>): String? {
+        val rel = call("GET", "/repos/$repo/releases?per_page=10")
+        if (rel.code in 200..299) {
+            val arr = JSONArray(rel.body)
+            for (i in 0 until arr.length()) {
+                val r = arr.getJSONObject(i)
+                val target = r.optString("target_commitish")
+                if (target != sha && (branch == null || target != branch)) continue
+                val assets = r.optJSONArray("assets") ?: continue
+                for (j in 0 until assets.length()) {
+                    val a = assets.getJSONObject(j)
+                    if (a.optString("name").endsWith(".apk")) return a.optString("browser_download_url").ifBlank { null }
+                }
+            }
+        }
+        for (id in runIds) {
+            val res = call("GET", "/repos/$repo/actions/runs/$id/artifacts?per_page=10")
+            if (res.code !in 200..299) continue
+            val arts = JSONObject(res.body).optJSONArray("artifacts") ?: continue
+            if (arts.length() > 0) return "https://api.github.com/repos/$repo/actions/artifacts/${arts.getJSONObject(0).getLong("id")}"
+        }
+        return null
+    }
+
     suspend fun jobLog(repo: String, jobId: Long): String {
         val r = call("GET", "/repos/$repo/actions/jobs/$jobId/logs")
         if (r.code !in 200..299) throw ToolException("Log alınamadı (HTTP ${r.code})")

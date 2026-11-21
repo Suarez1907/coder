@@ -71,6 +71,17 @@ class Settings(context: Context) {
     companion object {
         /** Gemini 4 long decode allows up to the 1M-token context window. */
         const val MAX_OUTPUT = 1_048_576
+
+        val DEFAULT_TEMPLATES = listOf(
+            "release" to "Ana daldaki son değişikliklerle yeni bir sürüm çıkar: sürüm numarasını artır, gerekiyorsa CHANGELOG'u güncelle, " +
+                "release workflow'unu çalıştır ve ci_wait ile sonucunu bekle. Bitince APK bağlantısını ver.",
+            "ui-fix" to "Ekteki ekran görüntüsündeki arayüz sorununu düzelt: ilgili ekranı bul, taşma ve hizalama sorunlarını onar, " +
+                "değişikliği küçük tut. ",
+            "review" to "Son commit'teki (veya açık PR'daki) değişiklikleri incele: hata, güvenlik ve performans sorunlarını listele; " +
+                "her biri için dosya:satır ve kısa düzeltme önerisi ver. Kodu değiştirme.",
+            "notes" to ".coder/NOTES.md dosyasını projenin güncel durumuna göre oluştur veya güncelle: amaç, yapı, önemli dosyalar, " +
+                "derleme/test komutları, dikkat edilecekler. 60 satırı geçme.",
+        )
     }
 
     val currentModel: String
@@ -183,6 +194,21 @@ class Settings(context: Context) {
     var architectModelMedium: String
         get() = str("architect_model_medium", "gemini/gemini-3.8-flash")
         set(v) = put("architect_model_medium", v.trim())
+
+    /** Slash-command prompt templates (name without "/", text). Defaults until the user edits them. */
+    var promptTemplates: List<Pair<String, String>>
+        get() {
+            val raw = prefs.getString("prompt_templates", null) ?: return DEFAULT_TEMPLATES
+            return runCatching {
+                val arr = org.json.JSONArray(raw)
+                (0 until arr.length()).map { arr.getJSONObject(it).let { o -> o.getString("name") to o.getString("text") } }
+            }.getOrDefault(DEFAULT_TEMPLATES)
+        }
+        set(v) {
+            val arr = org.json.JSONArray()
+            v.forEach { (n, t) -> arr.put(org.json.JSONObject().put("name", n).put("text", t)) }
+            put("prompt_templates", arr.toString())
+        }
 
     /** "dark" (IDE theme, default), "oled", "light" or "system". */
     var themeMode: String

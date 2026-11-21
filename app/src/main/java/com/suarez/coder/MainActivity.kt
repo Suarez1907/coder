@@ -1,6 +1,13 @@
 package com.suarez.coder
 
+import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
+import androidx.lifecycle.lifecycleScope
+import com.suarez.coder.apk.ApkInstaller
+import com.suarez.coder.apk.ApkLinks
+import com.suarez.coder.ci.CiWatchService
+import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -21,6 +28,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        handleInstallIntent(intent)
         setContent {
             @Suppress("UNUSED_VARIABLE") val v = vm.settingsVersion // re-read the theme when settings change
             CoderTheme(vm.settings.themeMode) {
@@ -31,6 +39,27 @@ class MainActivity : ComponentActivity() {
                 } else {
                     ChatScreen(vm, onOpenSettings = { showSettings = true })
                 }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleInstallIntent(intent)
+    }
+
+    /** "APK Kur" from the CI result notification: download (token-aware) and open the package installer. */
+    private fun handleInstallIntent(intent: Intent?) {
+        val url = intent?.getStringExtra(CiWatchService.EXTRA_INSTALL_URL) ?: return
+        intent.removeExtra(CiWatchService.EXTRA_INSTALL_URL)
+        val target = ApkLinks.find(url).firstOrNull()?.second ?: return
+        Toast.makeText(this, "APK indiriliyor…", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val file = vm.fetchApk(url, target)
+            if (file == null) {
+                Toast.makeText(this@MainActivity, "APK indirilemedi", Toast.LENGTH_LONG).show()
+            } else if (!ApkInstaller.install(this@MainActivity, file)) {
+                Toast.makeText(this@MainActivity, "Coder'a uygulama yükleme izni verin, sonra tekrar dokunun", Toast.LENGTH_LONG).show()
             }
         }
     }

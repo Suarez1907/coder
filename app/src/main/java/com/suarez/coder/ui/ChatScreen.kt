@@ -207,6 +207,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 }
             }
             if (vm.attachments.isNotEmpty()) AttachmentRow(vm.attachments) { vm.removeImage(it) }
+            SlashSuggestions(input, vm.settings.promptTemplates) { text -> input = text; vm.onInputChanged(text) }
             InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty(),
                 onChange = { input = it; vm.onInputChanged(it) },
                 onSend = { vm.send(input); if (vm.visionWarning == null) input = "" },
@@ -235,6 +236,14 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
             ControlSheet(vm, onOpenContext = { showSheet = false; showContext = true })
+        }
+    }
+    // Android 13+: notification permission for the live CI notification, asked once when the first CI wait starts.
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(vm.askNotificationPermission) {
+        if (vm.askNotificationPermission) {
+            vm.notificationPermissionAsked()
+            if (android.os.Build.VERSION.SDK_INT >= 33) notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
     }
     vm.pending?.let { p -> ConfirmDialog(p, onAnswer = { vm.answer(it) }) }
@@ -377,6 +386,31 @@ private fun InputRow(
         } else {
             FilledIconButton(onClick = onSend, enabled = text.isNotBlank() || hasAttachments, modifier = Modifier.size(52.dp)) {
                 Icon(Icons.AutoMirrored.Filled.Send, "Gönder")
+            }
+        }
+    }
+}
+
+/** Template list shown while the input is "/" or "/name…" (one word, no spaces yet). */
+@Composable
+private fun SlashSuggestions(input: String, templates: List<Pair<String, String>>, onPick: (String) -> Unit) {
+    if (!input.startsWith("/") || input.contains(' ') || input.contains('\n')) return
+    val query = input.removePrefix("/").lowercase()
+    val matches = templates.filter { it.first.lowercase().startsWith(query) }
+    if (matches.isEmpty()) return
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, coder.border),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Column(Modifier.padding(vertical = 4.dp)) {
+            matches.forEach { (name, text) ->
+                Row(Modifier.fillMaxWidth().clickable { onPick(text) }.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("/$name", style = Mono.small, color = coder.architect, modifier = Modifier.width(96.dp))
+                    Text(text, style = MaterialTheme.typography.bodySmall, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
     }
@@ -658,6 +692,9 @@ private fun RouteBar(m: ChatMessage.RouteInfo, isLatest: Boolean, onOverride: ()
 private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
     var open by remember { mutableStateOf(false) }
     val isCost = text.startsWith("💰")
+    val diff = rememberDiffFiles(detail)
+    var showDiff by remember { mutableStateOf(false) }
+    if (showDiff && diff != null) DiffViewer(diff) { showDiff = false }
     Column(Modifier.fillMaxWidth().animateContentSize().clickable(enabled = detail != null) { open = !open }) {
         Text(
             text + if (detail != null) (if (open) "  ▴" else "  ▾") else "",
@@ -668,6 +705,11 @@ private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
                 else -> coder.muted
             },
         )
+        if (diff != null) {
+            TextButton(onClick = { showDiff = true }, contentPadding = PaddingValues(0.dp)) {
+                Text("🔍 Diff'i görüntüle", style = MaterialTheme.typography.labelMedium, color = coder.editor)
+            }
+        }
         if (open && detail != null) {
             Spacer(Modifier.size(4.dp))
             CodeBox(detail.take(30_000))
@@ -739,7 +781,10 @@ private fun ToolGroupCard(item: DItem.Tools, active: Boolean) {
 @Composable
 private fun ToolRow(call: ToolCall, result: ChatMessage.ToolResult?, isActive: Boolean) {
     var open by remember(call.id) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 5.dp)) {
+    val diff = remember(call.id) { diffFilesFor(call.name, call.args) }
+    var showDiff by remember(call.id) { mutableStateOf(false) }
+    if (showDiff && diff != null) DiffViewer(diff) { showDiff = false }
+    Column(Modifier.fillMaxWidth().clickable { if (diff != null) showDiff = true else open = !open }.padding(horizontal = 12.dp, vertical = 5.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             when {
                 isActive -> CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp, color = coder.editor)
@@ -751,7 +796,9 @@ private fun ToolRow(call: ToolCall, result: ChatMessage.ToolResult?, isActive: B
             Text(call.name, style = Mono.small, color = coder.editor)
             Spacer(Modifier.width(8.dp))
             Text(summarize(call), style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            if (diff != null) Text(" 🔍", style = Mono.tiny)
         }
+        if (diff != null && result?.isError == true) Text(result.content.take(300), style = Mono.tiny, color = coder.warn)
         if (open) {
             Spacer(Modifier.size(4.dp))
             Text("Parametreler", style = MaterialTheme.typography.labelSmall, color = coder.muted)
