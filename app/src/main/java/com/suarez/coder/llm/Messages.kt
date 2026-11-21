@@ -18,7 +18,8 @@ data class Usage(val input: Long = 0, val output: Long = 0, val cached: Long = 0
 }
 
 sealed class ChatMessage {
-    data class User(val text: String) : ChatMessage()
+    /** [images]: paths of prepared JPEG files (resized on the device); sent as inline image parts to vision models. */
+    data class User(val text: String, val images: List<String> = emptyList()) : ChatMessage()
 
     data class Assistant(
         val text: String,
@@ -137,7 +138,10 @@ object MessageJson {
         for (m in list) {
             val o = JSONObject()
             when (m) {
-                is ChatMessage.User -> o.put("t", "user").put("text", m.text)
+                is ChatMessage.User -> {
+                    o.put("t", "user").put("text", m.text)
+                    if (m.images.isNotEmpty()) o.put("imgs", JSONArray(m.images))
+                }
                 is ChatMessage.Notice -> {
                     o.put("t", "notice").put("text", m.text).put("err", m.isError)
                     m.detail?.let { o.put("detail", it) }
@@ -177,7 +181,8 @@ object MessageJson {
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
             out += when (o.getString("t")) {
-                "user" -> ChatMessage.User(o.getString("text"))
+                "user" -> ChatMessage.User(o.getString("text"),
+                    o.optJSONArray("imgs")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList())
                 "notice" -> ChatMessage.Notice(o.getString("text"), if (o.has("detail")) o.getString("detail") else null, o.optBoolean("err"))
                 "summary" -> ChatMessage.Summary(o.getString("text"))
                 "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,

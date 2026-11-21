@@ -61,7 +61,9 @@ class OpenAiCompatClient(
         val lastUser = history.indexOfLast { it is ChatMessage.User }
         history.forEachIndexed { index, m ->
             when (m) {
-                is ChatMessage.User -> out.put(JSONObject().put("role", "user").put("content", m.text))
+                is ChatMessage.User -> out.put(JSONObject().put("role", "user").put("content",
+                    if (m.images.isEmpty()) m.text
+                    else m.text + "\n[Not: kullanıcı ${m.images.size} ekran görüntüsü ekledi; bu model görselleri göremiyor.]"))
                 is ChatMessage.Assistant -> {
                     val o = JSONObject().put("role", "assistant").put("content", m.text)
                     // Thinking models need their reasoning back while the current tool-calling turn is in progress.

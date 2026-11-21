@@ -334,6 +334,17 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
 
     // ---- Message conversion ----
 
+    /** Reads a prepared image file as (mimeType, base64); null when it no longer exists. */
+    private fun imagePart(path: String): Pair<String, String>? {
+        val f = java.io.File(path)
+        if (!f.isFile) return null
+        val mime = if (path.endsWith(".png", true)) "image/png" else "image/jpeg"
+        return mime to java.util.Base64.getEncoder().encodeToString(f.readBytes())
+    }
+
+    /** Visible for tests. */
+    internal fun contentsForTest(history: List<ChatMessage>) = buildContents(history)
+
     private fun buildContents(history: List<ChatMessage>): JSONArray {
         val contents = JSONArray()
         var pendingResponses: JSONArray? = null
@@ -345,7 +356,13 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             when (m) {
                 is ChatMessage.User -> {
                     flush()
-                    contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", m.text))))
+                    val parts = JSONArray().put(JSONObject().put("text", m.text))
+                    m.images.forEach { path ->
+                        imagePart(path)?.let { (mime, data) ->
+                            parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", mime).put("data", data)))
+                        }
+                    }
+                    contents.put(JSONObject().put("role", "user").put("parts", parts))
                 }
                 is ChatMessage.Assistant -> {
                     flush()

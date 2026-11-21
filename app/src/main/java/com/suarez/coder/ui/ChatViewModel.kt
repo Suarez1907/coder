@@ -1,6 +1,13 @@
 package com.suarez.coder.ui
 
 import android.app.Application
+import android.net.Uri
+import androidx.compose.runtime.mutableStateMapOf
+import com.suarez.coder.apk.ApkDownloader
+import com.suarez.coder.apk.ApkTarget
+import com.suarez.coder.llm.Http
+import com.suarez.coder.media.ImagePrep
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -33,12 +40,29 @@ class PendingConfirm(
     val answer: CompletableDeferred<Boolean>,
 )
 
+/** State of an in-app APK download, keyed by the link it came from. */
+sealed class DownloadState {
+    data class Running(val percent: Int) : DownloadState()
+    data class Ready(val path: String) : DownloadState()
+    data class Failed(val message: String) : DownloadState()
+}
+
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val settings = Settings(app)
     val agent = Agent(settings, app.filesDir)
     private val chatFile = File(app.filesDir, "chat.json")
 
     val messages = mutableStateListOf<ChatMessage>()
+
+    /** Prepared (resized JPEG) images waiting to be sent with the next message. */
+    val attachments = mutableStateListOf<String>()
+    /** Set when images would go to a model that cannot see them; the UI asks before sending. */
+    var visionWarning by mutableStateOf<String?>(null)
+        private set
+    private var pendingSendText: String? = null
+
+    val downloads = mutableStateMapOf<String, DownloadState>()
+    private val apkDownloader = ApkDownloader({ settings.githubToken }, File(app.cacheDir, "apk"), Http.client)
     var running by mutableStateOf(false)
         private set
     var pending by mutableStateOf<PendingConfirm?>(null)
@@ -121,11 +145,72 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun send(text: String) {
-        if (text.isBlank() || running) return
+        if ((text.isBlank() && attachments.isEmpty()) || running) return
+        if (attachments.isNotEmpty() && !visionSupported()) {
+            pendingSendText = text
+            visionWarning = "Seçili model(ler)den biri görselleri göremiyor (DeepSeek). Görseller bu modellere gönderilmez; " +
+                "yalnızca bir not eklenir. Yine de gönderilsin mi? Görsel için Gemini model seçin."
+            return
+        }
+        doSend(text)
+    }
+
+    fun answerVisionWarning(send: Boolean) {
+        visionWarning = null
+        val t = pendingSendText
+        pendingSendText = null
+        if (send && t != null) doSend(t)
+    }
+
+    /** Models that may read the user's message: the main one, and the editor when routing can pick it. */
+    private fun visionSupported(): Boolean {
+        val refs = buildList {
+            add(agent.mainRef())
+            if (settings.smartRouting) add(agent.editorRef())
+        }
+        return refs.all { it.provider == Provider.GEMINI }
+    }
+
+    private fun doSend(text: String) {
         previewJob?.cancel(); preview = null
-        messages += ChatMessage.User(text.trim())
+        val images = attachments.toList()
+        attachments.clear()
+        messages += ChatMessage.User(text.trim().ifBlank { "(Ekran görüntüsüne bak.)" }, images)
         save()
         start(null)
+    }
+
+    /** Resizes picked images on a background thread (long edge ≤ 1568 px, JPEG 80%). */
+    fun addImages(uris: List<Uri>) {
+        val room = ImagePrep.MAX_IMAGES - attachments.size
+        if (room <= 0) return
+        viewModelScope.launch(Dispatchers.IO) {
+            for (uri in uris.take(room)) {
+                val path = runCatching { ImagePrep.prepare(getApplication(), uri) }.getOrNull() ?: continue
+                withContext(Dispatchers.Main) { if (attachments.size < ImagePrep.MAX_IMAGES) attachments += path }
+            }
+        }
+    }
+
+    fun removeImage(path: String) {
+        attachments.remove(path)
+        runCatching { File(path).delete() }
+    }
+
+    /** Downloads an APK found in the chat; progress and result are exposed in [downloads]. */
+    fun downloadApk(url: String, target: ApkTarget) {
+        if (downloads[url] is DownloadState.Running) return
+        downloads[url] = DownloadState.Running(0)
+        viewModelScope.launch {
+            downloads[url] = try {
+                val file = apkDownloader.download(target) { pct -> viewModelScope.launch { if (downloads[url] is DownloadState.Running) downloads[url] = DownloadState.Running(pct) } }
+                DownloadState.Ready(file.absolutePath)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                DownloadState.Failed(e.message ?: e.toString())
+            }
+        }
     }
 
     /** Stops the current run if any and repeats the last request in Architect mode. Spent cost stays recorded. */

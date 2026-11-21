@@ -63,7 +63,8 @@ object HistoryPruner {
         normalizeTurns(out, summary != null)
         if (summary != null) {
             val prefix = "[Önceki konuşmanın özeti]\n$summary\n[Özet sonu]\n\n"
-            out[0] = ChatMessage.User(prefix + (out[0] as ChatMessage.User).text)
+            val first = out[0] as ChatMessage.User
+            out[0] = first.copy(text = prefix + first.text)
         }
         return Prepared(out, old, if (mark >= 0) mark else s + 1, summary)
     }
@@ -139,7 +140,7 @@ object HistoryPruner {
             if (m is ChatMessage.ContextBlock) {
                 val prev = list.getOrNull(i - 1)
                 if (prev is ChatMessage.User) {
-                    list[i - 1] = ChatMessage.User(prev.text + "\n\n" + m.text)
+                    list[i - 1] = prev.copy(text = prev.text + "\n\n" + m.text)
                     list.removeAt(i)
                     continue
                 }
@@ -180,6 +181,8 @@ object HistoryPruner {
             reasoning = null,
         )
         is ChatMessage.ContextBlock -> m.copy(text = "[Bu istek için eklenen bağlam dosyaları: ${m.label}]")
+        // Old screenshots are not re-sent after a checkpoint; a note keeps the conversation readable.
+        is ChatMessage.User -> if (m.images.isEmpty()) m else m.copy(text = m.text + "\n[${m.images.size} ekran görüntüsü eklenmişti]", images = emptyList())
         else -> m
     }
 

@@ -1,6 +1,24 @@
 package com.suarez.coder.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.graphics.BitmapFactory
+import android.speech.RecognizerIntent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import com.suarez.coder.apk.ApkInstaller
+import com.suarez.coder.apk.ApkLinks
+import com.suarez.coder.media.ImagePrep
+import java.io.File
+import java.util.Locale
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -152,10 +170,16 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 if (items.isEmpty()) item { EmptyState() }
                 items(items, key = { it.key }) { item ->
                     when (item) {
-                        is DItem.Tools -> ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
+                        is DItem.Tools -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
+                            ApkActions(vm, item.calls.mapNotNull { it.second?.content }.joinToString("\n"))
+                        }
                         is DItem.Msg -> when (val m = item.m) {
-                            is ChatMessage.User -> UserBubble(m.text)
-                            is ChatMessage.Assistant -> MarkdownText(m.text)
+                            is ChatMessage.User -> UserBubble(m.text, m.images)
+                            is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                MarkdownText(m.text)
+                                ApkActions(vm, m.text)
+                            }
                             is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
                             is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi", m.text, false)
                             is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
@@ -171,10 +195,36 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
             }
             ControlBar(vm) { showSheet = true }
-            InputRow(input, running = vm.running,
+            val context = LocalContext.current
+            val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(ImagePrep.MAX_IMAGES)) { uris ->
+                vm.addImages(uris)
+            }
+            // System speech recognizer: no API cost, no microphone permission needed by this app.
+            val speech = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+                r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { spoken ->
+                    input = (input.trimEnd() + " " + spoken).trim()
+                    vm.onInputChanged(input)
+                }
+            }
+            if (vm.attachments.isNotEmpty()) AttachmentRow(vm.attachments) { vm.removeImage(it) }
+            InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty(),
                 onChange = { input = it; vm.onInputChanged(it) },
-                onSend = { vm.send(input); input = "" },
-                onStop = { vm.stop() })
+                onSend = { vm.send(input); if (vm.visionWarning == null) input = "" },
+                onStop = { vm.stop() },
+                onPick = {
+                    if (vm.attachments.size >= ImagePrep.MAX_IMAGES) Toast.makeText(context, "En fazla ${ImagePrep.MAX_IMAGES} görsel", Toast.LENGTH_SHORT).show()
+                    else picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+                onMic = {
+                    val lang = if (Locale.getDefault().language == "tr") "tr-TR" else Locale.getDefault().toLanguageTag()
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                        .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                        .putExtra(RecognizerIntent.EXTRA_PROMPT, "Görevini söyle")
+                    try { speech.launch(intent) } catch (e: ActivityNotFoundException) {
+                        Toast.makeText(context, "Bu cihazda ses tanıma bulunamadı", Toast.LENGTH_SHORT).show()
+                    }
+                })
         }
     }
 
@@ -188,6 +238,15 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
         }
     }
     vm.pending?.let { p -> ConfirmDialog(p, onAnswer = { vm.answer(it) }) }
+    vm.visionWarning?.let { w ->
+        AlertDialog(
+            onDismissRequest = { vm.answerVisionWarning(false) },
+            title = { Text("Model görselleri göremiyor") },
+            text = { Text(w) },
+            confirmButton = { TextButton(onClick = { vm.answerVisionWarning(true); input = "" }) { Text("Yine de gönder") } },
+            dismissButton = { TextButton(onClick = { vm.answerVisionWarning(false) }) { Text("Vazgeç") } },
+        )
+    }
     if (showContext) ContextDialog(vm, onDismiss = { showContext = false })
 }
 
@@ -286,13 +345,25 @@ private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
 }
 
 @Composable
-private fun InputRow(text: String, running: Boolean, onChange: (String) -> Unit, onSend: () -> Unit, onStop: () -> Unit) {
+private fun InputRow(
+    text: String,
+    running: Boolean,
+    hasAttachments: Boolean,
+    onChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+    onPick: () -> Unit,
+    onMic: () -> Unit,
+) {
     Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp, top = 2.dp), verticalAlignment = Alignment.Bottom) {
         OutlinedTextField(
             value = text,
             onValueChange = onChange,
             modifier = Modifier.weight(1f).heightIn(max = 180.dp),
             placeholder = { Text("Ne yapmamı istersin?") },
+            // Thumb-reachable extras inside the field: screenshots (left) and dictation (right).
+            leadingIcon = { IconButton(onClick = onPick, enabled = !running) { Text("🖼", fontSize = 18.sp) } },
+            trailingIcon = { IconButton(onClick = onMic, enabled = !running) { Text("🎙", fontSize = 18.sp) } },
             shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 unfocusedBorderColor = coder.border,
@@ -304,8 +375,95 @@ private fun InputRow(text: String, running: Boolean, onChange: (String) -> Unit,
         if (running) {
             FilledIconButton(onClick = onStop, modifier = Modifier.size(52.dp)) { Icon(Icons.Default.Close, "Durdur") }
         } else {
-            FilledIconButton(onClick = onSend, enabled = text.isNotBlank(), modifier = Modifier.size(52.dp)) {
+            FilledIconButton(onClick = onSend, enabled = text.isNotBlank() || hasAttachments, modifier = Modifier.size(52.dp)) {
                 Icon(Icons.AutoMirrored.Filled.Send, "Gönder")
+            }
+        }
+    }
+}
+
+/** Small, memory-friendly preview of a prepared image file. */
+@Composable
+private fun Thumb(path: String, size: Int, modifier: Modifier = Modifier) {
+    val bmp = remember(path) {
+        runCatching {
+            val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+            BitmapFactory.decodeFile(path, opts)?.asImageBitmap()
+        }.getOrNull()
+    }
+    if (bmp != null) {
+        Image(bmp, null, contentScale = ContentScale.Crop,
+            modifier = modifier.size(size.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, coder.border, RoundedCornerShape(8.dp)))
+    } else {
+        Box(modifier.size(size.dp).border(1.dp, coder.border, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+            Text("🖼", color = coder.muted)
+        }
+    }
+}
+
+@Composable
+private fun AttachmentRow(paths: List<String>, onRemove: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        paths.forEach { p ->
+            Box {
+                Thumb(p, 56)
+                Text(
+                    "×",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.align(Alignment.TopEnd)
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+                        .clickable { onRemove(p) }
+                        .padding(horizontal = 6.dp),
+                )
+            }
+        }
+        Text("${paths.size}/${ImagePrep.MAX_IMAGES}", style = Mono.tiny, color = coder.muted, modifier = Modifier.align(Alignment.CenterVertically))
+    }
+}
+
+/** "Download & install" buttons for APK links found in [text]. */
+@Composable
+private fun ApkActions(vm: ChatViewModel, text: String) {
+    if (!text.contains("http")) return
+    val links = remember(text) { ApkLinks.find(text) }
+    if (links.isEmpty()) return
+    val context = LocalContext.current
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        links.forEach { (url, target) ->
+            val state = vm.downloads[url]
+            val label = when (state) {
+                null -> "⬇ İndir ve Kur"
+                is DownloadState.Running -> "İndiriliyor %${state.percent}"
+                is DownloadState.Ready -> "📦 Kur"
+                is DownloadState.Failed -> "↻ Tekrar dene"
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    onClick = {
+                        when (state) {
+                            is DownloadState.Ready -> {
+                                val started = runCatching { ApkInstaller.install(context, File(state.path)) }.getOrElse { false }
+                                if (!started) Toast.makeText(context, "Coder'a uygulama yükleme izni verin, sonra tekrar dokunun", Toast.LENGTH_LONG).show()
+                            }
+                            is DownloadState.Running -> Unit
+                            else -> vm.downloadApk(url, target)
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    border = BorderStroke(1.dp, coder.editor.copy(alpha = 0.6f)),
+                ) {
+                    if (state is DownloadState.Running) {
+                        CircularProgressIndicator(progress = { state.percent / 100f }, modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.editor)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(label, style = Mono.small, color = coder.editor)
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    (state as? DownloadState.Failed)?.message ?: url.substringAfter("github.com/").take(48),
+                    style = Mono.tiny, color = if (state is DownloadState.Failed) coder.warn else coder.muted,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -435,8 +593,13 @@ private fun EmptyState() {
 }
 
 @Composable
-private fun UserBubble(text: String) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+private fun UserBubble(text: String, images: List<String> = emptyList()) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        if (images.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 4.dp)) {
+                images.forEach { Thumb(it, 72) }
+            }
+        }
         Surface(
             shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
             color = MaterialTheme.colorScheme.primaryContainer,

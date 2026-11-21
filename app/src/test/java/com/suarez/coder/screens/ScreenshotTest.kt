@@ -40,6 +40,7 @@ class ScreenshotTest {
         val c3 = ToolCall("c3", "github_apply_diff", JSONObject().put("repo", "Suarez1907/kay-p-kuleler").put("branch", "feat/levels").put("diff", "x"))
         vm.messages.addAll(listOf(
             ChatMessage.User("Oyuna 5 yeni seviye ekle ve zorluğu kademeli artır"),
+            ChatMessage.Assistant("Sürüm hazır: https://github.com/Suarez1907/kay-p-kuleler/releases/download/v1.3.0/app-release.apk"),
             ChatMessage.RouteInfo("Decision 1 → Mimar Modu (gemini-4-hydrogen + gemini-3.8-flash, %88 güven, zorluk 2.1/3) • 3/50 dosya seçildi • 289 ms", "detay", "COMPLEX_ARCHITECT", false),
             ChatMessage.Notice("🗺 Repo haritası: 52 dosya, ~5.8k token (önbellekten, 165715a)", "harita"),
             ChatMessage.Assistant("", listOf(c1)),
