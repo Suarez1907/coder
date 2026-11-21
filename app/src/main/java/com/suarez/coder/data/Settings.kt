@@ -42,7 +42,7 @@ class Settings(context: Context) {
 
     var defaultRepo: String
         get() = str("default_repo")
-        set(v) = put("default_repo", v.trim())
+        set(v) { put("default_repo", v.trim()); updateActive { it.copy(repo = v.trim()) } }
 
     var geminiModel: String
         get() = str("gemini_model", "gemini-2.5-pro")
@@ -62,7 +62,7 @@ class Settings(context: Context) {
 
     var customInstructions: String
         get() = str("custom_instructions")
-        set(v) = put("custom_instructions", v)
+        set(v) { put("custom_instructions", v); updateActive { it.copy(instructions = v) } }
 
     var maxSteps: Int
         get() = prefs.getInt("max_steps", 40)
@@ -277,9 +277,71 @@ class Settings(context: Context) {
 
     var contextRef: String
         get() = str("context_ref")
-        set(v) = put("context_ref", v.trim())
+        set(v) { put("context_ref", v.trim()); updateActive { it.copy(contextRef = v.trim()) } }
 
     var contextFiles: List<String>
         get() = str("context_files").lines().filter { it.isNotBlank() }
-        set(v) = put("context_files", v.distinct().joinToString("\n"))
+        set(v) { put("context_files", v.distinct().joinToString("\n")); updateActive { it.copy(contextFiles = v.distinct()) } }
+
+    // ---- Project profiles ----
+    // The active profile is mirrored into defaultRepo / customInstructions / context*: everything that reads those
+    // keeps working, and every write to them is also stored in the active profile.
+
+    var defaultBranch: String
+        get() = str("default_branch")
+        set(v) { put("default_branch", v.trim()); updateActive { it.copy(branch = v.trim()) } }
+
+    val activeProfileId: String get() = str("active_profile")
+
+    /** All profiles; on first use the current repo/instructions/context become the first profile. */
+    fun profiles(): List<ProjectProfile> {
+        val stored = ProfileJson.fromJson(str("profiles", "[]"))
+        if (stored.isNotEmpty()) return stored
+        val first = ProjectProfile(
+            repo = defaultRepo, branch = str("default_branch"), instructions = customInstructions,
+            contextRef = contextRef, contextFiles = contextFiles,
+        )
+        put("profiles", ProfileJson.toJson(listOf(first)))
+        put("active_profile", first.id)
+        return listOf(first)
+    }
+
+    fun activeProfile(): ProjectProfile = profiles().let { list -> list.firstOrNull { it.id == activeProfileId } ?: list.first() }
+
+    private fun saveProfiles(list: List<ProjectProfile>) = put("profiles", ProfileJson.toJson(list))
+
+    private fun updateActive(change: (ProjectProfile) -> ProjectProfile) {
+        val list = ProfileJson.fromJson(str("profiles", "[]"))
+        if (list.isEmpty()) return // not migrated yet: profiles() will copy the current values
+        val id = activeProfileId
+        saveProfiles(list.map { if (it.id == id) change(it) else it })
+    }
+
+    /** Makes [id] active and copies its values into the mirrored settings. */
+    fun activateProfile(id: String) {
+        val p = profiles().firstOrNull { it.id == id } ?: return
+        put("active_profile", p.id)
+        put("default_repo", p.repo)
+        put("default_branch", p.branch)
+        put("custom_instructions", p.instructions)
+        put("context_repo", "")
+        put("context_ref", p.contextRef)
+        put("context_files", p.contextFiles.joinToString("\n"))
+        if (p.architectModel.isNotBlank()) architectModel = p.architectModel
+        if (p.editorModel.isNotBlank()) editorModel = p.editorModel
+    }
+
+    /** Adds or replaces a profile (matched by id). */
+    fun upsertProfile(p: ProjectProfile) {
+        val list = profiles()
+        saveProfiles(if (list.any { it.id == p.id }) list.map { if (it.id == p.id) p else it } else list + p)
+        if (p.id == activeProfileId) activateProfile(p.id)
+    }
+
+    fun deleteProfile(id: String) {
+        val rest = profiles().filter { it.id != id }
+        if (rest.isEmpty()) return // keep at least one
+        saveProfiles(rest)
+        if (id == activeProfileId) activateProfile(rest.first().id)
+    }
 }

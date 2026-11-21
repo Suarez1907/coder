@@ -49,6 +49,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.rememberDrawerState
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -144,6 +150,10 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     var input by rememberSaveable { mutableStateOf("") }
     var showContext by remember { mutableStateOf(false) }
     var showSheet by remember { mutableStateOf(false) }
+    var showProfiles by remember { mutableStateOf(false) }
+    var showDashboard by remember { mutableStateOf(false) }
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion // recompose when settings change
 
@@ -156,9 +166,19 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
 
+    ModalNavigationDrawer(
+        drawerState = drawer,
+        gesturesEnabled = drawer.isOpen,
+        drawerContent = {
+            HistoryDrawer(vm,
+                onOpen = { id -> vm.openSession(id); scope.launch { drawer.close() } },
+                onNewChat = { vm.newChat(); scope.launch { drawer.close() } },
+                onDashboard = { showDashboard = true; scope.launch { drawer.close() } })
+        },
+    ) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        topBar = { ChatTopBar(vm, onOpenSettings) },
+        topBar = { ChatTopBar(vm, onOpenSettings, onMenu = { scope.launch { drawer.open() } }, onRepo = { showProfiles = true }) },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize().imePadding()) {
             LazyColumn(
@@ -228,7 +248,18 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 })
         }
     }
+    }
 
+    if (showProfiles) {
+        ModalBottomSheet(
+            onDismissRequest = { showProfiles = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = MaterialTheme.colorScheme.surface,
+        ) {
+            ProfileSheet(vm, onDone = { showProfiles = false })
+        }
+    }
+    if (showDashboard) CostDashboard(vm, onDismiss = { showDashboard = false })
     if (showSheet) {
         ModalBottomSheet(
             onDismissRequest = { showSheet = false },
@@ -261,7 +292,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit) {
+private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit, onMenu: () -> Unit = {}, onRepo: () -> Unit = {}) {
     val s = vm.settings
     val repo = s.contextRepo.ifBlank { s.defaultRepo }.substringAfterLast('/').ifBlank { null }
     val cost = vm.agent.sessionCost(vm.messages)
@@ -269,12 +300,15 @@ private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val hit = vm.agent.cacheHitRate(calls)
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+        navigationIcon = { IconButton(onClick = onMenu) { Icon(Icons.Default.Menu, "Sohbetler") } },
         title = {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Coder", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.width(8.dp))
-                    Badge(repo ?: "repo yok", if (repo != null) coder.editor else coder.muted)
+                    Box(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onRepo)) {
+                        Badge((repo ?: "repo yok") + " ▾", if (repo != null) coder.editor else coder.muted)
+                    }
                 }
                 Row {
                     Text(Pricing.formatUsd(cost), style = Mono.small, color = coder.cost)

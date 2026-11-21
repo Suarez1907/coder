@@ -321,6 +321,9 @@ private fun GitHubPage(vm: ChatViewModel) {
             Text("Token oluştur: github.com")
         }
         TextSetting("Varsayılan repo", s.defaultRepo, mono = true, placeholder = "sahip/isim") { s.defaultRepo = it; vm.refreshSettings() }
+        TextSetting("Varsayılan branch", s.defaultBranch, mono = true, placeholder = "main") { s.defaultBranch = it; vm.refreshSettings() }
+        Text("Repo, branch ve özel talimatlar etkin proje profiline kaydedilir. Profiller arasında üst çubuktaki repo rozetine dokunarak geçiş yapılır.",
+            style = MaterialTheme.typography.bodySmall, color = coder.muted)
     }
 
     Group {

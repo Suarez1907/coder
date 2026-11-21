@@ -48,6 +48,8 @@ sealed class ChatMessage {
         val label: String = "",
         /** Price multiplier for the token cost, e.g. 0.5 for the Flex tier. */
         val discount: Double = 1.0,
+        /** Creation time; also identifies the record in the persistent cost ledger. */
+        val at: Long = System.currentTimeMillis(),
     ) : ChatMessage()
 
     /** Everything model-visible before this marker is sent compacted; everything after it in full (append-only). */
@@ -152,7 +154,7 @@ object MessageJson {
                     m.detail?.let { o.put("detail", it) }
                 }
                 is ChatMessage.UsageRecord -> o.put("t", "usage").put("model", m.model).put("role", m.role)
-                    .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label).put("disc", m.discount)
+                    .put("u", usageJson(m.usage)).put("extra", m.extraCostUsd).put("label", m.label).put("disc", m.discount).put("at", m.at)
                 is ChatMessage.CompactMark -> o.put("t", "mark")
                 is ChatMessage.ContextBlock -> o.put("t", "ctx").put("text", m.text).put("label", m.label)
                 is ChatMessage.ToolResult -> o.put("t", "tool").put("id", m.callId).put("name", m.name)
@@ -188,7 +190,7 @@ object MessageJson {
                 "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,
                     o.optString("route"), o.optBoolean("ov"))
                 "usage" -> ChatMessage.UsageRecord(o.optString("model"), o.optString("role"), usageFrom(o.optJSONObject("u")),
-                    o.optDouble("extra", 0.0), o.optString("label"), o.optDouble("disc", 1.0))
+                    o.optDouble("extra", 0.0), o.optString("label"), o.optDouble("disc", 1.0), o.optLong("at", 0L))
                 "mark" -> ChatMessage.CompactMark
                 "ctx" -> ChatMessage.ContextBlock(o.getString("text"), o.optString("label"))
                 "tool" -> ChatMessage.ToolResult(o.getString("id"), o.getString("name"), o.getString("content"), o.optBoolean("err"))

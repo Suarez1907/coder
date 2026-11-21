@@ -101,9 +101,34 @@ class ScreenshotTest {
     @Test fun slashSuggestions() {
         val vm = vm()
         compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
-        compose.onNode(androidx.compose.ui.test.hasSetTextAction()).performTextInput("/")
+        compose.onNode(androidx.compose.ui.test.hasSetTextAction() and androidx.compose.ui.test.hasText("Ne yapmamı istersin?")).performTextInput("/")
         compose.waitForIdle()
         compose.onRoot().captureRoboImage("build/outputs/roborazzi/slash.png")
+    }
+
+    @Test fun historyDrawerProfilesAndDashboard() {
+        val vm = vm()
+        vm.saveProfile(com.suarez.coder.data.ProjectProfile(repo = "Suarez1907/coder", branch = "ccr-dev",
+            instructions = "Kotlin, Compose", architectModel = "gemini/gemini-4-hydrogen"))
+        vm.newChat() // stores the sample chat in history
+        compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasContentDescription("Sohbetler")).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/history_drawer.png")
+        compose.onNode(androidx.compose.ui.test.hasText("Maliyet Panosu", substring = true)).performClick()
+        compose.waitForIdle()
+        compose.onAllNodes(androidx.compose.ui.test.isRoot()).let { n -> n[n.fetchSemanticsNodes().size - 1] }
+            .captureRoboImage("build/outputs/roborazzi/cost_dashboard.png")
+    }
+
+    @Test fun profileSheet() {
+        val vm = vm()
+        vm.saveProfile(com.suarez.coder.data.ProjectProfile(repo = "Suarez1907/coder", branch = "ccr-dev",
+            instructions = "Kotlin, Compose", architectModel = "gemini/gemini-4-hydrogen"))
+        compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasText("kay-p-kuleler ▾")).performClick()
+        compose.waitForIdle()
+        compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].captureRoboImage("build/outputs/roborazzi/profile_sheet.png")
     }
 
     @Test fun settingsHome() {

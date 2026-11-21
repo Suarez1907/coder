@@ -165,6 +165,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             appendLine("You cannot run code on the device; builds and tests run in the repo's GitHub Actions.")
             appendLine("Reply in the user's language (default Turkish). Keep answers short; the screen is small.")
             if (repo != null) appendLine("Default repository: $repo.")
+            settings.defaultBranch.takeIf { it.isNotBlank() }?.let { appendLine("Default branch: $it.") }
             if (settings.customInstructions.isNotBlank()) appendLine("User instructions: ${settings.customInstructions}")
         }
     }

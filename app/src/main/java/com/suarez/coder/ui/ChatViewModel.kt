@@ -6,6 +6,12 @@ import androidx.compose.runtime.mutableStateMapOf
 import com.suarez.coder.apk.ApkDownloader
 import com.suarez.coder.apk.ApkTarget
 import com.suarez.coder.ci.CiWatchService
+import com.suarez.coder.cost.CostBreakdown
+import com.suarez.coder.cost.Ledger
+import com.suarez.coder.cost.LedgerEntry
+import com.suarez.coder.data.ProjectProfile
+import com.suarez.coder.data.SessionMeta
+import com.suarez.coder.data.SessionStore
 import com.suarez.coder.tools.ToolRegistry
 import com.suarez.coder.llm.Http
 import com.suarez.coder.media.ImagePrep
@@ -52,7 +58,17 @@ sealed class DownloadState {
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val settings = Settings(app)
     val agent = Agent(settings, app.filesDir)
-    private val chatFile = File(app.filesDir, "chat.json")
+    private val sessionStore = SessionStore(File(app.filesDir, "chats"), legacyChat = File(app.filesDir, "chat.json"))
+    private val ledger = Ledger(File(app.filesDir, "ledger.jsonl"))
+    private val loggedKeys = HashSet<String>()
+
+    /** Id of the chat on screen. */
+    var currentSessionId by mutableStateOf("")
+        private set
+    var sessions by mutableStateOf<List<SessionMeta>>(emptyList())
+        private set
+    var profiles by mutableStateOf<List<ProjectProfile>>(emptyList())
+        private set
 
     val messages = mutableStateListOf<ChatMessage>()
 
@@ -91,7 +107,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun notificationPermissionAsked() { askNotificationPermission = false }
 
     init {
-        runCatching { if (chatFile.exists()) messages.addAll(MessageJson.fromJson(chatFile.readText())) }
+        // Resume the most recent chat; older ones stay in the history drawer.
+        val latest = sessionStore.list().firstOrNull()
+        currentSessionId = latest?.id ?: sessionStore.newId()
+        if (latest != null) messages.addAll(sessionStore.load(latest.id))
+        sessions = sessionStore.list()
+        profiles = settings.profiles()
+        viewModelScope.launch(Dispatchers.IO) { initLedger() }
         agent.tools.ciListener = object : ToolRegistry.CiListener {
             override fun started(repo: String, label: String) {
                 val ctx = getApplication<Application>()
@@ -108,7 +130,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun refreshSettings() { settingsVersion++ }
+    fun refreshSettings() { settingsVersion++; profiles = settings.profiles() }
 
     val sessionCostText: String
         get() {
@@ -294,13 +316,85 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stop() { job?.cancel() }
 
+    /** Starts a fresh chat; the current one stays in the history. */
     fun newChat() {
         stop()
+        save()
+        currentSessionId = sessionStore.newId()
         messages.clear()
         agent.resetSession()
         preview = null
-        save()
     }
+
+    fun openSession(id: String) {
+        if (id == currentSessionId) return
+        stop()
+        save()
+        currentSessionId = id
+        messages.clear()
+        messages.addAll(sessionStore.load(id))
+        agent.resetSession()
+        preview = null
+    }
+
+    fun deleteSession(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            sessionStore.delete(id)
+            withContext(Dispatchers.Main) {
+                sessions = sessionStore.list()
+                if (id == currentSessionId) { currentSessionId = sessionStore.newId(); messages.clear(); agent.resetSession() }
+            }
+        }
+    }
+
+    suspend fun searchSessions(query: String): List<SessionMeta> = withContext(Dispatchers.IO) { sessionStore.search(query) }
+
+    // ---- Project profiles ----
+
+    fun activateProfile(id: String) {
+        settings.activateProfile(id)
+        afterProfileChange()
+    }
+
+    fun saveProfile(p: ProjectProfile) {
+        settings.upsertProfile(p)
+        afterProfileChange()
+    }
+
+    fun deleteProfile(id: String) {
+        settings.deleteProfile(id)
+        afterProfileChange()
+    }
+
+    private fun afterProfileChange() {
+        profiles = settings.profiles()
+        agent.context.invalidate()
+        agent.invalidateSnapshot()
+        refreshSettings()
+    }
+
+    // ---- Cost dashboard ----
+
+    suspend fun costBreakdown(): CostBreakdown = withContext(Dispatchers.IO) { Ledger.aggregate(ledger.readAll()) }
+
+    private fun repoNow() = settings.contextRepo.ifBlank { settings.defaultRepo }
+
+    /** Loads the logged keys; on first use imports the costs of the existing chats once. */
+    private fun initLedger() {
+        val fresh = !File(getApplication<Application>().filesDir, "ledger.jsonl").exists()
+        if (fresh) {
+            val imported = sessionStore.list().flatMap { meta ->
+                sessionStore.load(meta.id).filterIsInstance<ChatMessage.UsageRecord>().map { r -> entryFor(meta.id, meta.repo, r) }
+            }
+            ledger.append(imported)
+        }
+        synchronized(loggedKeys) { loggedKeys.addAll(ledger.keys()) }
+    }
+
+    private fun entryFor(session: String, repo: String, r: ChatMessage.UsageRecord) = LedgerEntry(
+        at = r.at, session = session, repo = repo, role = r.role, model = r.model,
+        input = r.usage.input, cached = r.usage.cached, output = r.usage.output + r.usage.thoughts, usd = agent.costOf(r),
+    )
 
     /** Debounced, free countTokens preview of what the next request would cost. */
     fun onInputChanged(text: String) {
@@ -376,7 +470,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun save() {
-        val snapshot = MessageJson.toJson(messages.toList())
-        viewModelScope.launch(Dispatchers.IO) { runCatching { chatFile.writeText(snapshot) } }
+        val snapshot = messages.toList()
+        val id = currentSessionId
+        val repo = repoNow()
+        val cost = agent.sessionCost(snapshot)
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { sessionStore.save(id, snapshot, repo, cost) }
+            // New cost records go to the permanent ledger exactly once.
+            val fresh = snapshot.filterIsInstance<ChatMessage.UsageRecord>().filter { r ->
+                synchronized(loggedKeys) { loggedKeys.add(Ledger.key(id, r.at, r.role, r.model)) }
+            }
+            runCatching { ledger.append(fresh.map { entryFor(id, repo, it) }) }
+            val list = sessionStore.list()
+            withContext(Dispatchers.Main) { sessions = list }
+        }
     }
 }
