@@ -7,9 +7,7 @@ package com.suarez.coder.ci
 object LogFilter {
     private val timestamp = Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z\\s?")
     private val errorRe = Regex(
-        "(^e: |^w: .*error|\\berror\\b|\\berror:|##\\[error\\]|FAILED|FAILURE|BUILD FAILED|What went wrong|Exception|" +
-            "Unresolved reference|cannot find symbol|Could not (find|resolve)|npm ERR!|Traceback|AssertionError|" +
-            "SyntaxError|TypeError|ReferenceError|Process completed with exit code [1-9]|exit code [1-9])",
+        "(^e: |^w: .*\\berror\\b|^\\berror:|##\\[error\\]|\\bBUILD FAILED\\b|\\bBUILD FAILURE\\b|^FAILED:|^FAILURE:|What went wrong|Exception in thread|Caused by:|\\b\\w+Exception\\b|Unresolved reference|cannot find symbol|Could not (find|resolve)|npm ERR!|Traceback|\\b(AssertionError|SyntaxError|TypeError|ReferenceError)\\b|Process completed with exit code [1-9]|exit code [1-9])",
         RegexOption.IGNORE_CASE,
     )
     private val noise = Regex("(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated)", RegexOption.IGNORE_CASE)
