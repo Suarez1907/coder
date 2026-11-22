@@ -156,7 +156,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         agent.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
         agent.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
         refreshEvolution()
-        refreshSkills()
         agent.orchestratorHooks = object : OrchestratorHooks {
             override fun save(plan: OrchestratorPlan) {
                 val session = jobSession.ifBlank { currentSessionId }
@@ -391,6 +390,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var skillsStatus by mutableStateOf<String?>(null)
         private set
 
+    // Kotlin runs initializers in source order: this must come after the skill state above.
+    init { refreshSkills() }
+
     fun refreshSkills(fetchRepo: Boolean = false) {
         val repo = agent.tools.activeRepo()
         viewModelScope.launch {
@@ -559,6 +561,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { gh.deleteBranch(EvolutionGuard.SELF_REPO, p.branch) }
                     evoStore.savePending(p.copy(state = PrState.MERGED))
                     evoStore.bump("merged")
+                    // A merged topic is done: never propose the same fix again.
+                    evoStore.reject(p.topic)
                     evoStore.addLog(EvoTier.SELF_PR, "PR #${p.number} merge edildi: ${p.title}")
                 }
                 refreshEvolution()

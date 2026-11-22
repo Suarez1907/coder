@@ -87,6 +87,9 @@ class EvolutionTest {
         assertEquals(Block.BUDGET, gate(spent = 0.2))
         assertEquals(Block.REJECTED_TOPIC, gate(topic = "Diff Ellipsis", rejected = setOf("diff-ellipsis")))
         assertEquals(Block.NO_EVIDENCE, gate(trouble = 1))
+        // The same problem under another slug (what produced PR #2 and #3) is blocked too.
+        assertEquals(Block.REJECTED_TOPIC, gate(topic = "logfilter-false-positive-license", rejected = setOf("logfilter-legal-boilerplate-false-positive")))
+        assertEquals(Block.OK, gate(topic = "search-replace-ellipsis", rejected = setOf("logfilter-legal-boilerplate")))
     }
 
     @Test fun storeTracksSpendPendingAndRejections() {

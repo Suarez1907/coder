@@ -40,9 +40,24 @@ object EvolutionGuard {
                   topic: String, rejected: Set<String>, trouble: Int): Block = when {
         openEvoPrs > 0 || localPending -> Block.OPEN_PR
         spentToday >= dailyBudget -> Block.BUDGET
-        normalizeTopic(topic) in rejected -> Block.REJECTED_TOPIC
+        rejected.any { similarTopic(it, topic) } -> Block.REJECTED_TOPIC
         trouble < MIN_TROUBLE_FOR_PR -> Block.NO_EVIDENCE
         else -> Block.OK
+    }
+
+    /**
+     * Topics are model-written slugs, so the same problem comes back as "logfilter-legal" and
+     * "logfilter-false-positive-license": two shared significant words (or the same slug) count as the same topic.
+     */
+    fun similarTopic(a: String, b: String): Boolean {
+        fun full(t: String) = t.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+        val x = full(a); val y = full(b)
+        if (x == y) return true
+        val stop = setOf("fix", "the", "and", "for", "bug", "issue", "false", "add", "use", "coder", "on", "in", "of")
+        fun words(s: String) = s.split('-').filter { it.length >= 3 && it !in stop }.toSet()
+        // Stored topics are cut at 40 characters: compare word prefixes so "posit" still meets "positive".
+        val wx = words(x); val wy = words(y)
+        return wx.count { u -> wy.any { v -> u.startsWith(v) || v.startsWith(u) } } >= 2 || normalizeTopic(a) == normalizeTopic(b)
     }
 
     fun normalizeTopic(t: String) = t.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').take(40)

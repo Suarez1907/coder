@@ -137,7 +137,8 @@ class EvolutionEngine(
                     si.topic, store.rejectedTopics(), maxOf(t.troubleScore, recentTrouble))
                 if (gate == EvolutionGuard.Block.OK) {
                     val out = SelfPrOrchestrator(agent, onStatus).run(si) { spent }
-                    out.pr?.let { store.savePending(it); store.bump("prs") }
+                    // The topic is closed as soon as a PR exists (merged or rejected later), so it is never opened twice.
+                    out.pr?.let { store.savePending(it); store.bump("prs"); store.reject(it.topic) }
                     log(EvoTier.SELF_PR, (if (out.pr != null) "PR #${out.pr.number} açıldı: ${out.pr.title}. " else "Self-PR denemesi: ") + out.summary)
                     produced++
                 } else {
