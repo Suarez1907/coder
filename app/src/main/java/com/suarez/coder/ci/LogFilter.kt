@@ -7,9 +7,7 @@ package com.suarez.coder.ci
 object LogFilter {
     private val timestamp = Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z\\s?")
     private val errorRe = Regex(
-        "(^e: |^w: .*error|\\berror\\b|\\berror:|##\\[error\\]|FAILED|FAILURE|BUILD FAILED|What went wrong|Exception|" +
-            "Unresolved reference|cannot find symbol|Could not (find|resolve)|npm ERR!|Traceback|AssertionError|" +
-            "SyntaxError|TypeError|ReferenceError|Process completed with exit code [1-9]|exit code [1-9])",
+        "(^e: |^w: .*\\berror\\b|^\\berror:|##\\[error\\]|What went wrong|Exception in thread|Caused by:|Unresolved reference|cannot find symbol|Could not (find|resolve)|npm ERR!|Traceback|\\b(AssertionError|SyntaxError|TypeError|ReferenceError)\\b|Process completed with exit code [1-9]|exit code [1-9]|(?!.*\\b(WARRANTY|LIABILITY|DAMAGES|INFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b)\\bBUILD (FAILED|FAILURE)\\b|(?!.*\\b(WARRANTY|LIABILITY|DAMAGES|INFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b)^(FAILED|FAILURE):|(?!.*\\b(WARRANTY|LIABILITY|DAMAGES|INFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b)(?:\\b(gradle|maven|npm|kotlin|java|task|execution|build|compile|link|assemble)\\b.{0,30}\\b(FAILURE|FAILED|ERROR|EXCEPTION)\\b|\\b(FAILURE|FAILED|ERROR|EXCEPTION)\\b.{0,30}\\b(gradle|maven|npm|kotlin|java|task|execution|build|compile|link|assemble)\\b)|(?!.*\\b(WARRANTY|LIABILITY|DAMAGES|INFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b)(?:\\b(gradle|maven|npm|kotlin|java|task|execution|build|compile|link|assemble)\\b.{0,30}\\b\\w+Exception\\b|\\b\\w+Exception\\b.{0,30}\\b(gradle|maven|npm|kotlin|java|task|execution|build|compile|link|assemble)\\b))",
         RegexOption.IGNORE_CASE,
     )
     private val noise = Regex("(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated)", RegexOption.IGNORE_CASE)
