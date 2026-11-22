@@ -32,6 +32,15 @@ import com.suarez.coder.decision.Route
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.MessageJson
 import com.suarez.coder.llm.ModelRef
+import com.suarez.coder.evolution.AdaptiveRouting
+import com.suarez.coder.evolution.EvoTier
+import com.suarez.coder.evolution.EvolutionEngine
+import com.suarez.coder.evolution.EvolutionGuard
+import com.suarez.coder.evolution.EvolutionLogEntry
+import com.suarez.coder.evolution.EvolutionWorker
+import com.suarez.coder.evolution.PendingSelfPr
+import com.suarez.coder.evolution.PrState
+import com.suarez.coder.evolution.SessionTraceRecorder
 import com.suarez.coder.orchestrator.OrchestratorHooks
 import com.suarez.coder.orchestrator.OrchestratorMode
 import com.suarez.coder.orchestrator.OrchestratorPlan
@@ -69,6 +78,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val ledger = Ledger(File(app.filesDir, "ledger.jsonl"))
     private val loggedKeys = HashSet<String>()
     private val planStore = OrchestratorStore(File(app.filesDir, "orchestrator"))
+    val evoStore = EvolutionEngine.storeFor(app)
+
+    /** Self-evolution screen state. */
+    var evoPending by mutableStateOf<PendingSelfPr?>(null)
+        private set
+    var evoLog by mutableStateOf<List<EvolutionLogEntry>>(emptyList())
+        private set
+    var evoStatus by mutableStateOf<String?>(null)
+        private set
+    var evoBusy by mutableStateOf(false)
+        private set
+    /** Last trace of this app run, so a corrective follow-up message can be attached to it. */
+    private var lastTraceId: String? = null
 
     /** Orchestrator plan of the chat on screen (shown as a card), or null. */
     var activePlan by mutableStateOf<OrchestratorPlan?>(null)
@@ -131,6 +153,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sessions = sessionStore.list()
         profiles = settings.profiles()
         activePlan = planStore.recover(currentSessionId)
+        agent.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
+        agent.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
+        refreshEvolution()
         agent.orchestratorHooks = object : OrchestratorHooks {
             override fun save(plan: OrchestratorPlan) {
                 val session = jobSession.ifBlank { currentSessionId }
@@ -264,6 +289,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         attachments.clear()
         messages += ChatMessage.User(text.trim().ifBlank { "(Ekran görüntüsüne bak.)" }, images)
         save()
+        // "Hayır, olmadı" right after a run is a correction signal for the previous trace.
+        lastTraceId?.takeIf { SessionTraceRecorder.isCorrection(text) }?.let { id ->
+            viewModelScope.launch(Dispatchers.IO) { evoStore.updateTrace(id) { t -> if (t.processed) t else t.copy(userCorrection = true) } }
+        }
+        lastTraceId = null
         start(null)
     }
 
@@ -328,6 +358,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         jobSession = currentSessionId
         job = viewModelScope.launch {
             val work = messages.toMutableList()
+            val runStart = work.size
             val agentUi = object : AgentUi by ui {
                 override fun update() { sync(work); save() }
             }
@@ -345,8 +376,139 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 status = null
                 running = false
                 save()
+                recordTrace(work, runStart)
             }
         }
+    }
+
+    // ---- Self-evolution ----
+
+    /** Saves a trace of the finished run (never for evolution runs) and queues the background evolution worker. */
+    private fun recordTrace(work: List<ChatMessage>, runStart: Int) {
+        val run = work.drop(runStart)
+        val request = (work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
+        val trace = SessionTraceRecorder.record(run, request, currentSessionId, agent.tools.normalizeRepo(repoNow()),
+            agent.isEvolutionSession, agent::costOf) ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            evoStore.addTrace(trace)
+            lastTraceId = trace.id
+            if (settings.evoEnabled) EvolutionWorker.schedule(getApplication(), settings.evoWifiOnly)
+        }
+    }
+
+    fun refreshEvolution() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val p = evoStore.pending()
+            val log = evoStore.log().asReversed()
+            withContext(Dispatchers.Main) { evoPending = p; evoLog = log }
+        }
+    }
+
+    fun evoSummary(): Map<String, String> = mapOf(
+        "İncelenen seans" to evoStore.counter("reviewed").toString(),
+        "Öğrenilen kural" to evoStore.lessonCount().toString(),
+        "Yönlendirme ayarı" to evoLog.count { it.tier == EvoTier.ROUTING && !it.undone }.toString(),
+        "Açılan / merge edilen PR" to "${evoStore.counter("prs")} / ${evoStore.counter("merged")}",
+        "Toplam evrim maliyeti" to Pricing.formatUsd(evoLog.sumOf { it.costUsd }),
+        "Bugün" to Pricing.formatUsd(evoStore.spentToday()) + " / " + Pricing.formatUsd(settings.evoDailyBudget),
+    )
+
+    /** "Son seansı şimdi değerlendir": ignores the switch and the cooldown, never the budget. */
+    fun evoRunNow() {
+        if (evoBusy) return
+        evoBusy = true
+        viewModelScope.launch {
+            val msg = runCatching {
+                withContext(Dispatchers.IO) { EvolutionEngine(getApplication(), settings, evoStore).run(force = true) { s -> viewModelScope.launch { evoStatus = s } } }
+            }.getOrElse { "Hata: ${it.message}" }
+            evoStatus = msg
+            evoBusy = false
+            refreshEvolution()
+        }
+    }
+
+    fun evoUndo(entry: EvolutionLogEntry) {
+        val prev = entry.undo ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            evoStore.routing.undo(prev)
+            evoStore.markUndone(entry.id)
+            evoStore.addLog(EvoTier.ROUTING, "Geri alındı: ${entry.summary.take(160)}")
+            refreshEvolution()
+        }
+    }
+
+    suspend fun evoPrFiles(): List<String> = evoPending?.let { p ->
+        withContext(Dispatchers.IO) { runCatching { agent.tools.github.pullRequestFiles(EvolutionGuard.SELF_REPO, p.number) }.getOrDefault(p.files) }
+    }.orEmpty()
+
+    /** Merges the self-PR (squash), deletes its branch and waits for the release build so the APK can be installed. */
+    fun evoMerge() {
+        val p = evoPending ?: return
+        if (evoBusy) return
+        evoBusy = true
+        viewModelScope.launch {
+            try {
+                evoStatus = "PR #${p.number} merge ediliyor"
+                val gh = agent.tools.github
+                val (code, msg) = withContext(Dispatchers.IO) { gh.tryMerge(EvolutionGuard.SELF_REPO, p.number, "squash") }
+                if (code == 405 || code == 409) {
+                    evoStore.savePending(p.copy(state = PrState.CONFLICT))
+                    evoStatus = "Merge yapılamadı (çakışma, HTTP $code): $msg. Dal korunuyor."
+                    return@launch
+                }
+                if (code !in 200..299) { evoStatus = "Merge hatası (HTTP $code): $msg"; return@launch }
+                withContext(Dispatchers.IO) {
+                    runCatching { gh.deleteBranch(EvolutionGuard.SELF_REPO, p.branch) }
+                    evoStore.savePending(p.copy(state = PrState.MERGED))
+                    evoStore.bump("merged")
+                    evoStore.addLog(EvoTier.SELF_PR, "PR #${p.number} merge edildi: ${p.title}")
+                }
+                refreshEvolution()
+                evoStatus = "Merge edildi. Release derlemesi bekleniyor"
+                val ci = withContext(Dispatchers.IO) {
+                    agent.tools.execute(com.suarez.coder.llm.ToolCall("evo_release", "ci_wait",
+                        org.json.JSONObject().put("repo", EvolutionGuard.SELF_REPO).put("ref", msg).put("timeout_minutes", 30)), allowOps = true)
+                }
+                val apk = Regex("APK: (\\S+)").find(ci)?.groupValues?.get(1)
+                withContext(Dispatchers.IO) { evoStore.savePending(p.copy(state = PrState.MERGED, apkUrl = apk)) }
+                evoStatus = if (apk != null) "Yeni sürüm hazır." else "Release derlemesi: " + ci.lines().take(3).joinToString(" ")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                evoStatus = "Hata: ${e.message?.take(200)}"
+            } finally {
+                evoBusy = false
+                refreshEvolution()
+            }
+        }
+    }
+
+    /** Closes the self-PR, deletes its branch and never proposes the same topic again. */
+    fun evoReject() {
+        val p = evoPending ?: return
+        if (evoBusy) return
+        evoBusy = true
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val gh = agent.tools.github
+                    runCatching { gh.closePullRequest(EvolutionGuard.SELF_REPO, p.number) }
+                    runCatching { gh.deleteBranch(EvolutionGuard.SELF_REPO, p.branch) }
+                    evoStore.reject(p.topic)
+                    evoStore.savePending(null)
+                    evoStore.addLog(EvoTier.SELF_PR, "PR #${p.number} reddedildi; \"${p.topic}\" konusu tekrar açılmayacak.")
+                }
+                evoStatus = "PR #${p.number} kapatıldı."
+            } finally {
+                evoBusy = false
+                refreshEvolution()
+            }
+        }
+    }
+
+    /** Hides a merged PR card once its APK was offered. */
+    fun evoDismiss() {
+        viewModelScope.launch(Dispatchers.IO) { evoStore.savePending(null); refreshEvolution() }
     }
 
     private fun sync(work: List<ChatMessage>) {
@@ -480,7 +642,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Cost dashboard ----
 
-    suspend fun costBreakdown(): CostBreakdown = withContext(Dispatchers.IO) { Ledger.aggregate(ledger.readAll()) }
+    suspend fun costBreakdown(): CostBreakdown = withContext(Dispatchers.IO) {
+        // Evolution runs bill outside the chat; they appear as their own role.
+        val evo = evoStore.log().filter { it.costUsd > 0 }.map {
+            com.suarez.coder.cost.LedgerEntry(it.at, "evolution", "(öz-gelişim)", "evolution", settings.evoModel, 0, 0, 0, it.costUsd)
+        }
+        Ledger.aggregate(ledger.readAll() + evo)
+    }
 
     private fun repoNow() = settings.contextRepo.ifBlank { settings.defaultRepo }
 

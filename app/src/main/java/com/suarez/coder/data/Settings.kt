@@ -307,6 +307,31 @@ class Settings(context: Context) {
         get() = str("decision_model", "gemini-decision-1")
         set(v) = put("decision_model", v.trim())
 
+    // ---- Self-evolution ----
+
+    var evoEnabled: Boolean
+        get() = bool("evo_enabled", false)
+        set(v) = putBool("evo_enabled", v)
+    var evoMemory: Boolean
+        get() = bool("evo_k1", true)
+        set(v) = putBool("evo_k1", v)
+    var evoRouting: Boolean
+        get() = bool("evo_k2", true)
+        set(v) = putBool("evo_k2", v)
+    var evoSelfPr: Boolean
+        get() = bool("evo_k3", true)
+        set(v) = putBool("evo_k3", v)
+    /** OpenRouter id of the isolated evolution model (all evolution roles use only this). */
+    var evoModel: String
+        get() = str("evo_model", "nvidia/nemotron-3-ultra")
+        set(v) = put("evo_model", v.trim().removePrefix("openrouter/"))
+    var evoDailyBudget: Double
+        get() = str("evo_budget", "0.15").toDoubleOrNull() ?: 0.15
+        set(v) = put("evo_budget", v.coerceIn(0.0, 10.0).toString())
+    var evoWifiOnly: Boolean
+        get() = bool("evo_wifi", false)
+        set(v) = putBool("evo_wifi", v)
+
     /** OrchestratorMode name; OFF keeps the normal flow untouched. */
     var orchestratorMode: String
         get() = str("orchestrator_mode", "OFF")

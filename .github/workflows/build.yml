@@ -29,6 +29,11 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Self-evolution branches must prove their test-first fix: run the unit tests there.
+      - name: Unit tests (evo branches)
+        if: startsWith(github.ref_name, 'evo/')
+        run: ./gradlew testDebugUnitTest --no-daemon
+
       - name: Build release APK
         run: ./gradlew assembleRelease --no-daemon
 
@@ -40,7 +45,9 @@ jobs:
           name: Coder-${{ github.run_number }}
           path: Coder-${{ github.run_number }}.apk
 
+      # evo/ branches are proposals: never publish them as the latest release.
       - name: Publish release
+        if: ${{ !startsWith(github.ref_name, 'evo/') }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}

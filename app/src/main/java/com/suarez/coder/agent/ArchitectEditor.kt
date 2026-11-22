@@ -45,8 +45,9 @@ class ArchitectEditor(private val agent: Agent) {
          * Attempts for one file group: all executor-class (editor, then the escalation model for the last two when one is
          * set). The architect is never part of it.
          */
-        fun executorLadder(max: Int, editor: ModelRef, escalation: ModelRef?): List<Step> = (0 until max.coerceAtLeast(1)).map { i ->
-            if (escalation != null && max >= 3 && i >= max - 2) Step(escalation, "escalation") else Step(editor, "editor")
+        fun executorLadder(max: Int, editor: ModelRef, escalation: ModelRef?, early: Boolean = false): List<Step> = (0 until max.coerceAtLeast(1)).map { i ->
+            val switchAt = if (early) 1 else max - 2
+            if (escalation != null && max >= 3 && i >= switchAt) Step(escalation, "escalation") else Step(editor, "editor")
         }
 
         /** The failing files as they are now (re-read), so the next attempt fixes the root cause instead of guessing. */
@@ -277,7 +278,8 @@ class ArchitectEditor(private val agent: Agent) {
     ): Outcome {
         val paths = group.map { it.path }.toSet()
         // Executor-only self-repair: never the architect. The last attempts may use the (executor-class) escalation model.
-        val ladder = executorLadder(agent.settings.maxExecutorRetries, agent.editorRef(), agent.escalationRef())
+        val ladder = executorLadder(agent.settings.maxExecutorRetries, agent.editorRef(), agent.escalationRef(),
+            early = agent.earlyEscalation(agent.editorRef().model))
         var pending = group
         var feedback: String? = null
         var failedNow: Set<String> = emptySet()

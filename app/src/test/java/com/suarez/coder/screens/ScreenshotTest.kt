@@ -166,6 +166,25 @@ class ScreenshotTest {
         compose.onRoot().captureRoboImage("build/outputs/roborazzi/settings_providers.png")
     }
 
+    @Test fun evolutionPage() {
+        val vm = vm()
+        vm.evoStore.savePending(com.suarez.coder.evolution.PendingSelfPr(42, "SEARCH elips eşleşmesi boşlukları yok saysın",
+            "https://github.com/Suarez1907/coder/pull/42", "evo/ellipsis-202611221200",
+            "`...` satırı girintili olduğunda SEARCH bloğu eşleşmiyordu; elips satırı trim edilmeden karşılaştırılıyordu.",
+            listOf("app/src/test/java/com/suarez/coder/EllipsisTest.kt", "app/src/main/java/com/suarez/coder/diff/SearchReplace.kt"),
+            true, 0.031, "ellipsis", 0))
+        vm.evoStore.addLog(com.suarez.coder.evolution.EvoTier.MEMORY, "Suarez1907/kay-p-kuleler: 1 ders öğrenildi: Seviye dosyaları tools/levels.src.mjs üzerinden üretilir.", 0.004)
+        vm.evoStore.addLog(com.suarez.coder.evolution.EvoTier.ROUTING, "1 yönlendirme ipucu (\"seviye rengi\" → SIMPLE)", 0.003, undo = "{}")
+        vm.evoStore.addLog(com.suarez.coder.evolution.EvoTier.SELF_PR, "PR #42 açıldı: SEARCH elips eşleşmesi boşlukları yok saysın. PR #42 açıldı.", 0.031)
+        vm.refreshEvolution()
+        compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/settings_home.png")
+        compose.onNode(androidx.compose.ui.test.hasText("Öz-Gelişim")).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/evolution.png")
+    }
+
     @Test fun settingsHome() {
         val vm = vm()
         compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }

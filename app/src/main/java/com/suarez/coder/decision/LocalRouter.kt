@@ -47,7 +47,8 @@ object LocalRouter {
         } || REQUEST_MARKERS.any { t.contains(it) }
     }
 
-    fun classify(message: String, pinnedFiles: Int): Verdict? {
+    /** [learned]: (phrase, SIMPLE|QUESTION|COMPLEX) hints tuned by self-evolution, used only when the built-in rules are unsure. */
+    fun classify(message: String, pinnedFiles: Int, learned: List<Pair<String, String>> = emptyList()): Verdict? {
         val raw = message.trim().lowercase()
         if (raw.isEmpty()) return null
         // Branch names and paths (feat/levels, src/level/A.kt) are names, not intent: leave them out of keyword matching.
@@ -72,6 +73,10 @@ object LocalRouter {
             return Verdict(Route.SIMPLE_EDIT, "kısa UI/metin isteği: \"$simple\"")
         }
         if (question && !change) return Verdict(Route.QUESTION_ONLY, "soru kalıbı")
+        learned.firstOrNull { (p, _) -> p.isNotBlank() && t.contains(p.lowercase()) }?.let { (p, r) ->
+            val route = when (r) { "SIMPLE" -> Route.SIMPLE_EDIT; "QUESTION" -> Route.QUESTION_ONLY; "COMPLEX" -> Route.COMPLEX_ARCHITECT; else -> null }
+            if (route != null) return Verdict(route, "öğrenilmiş ipucu: \"$p\"")
+        }
         return null
     }
 

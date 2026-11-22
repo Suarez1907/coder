@@ -158,14 +158,14 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     // ---- Models ----
 
-    fun singleRef(p: Provider = settings.provider) = ModelRef(p, settings.modelFor(p))
+    fun singleRef(p: Provider = settings.provider) = modelOverride ?: ModelRef(p, settings.modelFor(p))
     /** Per-request override chosen from Decision 1's difficulty score (cleared after each run). */
     private var architectOverride: ModelRef? = null
     private var architectThinkingOverride: String? = null
 
-    fun architectRef() = architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
+    fun architectRef() = modelOverride ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
     fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
-    fun editorRef() = ModelRef.parse(settings.editorModel) ?: singleRef()
+    fun editorRef() = modelOverride ?: ModelRef.parse(settings.editorModel) ?: singleRef()
     fun mainRef() = if (settings.architectMode) architectRef() else singleRef()
 
     fun client(ref: ModelRef): LlmClient = when (ref.provider) {
@@ -277,6 +277,26 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
             maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
     }
+
+    // ---- Self-evolution hooks ----
+
+    /** Runs of the evolution engine: never recorded as traces, so they can never start another evolution. */
+    var isEvolutionSession = false
+    /** Evolution runs use one isolated model for every role, independent of the chat models. */
+    var modelOverride: ModelRef? = null
+    /** Called with the cost of every model call (evolution budget accounting). */
+    var onUsage: ((Double) -> Unit)? = null
+    /** Called before every model call; may throw [StopException] (evolution daily budget). */
+    var beforeCall: (() -> Unit)? = null
+    /** Locally learned lessons for a repo, added to the stable context (rarely changes, so it stays cacheable). */
+    var lessonsFor: ((String) -> String?)? = null
+    /** Routing parameters tuned by evolution tier 2. */
+    var adaptiveRouting: (() -> com.suarez.coder.evolution.AdaptiveRouting)? = null
+
+    private fun mediumThreshold() = adaptiveRouting?.invoke()?.complexityThreshold ?: MEDIUM_COMPLEXITY
+
+    /** Editor models that repeatedly fail switch to the escalation model earlier (tier-2 note). */
+    fun earlyEscalation(model: String) = adaptiveRouting?.invoke()?.earlyEscalation(model) == true
 
     /** Orchestrator: the budget is checked between subtasks (and the run paused) instead of asking mid-task. */
     var budgetDeferred = false
@@ -476,13 +496,15 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         ui.status(if (kind == "architect") "Proje bağlamı ve repo haritası hazırlanıyor" else "Proje bağlamı hazırlanıyor")
         val parts = ArrayList<String>()
         if (settings.projectNotes) context.loadNotes()?.let { parts += "PROJECT NOTES (.coder/NOTES.md):\n$it" }
+        context.repo.takeIf { it.isNotBlank() }?.let { r -> lessonsFor?.invoke(tools.normalizeRepo(r))?.takeIf { it.isNotBlank() } }
+            ?.let { parts += "LEARNED LESSONS (Coder's memory for this repo; follow them):\n$it" }
         var hasMap = false
         if (kind == "architect") repoMapFor(history, ui)?.let { parts += "REPO MAP (paths, types, signatures; bodies removed):\n$it"; hasMap = true }
         context.load()?.let { parts += it.text }
         if (kind == "architect") architectHasMap = hasMap
-        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        // No date in the prefix: an identical snapshot stays cacheable across days.
         val text = if (parts.isEmpty()) null else
-            "STABLE PROJECT CONTEXT (snapshot of $date; changes made after it appear later in the conversation).\n\n" + parts.joinToString("\n\n")
+            "STABLE PROJECT CONTEXT (snapshot; changes made after it appear later in the conversation).\n\n" + parts.joinToString("\n\n")
         snapshots[kind] = text
         commitsSinceSnapshot = 0
         return text
@@ -531,6 +553,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         thinking: String? = null,
         stable: String? = null,
     ): ChatMessage.Assistant {
+        beforeCall?.invoke()
         checkBudget(history, ui)
         val client = client(ref)
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
@@ -581,6 +604,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             val servedFlex = resp.serviceTier?.contains("flex") ?: (o.serviceTier == "flex" && !flexDisabledForRun)
             history += ChatMessage.UsageRecord(ref.model, role, resp.usage,
                 label = if (servedFlex) "flex" else "", discount = if (servedFlex) 0.5 else 1.0, actualUsd = resp.costUsd)
+            onUsage?.invoke(costOf(history.last() as ChatMessage.UsageRecord))
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
         }
 
@@ -658,7 +682,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 ui.update()
             } else if (settings.smartRouting && request != null) {
                 // Tier 1: free local rules.
-                val local = LocalRouter.classify(request.text, settings.contextFiles.size)
+                val local = LocalRouter.classify(request.text, settings.contextFiles.size,
+                    adaptiveRouting?.invoke()?.localHints.orEmpty().map { it.pattern to it.route })
                 if (local != null) {
                     route = local.route
                     history += ChatMessage.RouteInfo("Yerel Kural → ${modeName(local.route)} • $0", "Gerekçe: ${local.reason}",
@@ -677,7 +702,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                             route = d.route
                             // Moderate work does not need the most expensive architect or deep thinking.
                             val medium = ModelRef.parse(settings.architectModelMedium)
-                            if (d.route == Route.COMPLEX_ARCHITECT && d.complexity != null && d.complexity < MEDIUM_COMPLEXITY &&
+                            if (d.route == Route.COMPLEX_ARCHITECT && d.complexity != null && d.complexity < mediumThreshold() &&
                                 medium != null && medium.key != (ModelRef.parse(settings.architectModel)?.key)
                             ) {
                                 architectOverride = medium
@@ -765,6 +790,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
      * the architect (e.g. a Flash model between Flash-Lite and Neon). Null when none fits or set to "none".
      */
     fun escalationRef(): ModelRef? {
+        if (modelOverride != null) return null
         if (settings.escalationModel.equals("none", true)) return null
         ModelRef.parse(settings.escalationModel)?.let { return it }
         val lo = Pricing.blended(price(editorRef().model))

@@ -213,6 +213,40 @@ class GitHub(private val token: () -> String) {
         return "PR #$number birleştirildi (${method}, ${o.optString("sha").take(7)}). https://github.com/$repo/pull/$number"
     }
 
+    data class PrInfo(val number: Int, val title: String, val head: String, val url: String)
+
+    suspend fun openPullRequests(repo: String): List<PrInfo> {
+        val r = call("GET", "/repos/$repo/pulls?state=open&per_page=50")
+        if (r.code !in 200..299) throw ToolException("PR listesi alınamadı: HTTP ${r.code}")
+        val arr = JSONArray(r.body)
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            PrInfo(o.getInt("number"), o.optString("title"), o.optJSONObject("head")?.optString("ref").orEmpty(), o.optString("html_url"))
+        }
+    }
+
+    /** Merges; returns (HTTP code, message or merge sha). 405/409 mean "not mergeable / conflict". */
+    suspend fun tryMerge(repo: String, number: Int, method: String): Pair<Int, String> {
+        val r = call("PUT", "/repos/$repo/pulls/$number/merge", JSONObject().put("merge_method", method))
+        val body = runCatching { JSONObject(r.body) }.getOrNull()
+        return r.code to (if (r.code in 200..299) body?.optString("sha").orEmpty() else body?.optString("message") ?: r.body.take(300))
+    }
+
+    suspend fun closePullRequest(repo: String, number: Int) {
+        json("PATCH", "/repos/$repo/pulls/$number", JSONObject().put("state", "closed"))
+    }
+
+    suspend fun deleteBranch(repo: String, branch: String): Boolean =
+        call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}").code in 200..299
+
+    /** "path +add −del" lines of a pull request. */
+    suspend fun pullRequestFiles(repo: String, number: Int): List<String> {
+        val r = call("GET", "/repos/$repo/pulls/$number/files?per_page=50")
+        if (r.code !in 200..299) return emptyList()
+        val arr = JSONArray(r.body)
+        return (0 until arr.length()).map { i -> arr.getJSONObject(i).let { "${it.optString("filename")} +${it.optInt("additions")} −${it.optInt("deletions")}" } }
+    }
+
     /** Starts a workflow_dispatch run; [workflow] is the file name (e.g. android.yml) or id. */
     suspend fun dispatchWorkflow(repo: String, workflow: String, ref: String?, inputs: JSONObject?): String {
         val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)

@@ -494,7 +494,7 @@ private fun AttachmentRow(paths: List<String>, onRemove: (String) -> Unit) {
 
 /** "Download & install" buttons for APK links found in [text]. */
 @Composable
-private fun ApkActions(vm: ChatViewModel, text: String) {
+internal fun ApkActions(vm: ChatViewModel, text: String) {
     if (!text.contains("http")) return
     val links = remember(text) { ApkLinks.find(text) }
     if (links.isEmpty()) return

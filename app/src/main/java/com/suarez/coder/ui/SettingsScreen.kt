@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -73,6 +74,7 @@ private enum class Page(val title: String, val icon: String, val blurb: String) 
     CACHE("Önbellek & Bağlam", "🗄", "Context Caching, sıkıştırma, geçmiş"),
     GITHUB("GitHub & Bütçe", "💳", "Token, repo, onay, bütçe ve fiyatlar"),
     TEMPLATES("Komut şablonları", "⌨", "Sohbette / ile açılan hazır istemler"),
+    EVOLUTION("Öz-Gelişim", "", "Arka plan öğrenme, yönlendirme ve otomatik PR'lar"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -107,6 +109,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.CACHE -> CachePage(vm)
                 Page.GITHUB -> GitHubPage(vm)
                 Page.TEMPLATES -> TemplatesPage(vm)
+                Page.EVOLUTION -> EvolutionPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -135,7 +138,8 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         status.forEach { (name, ok) -> Badge("$name ${if (ok) "✓" else "–"}", if (ok) coder.cacheGood else coder.muted) }
     }
-    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES).forEach { p ->
+    LaunchedEffect(Unit) { vm.refreshEvolution() }
+    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.EVOLUTION).forEach { p ->
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -143,11 +147,18 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
             modifier = Modifier.fillMaxWidth().clickable { open(p) },
         ) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.icon, style = MaterialTheme.typography.titleLarge)
+                if (p == Page.EVOLUTION) Icon(AutoAwesomeOutlined, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.onSurface)
+                else Text(p.icon, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
                     Text(p.title, style = MaterialTheme.typography.titleMedium)
                     Text(p.blurb, style = MaterialTheme.typography.bodySmall, color = coder.muted)
+                }
+                if (p == Page.EVOLUTION && vm.evoPending?.state == com.suarez.coder.evolution.PrState.PENDING) {
+                    Surface(shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline), color = Color.Transparent) {
+                        Text("1 PR bekliyor", style = Mono.tiny, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                    }
+                    Spacer(Modifier.width(6.dp))
                 }
                 Text("›", style = MaterialTheme.typography.titleLarge, color = coder.muted)
             }

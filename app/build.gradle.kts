@@ -72,6 +72,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.security:security-crypto:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jsoup:jsoup:1.18.1")
 
