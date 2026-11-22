@@ -121,11 +121,34 @@ class ToolRegistry(private val settings: Settings) {
             "notes" to str("Tüm dosyalar için ortak notlar (isteğe bağlı)"),
             required = listOf("repo", "branch", "commit_message", "files")))
 
+    /** Full instructions of a skill from the catalog in the system prompt (progressive disclosure). */
+    private val loadSkill = ToolSpec("load_skill",
+        "Sistem talimatındaki SKILLS listesinden bir yeteneğin tam talimatlarını yükler. Böyle bir işe başlamadan önce çağır.",
+        obj("name" to str("Yetenek adı, ör. blender-3d"), required = listOf("name")))
+
+    /** Runs a script in GitHub Actions (Blender headless or Python/FFmpeg); no local computer is involved. */
+    private val runCloudTool = ToolSpec("run_cloud_tool",
+        "Repodaki bir betiği GitHub Actions'ta çalıştırır: tool=blender (Blender --background --python) veya toolbox " +
+            "(Python 3.12 + FFmpeg). Workflow yoksa kurar, bitmesini bekler. Hata olursa traceback döner: betiği düzeltip tekrar çağır. " +
+            "Başarılıysa çıktılar (preview.png, .glb, .blend) indirilir ve sohbette gösterilir. Önce betiği commit et.",
+        obj("repo" to str(repoDesc), "tool" to str("blender veya toolbox"), "script_path" to str("Betiğin repo içi yolu"),
+            "output_dir" to str("Çıktı klasörü (varsayılan coder-out; betik CODER_OUTPUT_DIR ortam değişkenini kullanmalı)"),
+            "branch" to str("Betiğin bulunduğu dal (boş = varsayılan dal)"),
+            "blender_version" to str("Blender major.minor (varsayılan 4.2)"),
+            required = listOf("tool", "script_path")))
+
     val specs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
-        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi)
+        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
-    val readOnlySpecs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors, githubApi, submitPlan)
+    val readOnlySpecs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors, githubApi, submitPlan, loadSkill)
+
+    /** Set by the Agent when it has app storage (not for evolution agents). */
+    var skills: com.suarez.coder.skills.SkillRepository? = null
+    var cloud: com.suarez.coder.cloudtools.CloudToolRunner? = null
+
+    /** The repository skills belong to: the pinned context repo, else the default repo. */
+    fun activeRepo(): String = normalizeRepo(settings.contextRepo.ifBlank { settings.defaultRepo })
 
     private val needMoreInfo = ToolSpec("need_more_info",
         "Plan için harita ve bağlam yetmiyorsa çağır: istediğin dosyalar (en fazla 3) verilir ve okuma/GitHub araçların açılır.",
@@ -151,7 +174,7 @@ class ToolRegistry(private val settings: Settings) {
 
         /** Tools that change files, run things or change the repository. */
         val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-            "github_merge_pull_request", "github_run_workflow", "ci_wait")
+            "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool")
 
         /** Hard guard for planning roles: only read tools, and github_api only with GET. */
         fun architectDenied(name: String, method: String?): String? {
@@ -162,7 +185,7 @@ class ToolRegistry(private val settings: Settings) {
 
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
-            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan")
+            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -181,7 +204,7 @@ class ToolRegistry(private val settings: Settings) {
 
     fun needsApproval(call: ToolCall): Boolean = when (call.name) {
         "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-        "github_merge_pull_request", "github_run_workflow" -> true
+        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool" -> true
         "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
         else -> false
     }
@@ -256,6 +279,18 @@ class ToolRegistry(private val settings: Settings) {
                 s("inputs_json")?.let { runCatching { JSONObject(it) }.getOrElse { throw ToolException("inputs_json geçerli bir JSON nesnesi değil") } })
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
+            "load_skill" -> skills?.load(req("name"), activeRepo()) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
+            "run_cloud_tool" -> {
+                val runner = cloud ?: throw ToolException("Bulut araçları bu oturumda kullanılamıyor.")
+                val r = repo()
+                ciListener?.started(r, "Bulut aracı: ${s("tool") ?: ""}")
+                var ok = false
+                try {
+                    runner.run(r, req("tool"), req("script_path"), s("output_dir"), s("branch"), s("blender_version")).also { ok = !it.contains("BAŞARISIZ") }
+                } finally {
+                    ciListener?.finished(r, ok, if (ok) "Bulut aracı bitti" else "Bulut aracı başarısız", null)
+                }
+            }
             else -> throw ToolException("Bilinmeyen araç: ${call.name}")
         }
         if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request") ||
@@ -326,7 +361,7 @@ class ToolRegistry(private val settings: Settings) {
         return sb.toString()
     }
 
-    private suspend fun ciErrors(repo: String, runId: Long): String {
+    internal suspend fun ciErrors(repo: String, runId: Long): String {
         val failed = github.jobs(repo, runId).filter { it.conclusion != null && it.conclusion != "success" && it.conclusion != "skipped" }
         if (failed.isEmpty()) return "Bu çalıştırmada başarısız iş yok."
         val sb = StringBuilder()

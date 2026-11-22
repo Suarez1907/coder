@@ -192,7 +192,9 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     when (item) {
                         is DItem.Tools -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
-                            ApkActions(vm, item.calls.mapNotNull { it.second?.content }.joinToString("\n"))
+                            val results = item.calls.mapNotNull { it.second?.content }.joinToString("\n")
+                            ApkActions(vm, results)
+                            CloudResultCards(vm, results)
                         }
                         is DItem.Msg -> when (val m = item.m) {
                             is ChatMessage.User -> UserBubble(m.text, m.images)
@@ -228,7 +230,10 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 }
             }
             if (vm.attachments.isNotEmpty()) AttachmentRow(vm.attachments) { vm.removeImage(it) }
-            SlashSuggestions(input, vm.settings.promptTemplates) { text -> input = text; vm.onInputChanged(text) }
+            SlashSuggestions(input, vm.settings.promptTemplates + vm.skills.filter { it.enabled }.map { "/" + it.name to it.description }) { text ->
+                input = if (text.startsWith("/")) text.substringBefore(' ') + " " else text
+                vm.onInputChanged(input)
+            }
             InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty(),
                 onChange = { input = it; vm.onInputChanged(it) },
                 onSend = { vm.send(input); if (vm.visionWarning == null) input = "" },
@@ -433,7 +438,9 @@ private fun InputRow(
 private fun SlashSuggestions(input: String, templates: List<Pair<String, String>>, onPick: (String) -> Unit) {
     if (!input.startsWith("/") || input.contains(' ') || input.contains('\n')) return
     val query = input.removePrefix("/").lowercase()
-    val matches = templates.filter { it.first.lowercase().startsWith(query) }
+    // Skills are listed as "/name" → description; picking one inserts "/name " for the user to complete.
+    val matches = templates.map { (n, t) -> if (n.startsWith("/")) n.removePrefix("/") to "$n $t" else n to t }
+        .filter { it.first.lowercase().startsWith(query) }.distinctBy { it.first }
     if (matches.isEmpty()) return
     Surface(
         shape = RoundedCornerShape(12.dp),

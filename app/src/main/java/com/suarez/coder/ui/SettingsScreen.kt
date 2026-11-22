@@ -74,6 +74,7 @@ private enum class Page(val title: String, val icon: String, val blurb: String) 
     CACHE("Önbellek & Bağlam", "🗄", "Context Caching, sıkıştırma, geçmiş"),
     GITHUB("GitHub & Bütçe", "💳", "Token, repo, onay, bütçe ve fiyatlar"),
     TEMPLATES("Komut şablonları", "⌨", "Sohbette / ile açılan hazır istemler"),
+    SKILLS("Yetenekler (Skills)", "", "Skill kataloğu ve bulut araçları (Blender, Python/FFmpeg)"),
     EVOLUTION("Öz-Gelişim", "", "Arka plan öğrenme, yönlendirme ve otomatik PR'lar"),
 }
 
@@ -110,6 +111,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.GITHUB -> GitHubPage(vm)
                 Page.TEMPLATES -> TemplatesPage(vm)
                 Page.EVOLUTION -> EvolutionPage(vm)
+                Page.SKILLS -> SkillsPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -139,7 +141,7 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
         status.forEach { (name, ok) -> Badge("$name ${if (ok) "✓" else "–"}", if (ok) coder.cacheGood else coder.muted) }
     }
     LaunchedEffect(Unit) { vm.refreshEvolution() }
-    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.EVOLUTION).forEach { p ->
+    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.SKILLS, Page.EVOLUTION).forEach { p ->
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surface,
@@ -148,6 +150,7 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
         ) {
             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (p == Page.EVOLUTION) Icon(AutoAwesomeOutlined, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.onSurface)
+                else if (p == Page.SKILLS) Icon(ExtensionOutlined, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.onSurface)
                 else Text(p.icon, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {

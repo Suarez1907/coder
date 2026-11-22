@@ -185,6 +185,39 @@ class ScreenshotTest {
         compose.onRoot().captureRoboImage("build/outputs/roborazzi/evolution.png")
     }
 
+    @Test fun skillsAndCloudResult() {
+        val vm = vm()
+        compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasText("Yetenekler (Skills)")).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/skills.png")
+    }
+
+    @Test fun cloudResultCard() {
+        val vm = vm()
+        val dir = java.io.File(androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().filesDir, "cloud/demo").apply { mkdirs() }
+        val bmp = android.graphics.Bitmap.createBitmap(400, 400, android.graphics.Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(bmp).apply {
+            drawColor(android.graphics.Color.rgb(40, 40, 46))
+            drawCircle(200f, 210f, 120f, android.graphics.Paint().apply { color = android.graphics.Color.rgb(170, 170, 180); isAntiAlias = true })
+        }
+        java.io.File(dir, "preview.png").outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        java.io.File(dir, "model.glb").writeBytes(ByteArray(48_000))
+        java.io.File(dir, "model.blend").writeBytes(ByteArray(310_000))
+        vm.messages.clear()
+        vm.messages.addAll(listOf(
+            com.suarez.coder.llm.ChatMessage.User("Godot için alçak poligonlu bir sandık modeli yap"),
+            com.suarez.coder.llm.ChatMessage.Assistant("", listOf(com.suarez.coder.llm.ToolCall("c1", "run_cloud_tool",
+                org.json.JSONObject().put("tool", "blender").put("script_path", "tools/chest.py")))),
+            com.suarez.coder.llm.ChatMessage.ToolResult("c1", "run_cloud_tool", "Blender çalıştırması: success\nÇıktılar indirildi.\n" +
+                com.suarez.coder.cloudtools.CloudToolRunner.marker("blender", 7, dir)),
+            com.suarez.coder.llm.ChatMessage.Assistant("Sandık hazır: preview.png, model.glb ve model.blend."),
+        ))
+        compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/cloud_result.png")
+    }
+
     @Test fun settingsHome() {
         val vm = vm()
         compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }

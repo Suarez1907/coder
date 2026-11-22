@@ -65,6 +65,22 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     val tools = ToolRegistry(settings)
     val context = ContextProvider(settings, tools.github)
     val repoMaps = com.suarez.coder.repomap.RepoMapService(tools.github, filesDir)
+
+    init {
+        if (filesDir != null) {
+            tools.skills = com.suarez.coder.skills.SkillRepository(
+                java.io.File(filesDir, "skills"),
+                listPaths = { repo -> tools.github.treeEntries(repo, null)?.second?.map { it.path } },
+                readFile = { repo, path -> tools.github.readFileRaw(repo, path, null) },
+            )
+            tools.cloud = com.suarez.coder.cloudtools.CloudToolRunner(
+                tools.github,
+                com.suarez.coder.apk.ApkDownloader({ settings.githubToken }, java.io.File(filesDir, "cloud-tmp"), com.suarez.coder.llm.Http.client),
+                java.io.File(filesDir, "cloud"),
+                ciErrors = { repo, id -> tools.ciErrors(repo, id) },
+            )
+        }
+    }
     private val cache = GeminiCacheManager(settings)
     private var budgetApprovedUpTo = 0.0
     /** Frozen stable project context per kind ("agent" / "architect"); rebuilt only at checkpoints or after many commits. */
@@ -394,6 +410,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             if (repo != null) appendLine("Default repository: $repo.")
             settings.defaultBranch.takeIf { it.isNotBlank() }?.let { appendLine("Default branch: $it.") }
             if (settings.customInstructions.isNotBlank()) appendLine("User instructions: ${settings.customInstructions}")
+            // Progressive disclosure: only one line per skill here; the body comes from load_skill.
+            tools.skills?.catalog(tools.activeRepo())?.let { appendLine(it) }
         }
     }
 
@@ -447,6 +465,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             3. delegate_to_executor: for single-file fixes, UI/text/style tweaks, small refactors, clearly scoped changes and
                repository operations (branches, pull requests, merges, workflows, CI). Give short, precise instructions.
             4. If no code change is needed (a question or explanation), answer directly in text.
+            If a SKILL from the list applies, name it in the plan or the delegation; the executor loads it with load_skill.
             Branch: use the one the user names; otherwise choose a short new feature branch name.
             """.trimIndent()
         )
@@ -670,6 +689,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     /** [override] forces a route for this request (e.g. the user re-runs it in Architect mode). */
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, override: Route? = null) {
         flexDisabledForRun = false
+        // Repo skills (.coder/skills/*/SKILL.md), cached for minutes so the catalog line stays stable.
+        tools.skills?.let { s -> runCatching { kotlinx.coroutines.withTimeout(8_000) { s.refreshRepo(tools.activeRepo()) } } }
         architectOverride = null
         architectThinkingOverride = null
         val start = history.size

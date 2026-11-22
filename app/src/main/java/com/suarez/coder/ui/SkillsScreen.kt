@@ -1,0 +1,249 @@
+package com.suarez.coder.ui
+
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Create
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.suarez.coder.cloudtools.CloudToolRunner
+import com.suarez.coder.cloudtools.CloudWorkflowTemplates
+import com.suarez.coder.skills.Skill
+import java.io.File
+
+/** Outlined "extension" (puzzle piece); drawn here because material-icons-core does not ship it. */
+val ExtensionOutlined: ImageVector by lazy {
+    ImageVector.Builder("ExtensionOutlined", 24.dp, 24.dp, 24f, 24f).addPath(
+        addPathNodes(
+            "M10.5,4.5c0.28,0 0.5,0.22 0.5,0.5v2h6v6h2c0.28,0 0.5,0.22 0.5,0.5s-0.22,0.5 -0.5,0.5h-2v6h-2.12c-0.68,-1.75 -2.39,-3 -4.38,-3s-3.7,1.25 -4.38,3H4v-2.12c1.75,-0.68 3,-2.39 3,-4.38S5.76,9.2 4.01,8.52L4,6.4h6V5C10,4.72 10.22,4.5 10.5,4.5M10.5,2.5C9.12,2.5 8,3.62 8,5H4c-1.1,0 -1.99,0.9 -1.99,2v3.8h0.29c1.49,0 2.7,1.21 2.7,2.7s-1.21,2.7 -2.7,2.7H2V20c0,1.1 0.9,2 2,2h3.8v-0.3c0,-1.49 1.21,-2.7 2.7,-2.7s2.7,1.21 2.7,2.7V22H17c1.1,0 2,-0.9 2,-2v-4c1.38,0 2.5,-1.12 2.5,-2.5S20.38,11 19,11V7c0,-1.1 -0.9,-2 -2,-2h-4C13,3.62 11.88,2.5 10.5,2.5L10.5,2.5z",
+        ),
+        fill = SolidColor(Color.Black),
+    ).build()
+}
+
+private val strong @Composable get() = MaterialTheme.colorScheme.onSurface
+private val weak @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
+private val line @Composable get() = MaterialTheme.colorScheme.outlineVariant
+
+@Composable
+private fun MonoCard(content: @Composable () -> Unit) {
+    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surface, border = BorderStroke(1.dp, line),
+        modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { content() }
+    }
+}
+
+@Composable
+private fun Tag(text: String) = Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, line), color = Color.Transparent) {
+    Text(text, style = Mono.tiny, color = strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+}
+
+private const val NEW_SKILL = "---\nname: yeni-yetenek\ndescription: Bir satırlık açıklama (sistem talimatına yalnızca bu girer)\ntriggers: [anahtar, kelime]\n---\n\n# Talimatlar\n\n1. ...\n"
+
+@Composable
+fun SkillsPage(vm: ChatViewModel) {
+    LaunchedEffect(Unit) { vm.refreshSkills(fetchRepo = true); vm.refreshCloudTools() }
+    var editing by remember { mutableStateOf<Pair<String, String>?>(null) } // (markdown, fallback name)
+    var deleting by remember { mutableStateOf<Skill?>(null) }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        MonoCard {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Yetenekler", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = strong, modifier = Modifier.weight(1f))
+                IconButton(onClick = { vm.refreshSkills(fetchRepo = true) }) { Icon(Icons.Outlined.Refresh, "Yenile", tint = weak) }
+                IconButton(onClick = { editing = NEW_SKILL to "" }) { Icon(Icons.Outlined.Add, "Yeni yetenek", tint = strong) }
+            }
+            Text("Sistem talimatına yalnızca ad ve tek satır açıklama girer; tam talimat ajan load_skill çağırınca yüklenir. " +
+                "Repo yetenekleri .coder/skills/<ad>/SKILL.md yolundan okunur ve aynı addaki genel yeteneği ezer. Sohbette /ad ile çağrılır.",
+                style = MaterialTheme.typography.bodySmall, color = weak)
+            if (vm.skills.isEmpty()) Text("Yetenek yok.", style = MaterialTheme.typography.bodySmall, color = weak)
+            vm.skills.forEach { s ->
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("/" + s.name, style = Mono.body, color = strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 3.dp)) {
+                                Tag(s.source.label)
+                                s.workflow?.let { Tag("bulut: $it") }
+                            }
+                            Text(s.description, style = MaterialTheme.typography.bodySmall, color = weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (s.source != Skill.Source.REPO) {
+                            IconButton(onClick = { editing = s.toMarkdown() to s.name }) { Icon(Icons.Outlined.Edit, "Düzenle", tint = weak) }
+                            IconButton(onClick = { deleting = s }) { Icon(Icons.Outlined.Delete, "Sil", tint = weak) }
+                        }
+                        Switch(checked = s.enabled, onCheckedChange = { vm.setSkillEnabled(s.name, it) }, colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.surface, checkedTrackColor = strong,
+                            uncheckedThumbColor = weak, uncheckedTrackColor = MaterialTheme.colorScheme.surface, uncheckedBorderColor = line))
+                    }
+                }
+            }
+        }
+
+        MonoCard {
+            Text("Bulut araçları (GitHub Actions)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = strong)
+            val repo = vm.settings.contextRepo.ifBlank { vm.settings.defaultRepo }
+            Text(if (repo.isBlank()) "Önce bir repo seçin (profil veya Varsayılan repo)." else "Repo: $repo · ajan run_cloud_tool ile çalıştırır; workflow yoksa kendisi kurar.",
+                style = MaterialTheme.typography.bodySmall, color = weak)
+            val installs = vm.cloudInstalls
+            if (installs == null && repo.isNotBlank()) Text("Kontrol ediliyor…", style = MaterialTheme.typography.bodySmall, color = weak)
+            installs?.forEach { i ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(i.tool.title, style = MaterialTheme.typography.bodyLarge, color = strong)
+                        Text(".github/workflows/${i.tool.file} · ${i.state.label}", style = Mono.tiny, color = weak)
+                    }
+                    OutlinedButton(onClick = { vm.installCloudTool(i.tool) }, border = BorderStroke(1.dp, line),
+                        enabled = i.state != CloudWorkflowTemplates.InstallState.CURRENT) {
+                        Text(if (i.state == CloudWorkflowTemplates.InstallState.MISSING) "Repoya Kur" else "Güncelle", color = strong)
+                    }
+                }
+            }
+            vm.skillsStatus?.let { Text(it, style = Mono.small, color = weak) }
+        }
+    }
+
+    editing?.let { (md, fallback) ->
+        var text by remember(md) { mutableStateOf(md) }
+        var error by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            icon = { Icon(Icons.Outlined.Create, null) },
+            title = { Text("SKILL.md") },
+            text = {
+                Column {
+                    OutlinedTextField(text, { text = it; error = null }, textStyle = Mono.small, minLines = 10,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp))
+                    error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { error = vm.saveSkill(text, fallback); if (error == null) editing = null }) { Text("Kaydet") } },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text("Vazgeç") } },
+        )
+    }
+    deleting?.let { s ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("/${s.name} silinsin mi?") },
+            text = { Text(if (s.source == Skill.Source.BUILTIN) "Yerleşik yetenek silinir; kapatmak için anahtarı da kullanabilirsiniz." else "Genel yetenek silinir.") },
+            confirmButton = { TextButton(onClick = { vm.deleteSkill(s.name); deleting = null }) { Text("Sil") } },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Vazgeç") } },
+        )
+    }
+}
+
+// ---- Chat: cloud tool result card ----
+
+/** Shown under a run_cloud_tool result: preview (tap for full screen), "Revize Et" and asset saving. */
+@Composable
+fun CloudResultCards(vm: ChatViewModel, toolText: String) {
+    if (!toolText.contains("[[cloud-output")) return
+    CloudToolRunner.outputs(toolText).forEach { out -> CloudResultCard(vm, out) }
+}
+
+@Composable
+private fun CloudResultCard(vm: ChatViewModel, out: CloudToolRunner.Companion.Output) {
+    val preview = remember(out.dir) { out.preview }
+    val assets = remember(out.dir) { out.assets }
+    var full by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val bitmap = remember(preview) {
+        preview?.let { f ->
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(f.path, o)
+            val sample = generateSequence(1) { it * 2 }.first { o.outWidth / it <= 1200 && o.outHeight / it <= 1200 }
+            BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
+        }
+    }
+    MonoCard {
+        Text("Bulut çıktısı · ${out.tool}", style = MaterialTheme.typography.titleSmall, color = strong)
+        if (!out.dir.isDirectory) {
+            Text("Çıktılar artık cihazda yok.", style = MaterialTheme.typography.bodySmall, color = weak)
+            return@MonoCard
+        }
+        bitmap?.let {
+            Image(it, "Önizleme", contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+                    .clickable { full = true })
+        }
+        if (preview != null) {
+            OutlinedButton(onClick = { vm.attachPreview(preview); message = "Görsel mesaj kutusuna eklendi; isteğini yazıp gönder." },
+                border = BorderStroke(1.dp, line), modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Outlined.Edit, null, Modifier.size(18.dp), tint = strong); Spacer(Modifier.width(6.dp))
+                Text("Revize Et (Görseli Ekle)", color = strong)
+            }
+        }
+        assets.forEach { f ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${f.name} · ${f.length() / 1024} KB", style = Mono.small, color = strong, modifier = Modifier.weight(1f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                TextButton(onClick = { message = vm.saveAsset(f) }) { Text("İndir", color = strong) }
+                IconButton(onClick = { message = vm.shareAsset(f) }) { Icon(Icons.Outlined.Share, "Paylaş", tint = weak) }
+            }
+        }
+        if (assets.isEmpty() && preview == null) Text("Çıktı dosyası yok.", style = MaterialTheme.typography.bodySmall, color = weak)
+        message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = weak) }
+    }
+    if (full && bitmap != null) {
+        Dialog(onDismissRequest = { full = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Box(Modifier.fillMaxSize().background(Color.Black).statusBarsPadding()) {
+                Image(bitmap, "Önizleme", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().clickable { full = false })
+                IconButton(onClick = { full = false }, modifier = Modifier.align(Alignment.TopEnd)) { Icon(Icons.Outlined.Close, "Kapat", tint = Color.White) }
+            }
+        }
+    }
+}
+
+@Suppress("unused")
+private fun File.isImage() = extension.lowercase() in setOf("png", "jpg", "jpeg")

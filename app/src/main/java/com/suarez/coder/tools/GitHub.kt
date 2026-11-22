@@ -213,6 +213,32 @@ class GitHub(private val token: () -> String) {
         return "PR #$number birleştirildi (${method}, ${o.optString("sha").take(7)}). https://github.com/$repo/pull/$number"
     }
 
+    /** The newest workflow_dispatch run of [workflowFile] on [branch] created at or after [sinceMs], or null. */
+    suspend fun dispatchedRun(repo: String, workflowFile: String, branch: String, sinceMs: Long): Run? {
+        val r = call("GET", "/repos/$repo/actions/workflows/${enc(workflowFile)}/runs?event=workflow_dispatch&branch=${enc(branch)}&per_page=5")
+        if (r.code !in 200..299) return null
+        val arr = JSONObject(r.body).optJSONArray("workflow_runs") ?: return null
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+            .filter { o -> runCatching { java.time.Instant.parse(o.optString("created_at")).toEpochMilli() }.getOrDefault(0L) >= sinceMs - 60_000 }
+            .maxByOrNull { it.optString("created_at") }
+            ?.let { o -> Run(o.getLong("id"), o.optString("name"), o.optString("status"),
+                o.optString("conclusion").takeIf { !o.isNull("conclusion") && it.isNotBlank() }, o.optString("html_url")) }
+    }
+
+    suspend fun run(repo: String, runId: Long): Run {
+        val o = json("GET", "/repos/$repo/actions/runs/$runId")
+        return Run(o.getLong("id"), o.optString("name"), o.optString("status"),
+            o.optString("conclusion").takeIf { !o.isNull("conclusion") && it.isNotBlank() }, o.optString("html_url"))
+    }
+
+    /** (artifact id, name) of a run. */
+    suspend fun artifacts(repo: String, runId: Long): List<Pair<Long, String>> {
+        val r = call("GET", "/repos/$repo/actions/runs/$runId/artifacts?per_page=20")
+        if (r.code !in 200..299) return emptyList()
+        val arr = JSONObject(r.body).optJSONArray("artifacts") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.map { it.getLong("id") to it.optString("name") }
+    }
+
     data class PrInfo(val number: Int, val title: String, val head: String, val url: String)
 
     suspend fun openPullRequests(repo: String): List<PrInfo> {

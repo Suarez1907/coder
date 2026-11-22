@@ -156,6 +156,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         agent.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
         agent.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
         refreshEvolution()
+        refreshSkills()
         agent.orchestratorHooks = object : OrchestratorHooks {
             override fun save(plan: OrchestratorPlan) {
                 val session = jobSession.ifBlank { currentSessionId }
@@ -287,7 +288,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         previewJob?.cancel(); preview = null
         val images = attachments.toList()
         attachments.clear()
-        messages += ChatMessage.User(text.trim().ifBlank { "(Ekran görüntüsüne bak.)" }, images)
+        messages += ChatMessage.User(expandSkillCommand(text.trim()).ifBlank { "(Ekran görüntüsüne bak.)" }, images)
         save()
         // "Hayır, olmadı" right after a run is a correction signal for the previous trace.
         lastTraceId?.takeIf { SessionTraceRecorder.isCorrection(text) }?.let { id ->
@@ -379,6 +380,103 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 recordTrace(work, runStart)
             }
         }
+    }
+
+    // ---- Skills & cloud tools ----
+
+    var skills by mutableStateOf<List<com.suarez.coder.skills.Skill>>(emptyList())
+        private set
+    var cloudInstalls by mutableStateOf<List<com.suarez.coder.cloudtools.CloudToolRunner.Install>?>(null)
+        private set
+    var skillsStatus by mutableStateOf<String?>(null)
+        private set
+
+    fun refreshSkills(fetchRepo: Boolean = false) {
+        val repo = agent.tools.activeRepo()
+        viewModelScope.launch {
+            val s = agent.tools.skills ?: return@launch
+            if (fetchRepo) runCatching { withContext(Dispatchers.IO) { s.refreshRepo(repo, force = true) } }
+            skills = withContext(Dispatchers.IO) { s.all(repo) }
+        }
+    }
+
+    fun setSkillEnabled(name: String, on: Boolean) {
+        agent.tools.skills?.setEnabled(name, on); refreshSkills()
+    }
+
+    /** Saves a SKILL.md typed in the editor as a global skill; returns an error or null. */
+    fun saveSkill(markdown: String, fallbackName: String): String? {
+        val parsed = com.suarez.coder.skills.SkillParser.parse(markdown, fallbackName)
+            ?: return "Geçersiz ad: küçük harf, rakam ve '-' kullanın (ör. godot-scene)."
+        val old = skills.firstOrNull { it.name == parsed.name && it.source != com.suarez.coder.skills.Skill.Source.REPO }
+        agent.tools.skills?.saveGlobal(parsed.copy(source = old?.source ?: com.suarez.coder.skills.Skill.Source.GLOBAL))
+        refreshSkills()
+        return null
+    }
+
+    fun deleteSkill(name: String) { agent.tools.skills?.deleteGlobal(name); refreshSkills() }
+
+    fun refreshCloudTools() {
+        val repo = agent.tools.activeRepo()
+        if (repo.isBlank()) { cloudInstalls = emptyList(); return }
+        viewModelScope.launch {
+            cloudInstalls = runCatching { withContext(Dispatchers.IO) { agent.tools.cloud?.installState(repo, null) } }.getOrNull()
+        }
+    }
+
+    fun installCloudTool(t: com.suarez.coder.cloudtools.CloudWorkflowTemplates.CloudTool) {
+        val repo = agent.tools.activeRepo()
+        viewModelScope.launch {
+            skillsStatus = "${t.file} kuruluyor"
+            skillsStatus = runCatching { withContext(Dispatchers.IO) { agent.tools.cloud!!.install(repo, t, null, force = true) } }
+                .getOrElse { "Kurulamadı: ${it.message?.take(160)}" }
+            refreshCloudTools()
+        }
+    }
+
+    /** "Revize Et": the rendered preview goes into the image attachments, ready for a short instruction. */
+    fun attachPreview(file: File) {
+        if (attachments.size >= ImagePrep.MAX_IMAGES) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val path = runCatching { ImagePrep.prepare(getApplication(), android.net.Uri.fromFile(file)) }.getOrNull() ?: return@launch
+            withContext(Dispatchers.Main) { attachments += path }
+        }
+    }
+
+    /** Saves a cloud output to Downloads/Coder (Android 10+), else opens the share sheet. Returns a message. */
+    fun saveAsset(file: File): String {
+        val ctx = getApplication<Application>()
+        return try {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/Coder")
+                }
+                val uri = ctx.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return shareAsset(file)
+                ctx.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+                "İndirilenler/Coder klasörüne kaydedildi: ${file.name}"
+            } else shareAsset(file)
+        } catch (e: Exception) {
+            "Kaydedilemedi: ${e.message}"
+        }
+    }
+
+    fun shareAsset(file: File): String {
+        val ctx = getApplication<Application>()
+        val uri = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+        val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType("application/octet-stream")
+            .putExtra(android.content.Intent.EXTRA_STREAM, uri).addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        ctx.startActivity(android.content.Intent.createChooser(send, file.name).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        return "Paylaşım menüsü açıldı."
+    }
+
+    /** "/blender-3d rest": tells the agent to load that skill first. */
+    private fun expandSkillCommand(text: String): String {
+        val m = Regex("^/([a-z0-9][a-z0-9-]*)\\b\\s*(.*)$", RegexOption.DOT_MATCHES_ALL).find(text.trim()) ?: return text
+        val name = m.groupValues[1]
+        val skill = skills.firstOrNull { it.name == name && it.enabled } ?: return text
+        return m.groupValues[2].ifBlank { skill.description } + "\n\n(Önce load_skill(\"$name\") ile \"$name\" yeteneğini yükle ve talimatlarına uy.)"
     }
 
     // ---- Self-evolution ----
