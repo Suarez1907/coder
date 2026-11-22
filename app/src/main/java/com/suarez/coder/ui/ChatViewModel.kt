@@ -393,6 +393,86 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // Kotlin runs initializers in source order: this must come after the skill state above.
     init { refreshSkills() }
 
+    // ---- Importing skills from GitHub (starred repositories or a link) ----
+
+    private val importer = com.suarez.coder.skills.SkillImporter(
+        tree = { r, ref -> agent.tools.github.treeEntries(r, ref) },
+        read = { r, p, ref -> agent.tools.github.readFileRaw(r, p, ref) },
+    )
+    var starred by mutableStateOf<List<com.suarez.coder.tools.GitHub.StarredRepo>?>(null)
+        private set
+    var candidates by mutableStateOf<List<com.suarez.coder.skills.SkillImporter.Candidate>?>(null)
+        private set
+    var importBusy by mutableStateOf<String?>(null)
+        private set
+    var importStatus by mutableStateOf<String?>(null)
+        private set
+
+    /** Starred repos; likely skill repositories (name, description or topics mention skills/agents) first. */
+    fun loadStarred() {
+        if (importBusy != null) return
+        importBusy = "Yıldızlı repolar alınıyor"
+        viewModelScope.launch {
+            val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.starredRepos() } }
+            starred = r.getOrNull()?.sortedByDescending { s ->
+                val text = (s.fullName + " " + s.description + " " + s.topics.joinToString(" ")).lowercase()
+                listOf("skill", "claude", "agent", "prompt").count { text.contains(it) }
+            }
+            importStatus = r.exceptionOrNull()?.let { "Alınamadı: ${it.message?.take(160)}" }
+            importBusy = null
+        }
+    }
+
+    /** Lists the skills of a starred repo or of a pasted GitHub link (repo, folder or SKILL.md). */
+    fun scanForSkills(input: String) {
+        val ref = com.suarez.coder.skills.SkillImporter.parseRef(input) ?: run { importStatus = "Geçerli bir GitHub adresi değil."; return }
+        if (importBusy != null) return
+        importBusy = "${ref.repo} taranıyor"
+        candidates = null
+        viewModelScope.launch {
+            val r = runCatching { withContext(Dispatchers.IO) { importer.scan(ref.repo, ref.ref, ref.path) } }
+            candidates = r.getOrNull()
+            importStatus = when {
+                r.isFailure -> "Taranamadı: ${r.exceptionOrNull()?.message?.take(160)}"
+                r.getOrNull().isNullOrEmpty() -> "${ref.repo} içinde SKILL.md bulunamadı."
+                else -> "${r.getOrNull()!!.size} yetenek bulundu."
+            }
+            importBusy = null
+        }
+    }
+
+    fun clearCandidates() { candidates = null; importStatus = null }
+
+    fun importSkills(selected: List<com.suarez.coder.skills.SkillImporter.Candidate>) {
+        if (selected.isEmpty() || importBusy != null) return
+        importBusy = "İçe aktarılıyor"
+        viewModelScope.launch {
+            val done = ArrayList<String>(); val failed = ArrayList<String>()
+            withContext(Dispatchers.IO) {
+                for (c in selected) {
+                    val s = runCatching { importer.import(c) }.getOrNull()
+                    if (s == null) failed += c.name else { agent.tools.skills?.saveGlobal(s); done += s.name }
+                }
+            }
+            importStatus = "İçe aktarıldı: ${done.joinToString().ifBlank { "-" }}" + if (failed.isNotEmpty()) " · Başarısız: ${failed.joinToString()}" else ""
+            importBusy = null
+            refreshSkills()
+        }
+    }
+
+    /** Pulls the newest version of an imported skill from its source repository. */
+    fun updateSkill(name: String) {
+        val origin = agent.tools.skills?.global(name)?.origin ?: return
+        viewModelScope.launch {
+            skillsStatus = "$name güncelleniyor"
+            val s = runCatching { withContext(Dispatchers.IO) { importer.update(origin) } }.getOrNull()
+            skillsStatus = if (s == null) "$name güncellenemedi (kaynak bulunamadı)." else {
+                agent.tools.skills?.saveGlobal(s); "$name güncellendi."
+            }
+            refreshSkills()
+        }
+    }
+
     fun refreshSkills(fetchRepo: Boolean = false) {
         val repo = agent.tools.activeRepo()
         viewModelScope.launch {

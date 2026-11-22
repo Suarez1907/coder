@@ -47,6 +47,15 @@ class SkillRepository(
         fun loadText(s: Skill): String = buildString {
             append("SKILL ").append(s.name).append(" (").append(s.source.label).append(")\n\n")
             append(s.body.take(MAX_BODY_CHARS))
+            if (s.resources.isNotEmpty()) {
+                append("\n\nBUNDLED FILES (read one with load_skill(name=\"").append(s.name).append("\", file=\"<path>\")):\n")
+                s.resources.keys.sorted().forEach { append("- ").append(it).append(" (").append(s.resources.getValue(it).length).append(" chars)\n") }
+            }
+            if (s.hasScripts) {
+                append("\nThis skill ships scripts written for a computer. Coder has none: to run one, copy it into the target ")
+                append("repository (github_write_files) and run it with run_cloud_tool(tool=\"toolbox\", script_path=...) in GitHub Actions, ")
+                append("or follow the instructions without the script.")
+            }
             s.workflow?.let {
                 append("\n\nCLOUD TOOL: run_cloud_tool(tool=\"").append(it).append("\", script_path=..., output_dir=...) ")
                 append("runs the script in GitHub Actions (workflow .github/workflows/coder-").append(it).append(".yml, installed on demand).")
@@ -62,7 +71,10 @@ class SkillRepository(
             (0 until a.length()).mapNotNull { i ->
                 val o = a.getJSONObject(i)
                 val src = runCatching { Skill.Source.valueOf(o.optString("src")) }.getOrDefault(Skill.Source.GLOBAL)
-                SkillParser.parse(o.optString("md"), o.optString("name"), src)?.let { it.copy(enabled = it.name !in disabled) }
+                val res = o.optJSONObject("res")?.let { r -> r.keys().asSequence().associateWith { r.optString(it) } }.orEmpty()
+                SkillParser.parse(o.optString("md"), o.optString("name"), src)?.copy(
+                    enabled = true, origin = o.optString("origin").ifBlank { null }, resources = res,
+                )?.let { it.copy(enabled = it.name !in disabled) }
             }
         }
     }
@@ -75,7 +87,12 @@ class SkillRepository(
     @Synchronized fun deleteGlobal(name: String) = writeGlobals(globals().filter { it.name != name })
 
     private fun writeGlobals(list: List<Skill>) = globalFile.writeText(JSONArray().also { a ->
-        list.sortedBy { it.name }.forEach { a.put(JSONObject().put("name", it.name).put("src", it.source.name).put("md", it.toMarkdown())) }
+        list.sortedBy { it.name }.forEach { s ->
+            val o = JSONObject().put("name", s.name).put("src", s.source.name).put("md", s.toMarkdown())
+            s.origin?.let { o.put("origin", it) }
+            if (s.resources.isNotEmpty()) o.put("res", JSONObject().also { r -> s.resources.forEach { (k, v) -> r.put(k, v) } })
+            a.put(o)
+        }
     }.toString())
 
     private fun seedBuiltins() {
@@ -125,12 +142,19 @@ class SkillRepository(
 
     fun catalog(repo: String): String? = catalogText(all(repo))
 
-    /** The load_skill tool. */
-    fun load(name: String, repo: String): String {
+    /** The load_skill tool; with [file], one bundled file of the skill. */
+    fun load(name: String, repo: String, file: String? = null): String {
         val n = SkillParser.normalizeName(name.removePrefix("/"))
         val all = all(repo)
         val s = all.firstOrNull { it.name == n } ?: return "Yetenek bulunamadı: $name. Mevcut: ${all.filter { it.enabled }.joinToString { it.name }}"
         if (!s.enabled) return "Yetenek kapalı: ${s.name} (Ayarlar > Yetenekler'den açılabilir)."
+        if (!file.isNullOrBlank()) {
+            val key = file.trim().removePrefix("./").trim('/')
+            return s.resources[key]?.let { "FILE ${s.name}/$key\n\n$it" }
+                ?: "Dosya yok: $key. Bu yetenekteki dosyalar: ${s.resources.keys.sorted().joinToString().ifBlank { "(yok)" }}"
+        }
         return loadText(s)
     }
+
+    @Synchronized fun global(name: String): Skill? = globals().firstOrNull { it.name == name }
 }

@@ -12,7 +12,14 @@ data class Skill(
     val enabled: Boolean = true,
     /** Repo skills: the SKILL.md path in the repository. */
     val path: String? = null,
+    /** Imported skills: where they came from ("owner/repo@ref:path/SKILL.md"), for "Güncelle". */
+    val origin: String? = null,
+    /** Files bundled next to SKILL.md (references, scripts, templates), by path relative to the skill folder. */
+    val resources: Map<String, String> = emptyMap(),
 ) {
+    /** Bundled scripts expect a computer; Coder can only run them in GitHub Actions. */
+    val hasScripts get() = resources.keys.any { SkillImporter.isScript(it) }
+
     enum class Source(val label: String) { BUILTIN("yerleşik"), GLOBAL("genel"), REPO("repo") }
 
     /** One catalog line: kept short and stable so the system prompt prefix stays cacheable. */

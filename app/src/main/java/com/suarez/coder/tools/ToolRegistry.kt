@@ -124,7 +124,8 @@ class ToolRegistry(private val settings: Settings) {
     /** Full instructions of a skill from the catalog in the system prompt (progressive disclosure). */
     private val loadSkill = ToolSpec("load_skill",
         "Sistem talimatındaki SKILLS listesinden bir yeteneğin tam talimatlarını yükler. Böyle bir işe başlamadan önce çağır.",
-        obj("name" to str("Yetenek adı, ör. blender-3d"), required = listOf("name")))
+        obj("name" to str("Yetenek adı, ör. blender-3d"),
+            "file" to str("İsteğe bağlı: yeteneğin yanında gelen bir dosya (ör. references/api.md)"), required = listOf("name")))
 
     /** Runs a script in GitHub Actions (Blender headless or Python/FFmpeg); no local computer is involved. */
     private val runCloudTool = ToolSpec("run_cloud_tool",
@@ -279,7 +280,7 @@ class ToolRegistry(private val settings: Settings) {
                 s("inputs_json")?.let { runCatching { JSONObject(it) }.getOrElse { throw ToolException("inputs_json geçerli bir JSON nesnesi değil") } })
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
-            "load_skill" -> skills?.load(req("name"), activeRepo()) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
+            "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
             "run_cloud_tool" -> {
                 val runner = cloud ?: throw ToolException("Bulut araçları bu oturumda kullanılamıyor.")
                 val r = repo()

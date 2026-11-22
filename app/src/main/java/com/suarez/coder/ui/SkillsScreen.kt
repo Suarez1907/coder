@@ -28,6 +28,15 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Star
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.navigationBarsPadding
+import com.suarez.coder.skills.SkillImporter
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -97,11 +106,13 @@ fun SkillsPage(vm: ChatViewModel) {
     LaunchedEffect(Unit) { vm.refreshSkills(fetchRepo = true); vm.refreshCloudTools() }
     var editing by remember { mutableStateOf<Pair<String, String>?>(null) } // (markdown, fallback name)
     var deleting by remember { mutableStateOf<Skill?>(null) }
+    var importing by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         MonoCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Yetenekler", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = strong, modifier = Modifier.weight(1f))
                 IconButton(onClick = { vm.refreshSkills(fetchRepo = true) }) { Icon(Icons.Outlined.Refresh, "Yenile", tint = weak) }
+                IconButton(onClick = { importing = true }) { Icon(Icons.Outlined.Star, "GitHub'dan içe aktar", tint = strong) }
                 IconButton(onClick = { editing = NEW_SKILL to "" }) { Icon(Icons.Outlined.Add, "Yeni yetenek", tint = strong) }
             }
             Text("Sistem talimatına yalnızca ad ve tek satır açıklama girer; tam talimat ajan load_skill çağırınca yüklenir. " +
@@ -116,9 +127,12 @@ fun SkillsPage(vm: ChatViewModel) {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 3.dp)) {
                                 Tag(s.source.label)
                                 s.workflow?.let { Tag("bulut: $it") }
+                                if (s.origin != null) Tag("GitHub")
+                                if (s.hasScripts) Tag("betik içerir")
                             }
                             Text(s.description, style = MaterialTheme.typography.bodySmall, color = weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
+                        if (s.origin != null) IconButton(onClick = { vm.updateSkill(s.name) }) { Icon(Icons.Outlined.Refresh, "Kaynaktan güncelle", tint = weak) }
                         if (s.source != Skill.Source.REPO) {
                             IconButton(onClick = { editing = s.toMarkdown() to s.name }) { Icon(Icons.Outlined.Edit, "Düzenle", tint = weak) }
                             IconButton(onClick = { deleting = s }) { Icon(Icons.Outlined.Delete, "Sil", tint = weak) }
@@ -172,6 +186,7 @@ fun SkillsPage(vm: ChatViewModel) {
             dismissButton = { TextButton(onClick = { editing = null }) { Text("Vazgeç") } },
         )
     }
+    if (importing) ImportDialog(vm) { importing = false; vm.clearCandidates() }
     deleting?.let { s ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -180,6 +195,86 @@ fun SkillsPage(vm: ChatViewModel) {
             confirmButton = { TextButton(onClick = { vm.deleteSkill(s.name); deleting = null }) { Text("Sil") } },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Vazgeç") } },
         )
+    }
+}
+
+// ---- Import from GitHub ----
+
+/** Starred repositories (skill-like ones first) or a pasted link → the SKILL.md files found → import selected. */
+@Composable
+private fun ImportDialog(vm: ChatViewModel, onDismiss: () -> Unit) {
+    var url by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf("") }
+    var picked by remember { mutableStateOf(setOf<String>()) }
+    LaunchedEffect(Unit) { if (vm.starred == null) vm.loadStarred() }
+    val candidates = vm.candidates
+    LaunchedEffect(candidates) { picked = candidates?.map { it.path }?.toSet().orEmpty() }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                    IconButton(onClick = { if (candidates != null) vm.clearCandidates() else onDismiss() }) {
+                        Icon(if (candidates != null) Icons.AutoMirrored.Outlined.ArrowBack else Icons.Outlined.Close, "Geri", tint = strong)
+                    }
+                    Text(if (candidates != null) "Bulunan yetenekler" else "GitHub'dan içe aktar", style = MaterialTheme.typography.titleLarge, color = strong)
+                }
+                vm.importBusy?.let { Text(it + "…", style = Mono.small, color = weak) }
+                vm.importStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = weak) }
+                Spacer(Modifier.size(8.dp))
+                if (candidates == null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(url, { url = it }, singleLine = true, textStyle = Mono.small, modifier = Modifier.weight(1f),
+                            label = { Text("GitHub adresi (repo, klasör veya SKILL.md)") })
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = { vm.scanForSkills(url) }, enabled = url.isNotBlank() && vm.importBusy == null,
+                            border = BorderStroke(1.dp, line)) { Text("Tara", color = strong) }
+                    }
+                    Spacer(Modifier.size(12.dp))
+                    Text("Yıldızlı repolar", style = MaterialTheme.typography.titleSmall, color = strong)
+                    OutlinedTextField(filter, { filter = it }, singleLine = true, placeholder = { Text("Filtrele") },
+                        textStyle = Mono.small, modifier = Modifier.fillMaxWidth())
+                    val list = vm.starred.orEmpty().filter { filter.isBlank() || it.fullName.contains(filter, true) || it.description.contains(filter, true) }
+                    LazyColumn(Modifier.weight(1f)) {
+                        items(list, key = { it.fullName }) { r ->
+                            Column(Modifier.fillMaxWidth().clickable(enabled = vm.importBusy == null) { vm.scanForSkills(r.fullName) }.padding(vertical = 10.dp)) {
+                                Text(r.fullName, style = Mono.body, color = strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (r.description.isNotBlank()) Text(r.description, style = MaterialTheme.typography.bodySmall, color = weak,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            HorizontalDivider(color = line)
+                        }
+                    }
+                } else {
+                    val existing = vm.skills.map { it.name }.toSet()
+                    LazyColumn(Modifier.weight(1f)) {
+                        items(candidates, key = { it.path }) { c ->
+                            Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                                Checkbox(checked = c.path in picked, onCheckedChange = { on -> picked = if (on) picked + c.path else picked - c.path },
+                                    colors = CheckboxDefaults.colors(checkedColor = strong, checkmarkColor = MaterialTheme.colorScheme.surface, uncheckedColor = weak))
+                                Column(Modifier.weight(1f)) {
+                                    Text("/" + c.name, style = Mono.body, color = strong)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 3.dp)) {
+                                        if (c.files.isNotEmpty()) Tag("${c.files.size} dosya")
+                                        if (c.hasScripts) Tag("betik içerir")
+                                        if (c.name in existing) Tag("üzerine yazılır")
+                                    }
+                                    Text(c.description, style = MaterialTheme.typography.bodySmall, color = weak, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    Text(c.path, style = Mono.tiny, color = weak, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                            HorizontalDivider(color = line)
+                        }
+                    }
+                    if (candidates.any { it.hasScripts }) Text("Betikli yetenekler bilgisayar varsayar; Coder betikleri gerekirse GitHub Actions'ta (toolbox) çalıştırır.",
+                        style = MaterialTheme.typography.bodySmall, color = weak, modifier = Modifier.padding(vertical = 6.dp))
+                    OutlinedButton(onClick = { vm.importSkills(candidates.filter { it.path in picked }) },
+                        enabled = picked.isNotEmpty() && vm.importBusy == null, border = BorderStroke(1.dp, line),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                        Text("Seçilenleri içe aktar (${picked.size})", color = strong)
+                    }
+                }
+            }
+        }
     }
 }
 

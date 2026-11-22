@@ -239,6 +239,31 @@ class GitHub(private val token: () -> String) {
         return (0 until arr.length()).map { arr.getJSONObject(it) }.map { it.getLong("id") to it.optString("name") }
     }
 
+    data class StarredRepo(val fullName: String, val description: String, val topics: List<String>, val stars: Int)
+
+    /** Repositories the user starred (newest first), up to [maxPages] pages of 100. */
+    suspend fun starredRepos(maxPages: Int = 3): List<StarredRepo> {
+        val out = ArrayList<StarredRepo>()
+        for (page in 1..maxPages) {
+            val r = call("GET", "/user/starred?per_page=100&page=$page")
+            if (r.code !in 200..299) throw ToolException("Yıldızlı repolar alınamadı: HTTP ${r.code}")
+            val batch = Starred.parse(r.body)
+            out += batch
+            if (batch.size < 100) break
+        }
+        return out
+    }
+
+    object Starred {
+        fun parse(body: String): List<StarredRepo> = runCatching {
+            val arr = JSONArray(body)
+            (0 until arr.length()).map { arr.getJSONObject(it) }.map { o ->
+                StarredRepo(o.getString("full_name"), o.optString("description").takeIf { !o.isNull("description") }.orEmpty(),
+                    o.optJSONArray("topics")?.let { t -> (0 until t.length()).map { t.optString(it) } }.orEmpty(), o.optInt("stargazers_count"))
+            }
+        }.getOrDefault(emptyList())
+    }
+
     data class PrInfo(val number: Int, val title: String, val head: String, val url: String)
 
     suspend fun openPullRequests(repo: String): List<PrInfo> {
