@@ -141,6 +141,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             override fun clearPause() { pauseRequested = false }
         }
         viewModelScope.launch(Dispatchers.IO) { initLedger() }
+        // Keep the model lists fresh in the background (once a day), so nobody has to press "Modelleri getir".
+        if (System.currentTimeMillis() - settings.catalogAt > 24 * 3_600_000L) refreshCatalog(quiet = true)
         agent.tools.ciListener = object : ToolRegistry.CiListener {
             override fun started(repo: String, label: String) {
                 val ctx = getApplication<Application>()
@@ -158,6 +160,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshSettings() { settingsVersion++; profiles = settings.profiles() }
+
+    /** Repo, branch or instructions changed in Settings: the next request must not reuse the old project context. */
+    fun projectSettingsChanged() {
+        agent.context.invalidate()
+        agent.invalidateSnapshot()
+        refreshSettings()
+    }
 
     val sessionCostText: String
         get() {
@@ -183,6 +192,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         settings.provider = ref.provider
         settings.setModelFor(ref.provider, ref.model)
         refreshSettings()
+    }
+
+    fun priceLabel(ref: ModelRef): String {
+        val p = agent.price(ref.model)
+        return String.format(java.util.Locale.US, "$%.2f / $%.2f 1M", p.input, p.output) + if (agent.supportsVision(ref)) " · 🖼" else ""
     }
 
     fun selectArchitect(ref: ModelRef) { settings.architectModel = ref.key; refreshSettings() }
@@ -376,6 +390,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         activePlan = updated
     }
 
+    /**
+     * "Mimar'a Sor": the only way the architect sees an implementation failure, and only when the user asks.
+     * The paused plan is closed and a new architect turn starts with the error summary.
+     */
+    fun askArchitect() {
+        val p = activePlan ?: return
+        if (running) return
+        val failed = p.tasks.filter { it.status == com.suarez.coder.orchestrator.TaskStatus.FAILED || it.error != null }
+        val text = "Uygulayıcı şu işi tamamlayamadı; planı düzelt veya daha net talimat ver.\n\n" +
+            failed.joinToString("\n\n") { t -> "${t.title} [${t.ownedFiles.joinToString()}]\nHata: ${t.error?.take(800)}" }
+        val cancelled = p.copy(state = PlanState.CANCELLED, note = "Mimar'a soruldu.")
+        planStore.save(currentSessionId, cancelled)
+        activePlan = cancelled
+        messages += ChatMessage.User(text)
+        save()
+        start(Route.COMPLEX_ARCHITECT)
+    }
+
     fun dismissPlan() {
         if (activePlan?.state == PlanState.RUNNING) return
         planStore.delete(currentSessionId)
@@ -501,12 +533,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun mergeCatalog(p: Provider, models: List<String>) {
         val prefix = p.name.lowercase() + "/"
         settings.modelCatalog = settings.modelCatalog.filter { !it.startsWith(prefix) } + models.map { prefix + it }
+        settings.catalogAt = System.currentTimeMillis()
+        // The user's choices are never replaced by a list refresh; only empty roles get a sensible default.
         if (p == Provider.GEMINI && models.isNotEmpty()) {
-            val known = models.toSet()
-            if (settings.architectModel.startsWith(prefix) && settings.architectModel.removePrefix(prefix) !in known) {
+            if (settings.architectModel.isBlank()) {
                 (models.firstOrNull { it == "gemini-4-neon" } ?: models.firstOrNull { it.contains("pro") })?.let { settings.architectModel = prefix + it }
             }
-            if (settings.editorModel.startsWith(prefix) && settings.editorModel.removePrefix(prefix) !in known) {
+            if (settings.editorModel.isBlank()) {
                 models.filter { it.contains("flash") && !it.contains("tts") && !it.contains("image") && !it.contains("live") }
                     .minByOrNull { Pricing.blended(agent.price(it)) }?.let { settings.editorModel = prefix + it }
             }
@@ -518,8 +551,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** Fetches model lists from every provider that has a key, so both dropdowns can mix providers. */
-    fun refreshCatalog() {
+    fun refreshCatalog(quiet: Boolean = false) {
         viewModelScope.launch {
+            if (quiet && Provider.entries.none { settings.keyFor(it).isNotBlank() }) return@launch
             val parts = ArrayList<String>()
             for (p in Provider.entries) {
                 val hasKey = settings.keyFor(p).isNotBlank()
@@ -527,7 +561,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 parts += runCatching { fetchModels(p).also { mergeCatalog(p, it) }.size.let { "${p.label}: $it" } }
                     .getOrElse { "${p.label}: hata" }
             }
-            catalogStatus = if (parts.isEmpty()) "Önce API anahtarı girin" else parts.joinToString(", ")
+            if (!quiet) catalogStatus = if (parts.isEmpty()) "Önce API anahtarı girin" else parts.joinToString(", ")
         }
     }
 

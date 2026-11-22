@@ -548,10 +548,7 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
     val s = vm.settings
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion
     val options = vm.modelOptions()
-    val priceOf: (ModelRef) -> String = { ref ->
-        val p = vm.agent.price(ref.model)
-        String.format(Locale.US, "$%.2f / $%.2f 1M", p.input, p.output) + if (vm.agent.supportsVision(ref)) " · 🖼" else ""
-    }
+    val priceOf: (ModelRef) -> String = { vm.priceLabel(it) }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).navigationBarsPadding()
             .padding(bottom = 16.dp),
@@ -648,7 +645,7 @@ private fun SheetSwitch(title: String, subtitle: String, value: Boolean, onChang
 }
 
 @Composable
-private fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, priceOf: (ModelRef) -> String, onPick: (ModelRef) -> Unit) {
+internal fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, priceOf: (ModelRef) -> String, onPick: (ModelRef) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()

@@ -158,6 +158,14 @@ class ScreenshotTest {
         compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].captureRoboImage("build/outputs/roborazzi/orchestrator_sheet.png")
     }
 
+    @Test fun settingsProviders() {
+        val vm = vm()
+        compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasText("Sağlayıcılar", substring = true)).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/settings_providers.png")
+    }
+
     @Test fun settingsHome() {
         val vm = vm()
         compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }

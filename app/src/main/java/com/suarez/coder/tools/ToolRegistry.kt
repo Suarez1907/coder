@@ -133,13 +133,33 @@ class ToolRegistry(private val settings: Settings) {
             "paths" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Okunacak dosya yolları (en fazla 3)"),
             required = listOf("reason")))
 
-    /** Architect's first, single-shot call: plan now, or ask for more. */
-    val singleShotSpecs: List<ToolSpec> = listOf(submitPlan, needMoreInfo)
+    /** The architect hands small changes and repository operations (PRs, merges, workflows) to the executor. */
+    val delegateToExecutor = ToolSpec("delegate_to_executor",
+        "İşi planlamadan doğrudan Uygulayıcı'ya verir: tek dosyalık düzeltmeler, küçük değişiklikler ve GitHub işlemleri " +
+            "(branch, PR, merge, workflow) için. Uygulayıcı tüm araçlara sahiptir.",
+        obj("instructions" to str("Uygulayıcı'ya kısa ve net talimat: ne yapılacak, hangi dosya/PR"), required = listOf("instructions")))
 
-    /** Architect: read tools + repository operations (PRs, merges, workflows, API writes), but no direct code edits. */
-    val architectSpecs: List<ToolSpec> = readOnlySpecs + listOf(createBranch, createPr, mergePr, runWorkflow, ciWait)
+    /**
+     * Everything the architect ever sees, in one fixed list (same tools on every call keep the prompt prefix cacheable):
+     * plan, ask for up to 3 files, or delegate. No read loop, no write, no repository operation.
+     */
+    val singleShotSpecs: List<ToolSpec> = listOf(submitPlan, needMoreInfo, delegateToExecutor)
 
     companion object {
+        /** Planning roles: read-only, whatever a caller passes (enforced in [execute], not only in the prompt). */
+        val ARCHITECT_ROLES = setOf("architect", "planner")
+
+        /** Tools that change files, run things or change the repository. */
+        val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
+            "github_merge_pull_request", "github_run_workflow", "ci_wait")
+
+        /** Hard guard for planning roles: only read tools, and github_api only with GET. */
+        fun architectDenied(name: String, method: String?): String? {
+            if (name in WRITE_TOOLS || name !in READ_TOOLS) return "Mimar salt okunurdur: '$name' kullanılamaz. Kod ve GitHub işlemleri Uygulayıcı'nındır."
+            if (name == "github_api" && (method ?: "GET").uppercase() != "GET") return "Mimar salt okunurdur: yalnızca GET istekleri."
+            return null
+        }
+
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan")
@@ -181,7 +201,7 @@ class ToolRegistry(private val settings: Settings) {
 
     fun normalizeRepo(r: String) = r.trim().removePrefix("https://github.com/").trim('/').removeSuffix(".git")
 
-    suspend fun execute(call: ToolCall, readOnly: Boolean = false, allowOps: Boolean = false): String {
+    suspend fun execute(call: ToolCall, readOnly: Boolean = false, allowOps: Boolean = false, role: String? = null): String {
         val a = call.args
         fun s(k: String) = a.optString(k).takeIf { a.has(k) && !a.isNull(k) && it.isNotBlank() }
         fun req(k: String) = s(k) ?: throw ToolException("'$k' parametresi gerekli")
@@ -190,6 +210,7 @@ class ToolRegistry(private val settings: Settings) {
             val r = s("repo") ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
             return normalizeRepo(r)
         }
+        if (role in ARCHITECT_ROLES) architectDenied(call.name, s("method"))?.let { throw ToolException(it) }
         accessError(call.name, s("method"), readOnly, allowOps)?.let { throw ToolException(it) }
 
         val result = when (call.name) {

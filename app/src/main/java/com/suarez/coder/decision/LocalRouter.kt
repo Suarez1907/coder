@@ -13,11 +13,14 @@ object LocalRouter {
         "renk", "rengi", "metin", "yazı", "boyut", "padding", "margin", "typo", "yazım hatası", "hizala", "ikon", "label",
         "color", "colour", "text", "font", "size", "align", "icon", "başlık", "title", "kenar boşluğu", "punto",
     )
+    /** Only multi-file features and architecture go to the architect; fixes, debugging and small refactors do not. */
     val COMPLEX_WORDS = listOf(
-        "yeni özellik", "özellik ekle", "refactor", "yeniden yapılandır", "mimari", "birden fazla", "tüm dosya", "bütün dosya",
+        "yeni özellik", "özellik ekle", "yeniden yapılandır", "mimari", "birden fazla dosya", "tüm dosya", "bütün dosya",
         "seviye", "level", "entegre", "entegrasyon", "veritabanı", "database", "migration", "kimlik doğrulama", "authentication",
-        "yeni ekran", "ekran ekle", "hata ayıkla", "debug", "çöküyor", "crash", "performans", "optimize", "modül", "feature",
+        "yeni ekran", "ekran ekle", "modül", "feature", "architecture", "büyük refactor", "tüm projeyi",
     )
+    /** A clearly scoped fix: the executor handles it (with tools) without a plan. */
+    val FIX_WORDS = listOf("düzelt", "hatayı", "hata ver", "bug", "fix", "çöküyor", "crash", "yeniden adlandır", "rename")
     /** Repository operations: a cheap model with full tools handles them; no planning needed. */
     val OPS_WORDS = listOf(
         "merge", "birleştir", "pull request", "pr aç", "pr oluştur", "release", "sürüm yayınla", "sürümü yayınla",
@@ -59,6 +62,12 @@ object LocalRouter {
             if (!(question && !change)) return Verdict(Route.SIMPLE_EDIT, "GitHub işlemi: \"$op\"")
         }
         if (pinnedFiles == 1 && complex == null && !(question && !change)) return Verdict(Route.SIMPLE_EDIT, "tek dosya seçili")
+        // One file named in the request (path or file name with an extension) and no feature/architecture words.
+        val namedFiles = Regex("[\\w./-]+\\.(kt|kts|java|js|mjs|ts|tsx|jsx|py|go|rs|swift|dart|c|cpp|h|cs|rb|php|html|css|xml|json|toml|yml|yaml|gradle|md)\\b")
+            .findAll(raw).map { it.value }.toSet()
+        if (namedFiles.size == 1 && complex == null && change) return Verdict(Route.SIMPLE_EDIT, "tek dosya: ${namedFiles.first()}")
+        val fix = FIX_WORDS.firstOrNull { t.contains(it) }
+        if (fix != null && complex == null && change && t.length < 400) return Verdict(Route.SIMPLE_EDIT, "kapsamı net düzeltme: \"$fix\"")
         if (t.length < SHORT_MESSAGE_CHARS && simple != null && complex == null && !(question && !change)) {
             return Verdict(Route.SIMPLE_EDIT, "kısa UI/metin isteği: \"$simple\"")
         }

@@ -55,6 +55,8 @@ data class OrchestratorPlan(
     /** Full mode: edited file contents not committed yet (null = delete), so a restart does not lose work. */
     val staged: Map<String, String?> = emptyMap(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** A normal (non-orchestrator) plan the executor could not apply, waiting for the user's decision. */
+    val repair: Boolean = false,
 ) {
     fun task(id: String) = tasks.firstOrNull { it.id == id }
     fun withTask(t: SubTask) = copy(tasks = tasks.map { if (it.id == t.id) t else it })
@@ -135,7 +137,7 @@ object PlanJson {
     fun toJson(p: OrchestratorPlan): String = JSONObject()
         .put("id", p.id).put("mode", p.mode.name).put("request", p.request).put("repo", p.repo).put("branch", p.branch)
         .put("base", p.base ?: JSONObject.NULL).put("msg", p.commitMessage).put("state", p.state.name).put("round", p.reviewRound)
-        .put("note", p.note ?: JSONObject.NULL).put("updated", p.updatedAt)
+        .put("note", p.note ?: JSONObject.NULL).put("updated", p.updatedAt).put("repair", p.repair)
         .put("costs", JSONObject().also { j -> p.roleCosts.forEach { (k, v) -> j.put(k, v) } })
         .put("staged", JSONObject().also { j -> p.staged.forEach { (k, v) -> j.put(k, v ?: JSONObject.NULL) } })
         .put("tasks", JSONArray().also { arr ->
@@ -171,7 +173,7 @@ object PlanJson {
             id = o.getString("id"), mode = OrchestratorMode.of(o.optString("mode")), request = o.optString("request"),
             repo = o.getString("repo"), branch = o.getString("branch"), base = o.optNullable("base"), commitMessage = o.optString("msg"),
             tasks = tasks, state = runCatching { PlanState.valueOf(o.optString("state")) }.getOrDefault(PlanState.PAUSED),
-            reviewRound = o.optInt("round"), roleCosts = costs, note = o.optNullable("note"), staged = staged, updatedAt = o.optLong("updated"),
+            reviewRound = o.optInt("round"), roleCosts = costs, note = o.optNullable("note"), staged = staged, updatedAt = o.optLong("updated"), repair = o.optBoolean("repair"),
         )
     }.getOrNull()
 }

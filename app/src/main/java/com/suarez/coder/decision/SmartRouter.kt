@@ -66,8 +66,9 @@ object RouterLogic {
         ROUTE_KEY, "choice",
         "Classify the user's request to a coding assistant that edits a GitHub repository. Which handling fits best?",
         mapOf(
-            Route.SIMPLE_EDIT.name to "A small code change: a UI tweak, a text or typo fix, or a small logic update in a single file.",
-            Route.COMPLEX_ARCHITECT.name to "A larger code change: several files, a new feature or level, refactoring, or complex debugging.",
+            Route.SIMPLE_EDIT.name to "A clearly scoped code change: a bug fix in one file, a UI/style/text change, a small refactor, " +
+                "debugging a reported error, or a GitHub operation (branch, pull request, merge, workflow).",
+            Route.COMPLEX_ARCHITECT.name to "A new feature or structural change across several files that needs architectural design.",
             Route.QUESTION_ONLY.name to "No code change is needed: a question, explanation, research, review, or listing information.",
         ),
     )

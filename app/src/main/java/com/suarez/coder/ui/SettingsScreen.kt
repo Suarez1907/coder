@@ -44,6 +44,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -161,12 +163,26 @@ private fun ProvidersPage(vm: ChatViewModel) {
     val scope = rememberCoroutineScope()
     val uri = LocalUriHandler.current
     var provider by remember { mutableStateOf(s.provider) }
-    var gModels by remember { mutableStateOf<List<String>>(emptyList()) }
-    var dModels by remember { mutableStateOf<List<String>>(emptyList()) }
-    var oModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    // The fetched lists are kept in the catalog: no need to press "Modelleri getir" every time.
+    fun cached(p: Provider) = s.modelCatalog.filter { it.startsWith(p.name.lowercase() + "/") }.map { it.substringAfter('/') }
+    var gModels by remember { mutableStateOf(cached(Provider.GEMINI)) }
+    var dModels by remember { mutableStateOf(cached(Provider.DEEPSEEK)) }
+    var oModels by remember { mutableStateOf(cached(Provider.OPENROUTER)) }
+    var pickFor by remember { mutableStateOf<com.suarez.coder.llm.ModelRef?>(null) }
+    @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion
     var fetchStatus by remember { mutableStateOf("") }
     var modelVersion by remember { mutableIntStateOf(0) }
     var ping by remember { mutableStateOf("") }
+
+    Group {
+        Title("Etkin modeller", "Burada seçtiğin model hemen kullanılır (sohbetteki alt çubukla aynı ayar).")
+        val options = vm.modelOptions()
+        ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options, { vm.priceLabel(it) }) { vm.selectArchitect(it) }
+        ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options, { vm.priceLabel(it) }) { vm.selectEditor(it) }
+        ModelSelect("Tek model", vm.agent.singleRef(), coder.muted, options, { vm.priceLabel(it) }) { vm.selectSingle(it); provider = it.provider }
+        Text(if (s.architectMode) "Mimar Modu açık: Mimar ve Uygulayıcı kullanılır." else "Mimar Modu kapalı: Tek model kullanılır.",
+            style = MaterialTheme.typography.bodySmall, color = coder.muted)
+    }
 
     Group {
         Title("Varsayılan yapay zekâ", "Mimar Modu kapalıyken tek model ajanın sağlayıcısı.")
@@ -179,8 +195,8 @@ private fun ProvidersPage(vm: ChatViewModel) {
         Title("Gemini")
         TextSetting("API anahtarı", s.geminiKey, secret = true) { s.geminiKey = it }
         TextButton(onClick = { uri.openUri("https://aistudio.google.com/app/apikey") }) { Text("Anahtar al: aistudio.google.com") }
-        key(modelVersion) { TextSetting("Model", s.geminiModel, mono = true) { s.geminiModel = it.ifBlank { "gemini-2.5-pro" }; vm.refreshSettings() } }
-        ModelFetch(gModels, onPick = { s.geminiModel = it; modelVersion++; vm.refreshSettings() }) {
+        key(modelVersion) { TextSetting("Tek model (Mimar Modu kapalıyken)", s.geminiModel, mono = true) { s.geminiModel = it.ifBlank { "gemini-2.5-pro" }; vm.refreshSettings() } }
+        ModelFetch(gModels, onPick = { pickFor = com.suarez.coder.llm.ModelRef(Provider.GEMINI, it) }) {
             scope.launch {
                 fetchStatus = "Gemini modelleri alınıyor…"
                 fetchStatus = runCatching { gModels = vm.fetchModels(Provider.GEMINI); vm.mergeCatalog(Provider.GEMINI, gModels); "${gModels.size} Gemini modeli" }
@@ -193,9 +209,9 @@ private fun ProvidersPage(vm: ChatViewModel) {
         Title("DeepSeek", "OpenAI uyumlu herhangi bir API de kullanılabilir: adresi değiştirin.")
         TextSetting("API anahtarı", s.deepseekKey, secret = true) { s.deepseekKey = it }
         TextButton(onClick = { uri.openUri("https://platform.deepseek.com/api_keys") }) { Text("Anahtar al: platform.deepseek.com") }
-        key(modelVersion) { TextSetting("Model", s.deepseekModel, mono = true) { s.deepseekModel = it.ifBlank { "deepseek-chat" }; vm.refreshSettings() } }
+        key(modelVersion) { TextSetting("Tek model (Mimar Modu kapalıyken)", s.deepseekModel, mono = true) { s.deepseekModel = it.ifBlank { "deepseek-chat" }; vm.refreshSettings() } }
         TextSetting("API adresi", s.deepseekBaseUrl, mono = true) { s.deepseekBaseUrl = it.ifBlank { "https://api.deepseek.com" } }
-        ModelFetch(dModels, onPick = { s.deepseekModel = it; modelVersion++; vm.refreshSettings() }) {
+        ModelFetch(dModels, onPick = { pickFor = com.suarez.coder.llm.ModelRef(Provider.DEEPSEEK, it) }) {
             scope.launch {
                 fetchStatus = "DeepSeek modelleri alınıyor…"
                 fetchStatus = runCatching { dModels = vm.fetchModels(Provider.DEEPSEEK); vm.mergeCatalog(Provider.DEEPSEEK, dModels); "${dModels.size} DeepSeek modeli" }
@@ -210,11 +226,11 @@ private fun ProvidersPage(vm: ChatViewModel) {
         TextSetting("API anahtarı", s.openrouterKey, secret = true) { s.openrouterKey = it; vm.refreshSettings() }
         TextButton(onClick = { uri.openUri("https://openrouter.ai/settings/keys") }) { Text("Anahtar al: openrouter.ai") }
         key(modelVersion) {
-            TextSetting("Model", s.openrouterModel, mono = true, placeholder = "anthropic/claude-sonnet-4.5") {
+            TextSetting("Tek model (Mimar Modu kapalıyken)", s.openrouterModel, mono = true, placeholder = "anthropic/claude-sonnet-4.5") {
                 s.openrouterModel = it.ifBlank { "deepseek/deepseek-chat" }; vm.refreshSettings()
             }
         }
-        ModelFetch(oModels, onPick = { s.openrouterModel = it; modelVersion++; vm.refreshSettings() }) {
+        ModelFetch(oModels, onPick = { pickFor = com.suarez.coder.llm.ModelRef(Provider.OPENROUTER, it) }) {
             scope.launch {
                 fetchStatus = "OpenRouter modelleri alınıyor…"
                 fetchStatus = runCatching { oModels = vm.fetchModels(Provider.OPENROUTER); vm.mergeCatalog(Provider.OPENROUTER, oModels); "${oModels.size} OpenRouter modeli (araç destekli)" }
@@ -223,6 +239,21 @@ private fun ProvidersPage(vm: ChatViewModel) {
         }
     }
     if (fetchStatus.isNotBlank()) Text(fetchStatus, style = Mono.tiny, color = coder.muted)
+    pickFor?.let { ref ->
+        AlertDialog(
+            onDismissRequest = { pickFor = null },
+            title = { Text(ref.model, style = Mono.body) },
+            text = { Text("Bu model nerede kullanılsın? Seçim hemen etkin olur.") },
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = { vm.selectArchitect(ref); pickFor = null; modelVersion++ }) { Text("Mimar") }
+                    TextButton(onClick = { vm.selectEditor(ref); pickFor = null; modelVersion++ }) { Text("Uygulayıcı") }
+                    TextButton(onClick = { vm.selectSingle(ref); provider = ref.provider; pickFor = null; modelVersion++ }) { Text("Tek model") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { pickFor = null }) { Text("Vazgeç") } },
+        )
+    }
 
     Group {
         Title("Bağlantı", "Tekil, Mimar ve Uygulayıcı modellerine küçük bir istek gönderir; süreyi veya hatayı gösterir.")
@@ -271,8 +302,8 @@ private fun ArchitectPage(vm: ChatViewModel) {
 
     Group {
         Title("Mimar")
-        SwitchSetting("Tek seferde planla", "Önce araçsız tek çağrı", s.architectSingleShot,
-            "Mimar önce yalnızca harita ve bağlamla tek çağrıda plan yapar; bilgi yetmezse istediği dosyalar okunup araçlı adımlara geçilir.") { s.architectSingleShot = it }
+        NumberSetting("Uygulayıcı onarım denemesi", s.maxExecutorRetries,
+            info = "Uygulayıcı hatalarını kendi düzeltir (dosyanın güncel halini yeniden okuyarak). Bu kadar denemede olmazsa iş durur ve size sorulur; Mimar otomatik çağrılmaz.") { s.maxExecutorRetries = it }
         SwitchSetting("Repo Haritası", "Ham kod yerine imzalar", s.repoMapForArchitect,
             "Mimar'a dosya yolları, sınıflar ve fonksiyon imzalarından oluşan hafif bir harita gönderilir; en fazla 3 dosya okur.") { s.repoMapForArchitect = it }
         SwitchSetting("Sadece Diff", "Açıklamasız, kısa yanıtlar", s.terseMode,
@@ -281,10 +312,10 @@ private fun ArchitectPage(vm: ChatViewModel) {
             "Repodaki kalıcı proje notları sabit bağlama eklenir; ajan önemli değişikliklerde aynı commit'te günceller.") { s.projectNotes = it }
         SwitchSetting("Ekonomi modu (Flex)", "%50 ucuz, dakikalar sürebilir", s.economyMode,
             "Gemini istekleri Flex kademesinden gider: yarı fiyat, ama yanıtlar 1-15 dakika sürebilir ve kapasite dolabilir. Kapasite dolarsa standart fiyata geçmeden önce sorulur.") { s.economyMode = it; vm.refreshSettings() }
-        TextSetting("Orta zorlukta Mimar modeli", s.architectModelMedium, mono = true, placeholder = "gemini/gemini-3.8-flash",
-            info = "Decision 1 işin zorluğunu 0-3 arası puanlar; 1.5'in altındaysa bu model ve düşük düşünme kullanılır. Boş = kapalı.") { s.architectModelMedium = it }
+        TextSetting("Orta zorlukta Mimar modeli", s.architectModelMedium, mono = true, placeholder = "boş = kapalı",
+            info = "Doluysa: Decision 1 zorluğu 1.5'in altında bulduğunda seçtiğin Mimar yerine bu model kullanılır. Boş (varsayılan) = her zaman seçtiğin Mimar.") { s.architectModelMedium = it; vm.refreshSettings() }
         TextSetting("Yükseltme modeli", s.escalationModel, mono = true, placeholder = "boş = otomatik, none = kapalı",
-            info = "Uygulayıcı iki kez başarısız olursa Mimar'dan önce denenen ara model (sağlayıcı/model).") { s.escalationModel = it }
+            info = "Uygulayıcı'nın son iki onarım denemesinde kullanılan ara model (sağlayıcı/model). Mimar hiçbir zaman onarım yapmaz.") { s.escalationModel = it; vm.refreshSettings() }
     }
 
     Group {
@@ -371,8 +402,8 @@ private fun GitHubPage(vm: ChatViewModel) {
         TextButton(onClick = { uri.openUri("https://github.com/settings/tokens/new?scopes=repo,workflow&description=Coder%20Android") }) {
             Text("Token oluştur: github.com")
         }
-        TextSetting("Varsayılan repo", s.defaultRepo, mono = true, placeholder = "sahip/isim") { s.defaultRepo = it; vm.refreshSettings() }
-        TextSetting("Varsayılan branch", s.defaultBranch, mono = true, placeholder = "main") { s.defaultBranch = it; vm.refreshSettings() }
+        TextSetting("Varsayılan repo", s.defaultRepo, mono = true, placeholder = "sahip/isim") { s.defaultRepo = it; vm.projectSettingsChanged() }
+        TextSetting("Varsayılan branch", s.defaultBranch, mono = true, placeholder = "main") { s.defaultBranch = it; vm.projectSettingsChanged() }
         Text("Repo, branch ve özel talimatlar etkin proje profiline kaydedilir. Profiller arasında üst çubuktaki repo rozetine dokunarak geçiş yapılır.",
             style = MaterialTheme.typography.bodySmall, color = coder.muted)
     }
@@ -383,7 +414,7 @@ private fun GitHubPage(vm: ChatViewModel) {
         NumberSetting("Bir istekte en fazla adım", s.maxSteps) { s.maxSteps = it }
         NumberSetting("İstek zaman aşımı (sn)", s.requestTimeoutSec,
             info = "Akış sırasında bu süre boyunca hiç veri gelmezse istek takıldı sayılır (Flex hariç).") { s.requestTimeoutSec = it }
-        TextSetting("Özel talimatlar", s.customInstructions, singleLine = false) { s.customInstructions = it }
+        TextSetting("Özel talimatlar", s.customInstructions, singleLine = false) { s.customInstructions = it; vm.refreshSettings() }
     }
 
     Group {
@@ -531,10 +562,15 @@ private fun TextSetting(
     info: String? = null,
     onSave: (String) -> Unit,
 ) {
-    var text by remember { mutableStateOf(initial) }
-    var saved by remember { mutableStateOf(initial) }
+    var text by remember(initial) { mutableStateOf(initial) }
+    var saved by remember(initial) { mutableStateOf(initial) }
     var justSaved by remember { mutableStateOf(false) }
     var show by remember { mutableStateOf(false) }
+    // Leaving the page (or the field disappearing) within the debounce must not lose what was typed.
+    val latestText by rememberUpdatedState(text)
+    val latestSaved by rememberUpdatedState(saved)
+    val latestOnSave by rememberUpdatedState(onSave)
+    DisposableEffect(Unit) { onDispose { if (latestText != latestSaved) latestOnSave(latestText) } }
     LaunchedEffect(text) {
         if (text == saved) return@LaunchedEffect
         delay(700)

@@ -171,6 +171,11 @@ class Settings(context: Context) {
         set(v) = putBool("token_preview", v)
 
     /** Models fetched from the APIs, as "provider/model" lines. */
+    /** When the model lists were last fetched (daily background refresh). */
+    var catalogAt: Long
+        get() = prefs.getLong("catalog_at", 0L)
+        set(v) = prefs.edit().putLong("catalog_at", v).apply()
+
     var modelCatalog: List<String>
         get() = str("model_catalog").lines().filter { it.isNotBlank() }
         set(v) = put("model_catalog", v.distinct().joinToString("\n"))
@@ -218,13 +223,18 @@ class Settings(context: Context) {
         set(v) = prefs.edit().putInt("request_timeout_sec", v.coerceIn(30, 900)).apply()
 
     /** Architect first tries to plan in one call (map + context, no read tools). */
+    /** Executor self-repair attempts per file group before the run pauses for the user (never the architect). */
+    var maxExecutorRetries: Int
+        get() = prefs.getInt("max_executor_retries", 5).coerceIn(1, 10)
+        set(v) = prefs.edit().putInt("max_executor_retries", v.coerceIn(1, 10)).apply()
+
     var architectSingleShot: Boolean
         get() = bool("architect_single_shot", true)
         set(v) = putBool("architect_single_shot", v)
 
     /** "provider/model" used as architect for requests Decision 1 rates below medium difficulty; blank = off. */
     var architectModelMedium: String
-        get() = str("architect_model_medium", "gemini/gemini-3.8-flash")
+        get() = str("architect_model_medium", "")
         set(v) = put("architect_model_medium", v.trim())
 
     /** Slash-command prompt templates (name without "/", text). Defaults until the user edits them. */

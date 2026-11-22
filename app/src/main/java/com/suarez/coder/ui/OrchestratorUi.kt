@@ -60,7 +60,7 @@ fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
             Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
                 Text("🗂 ", style = MaterialTheme.typography.titleSmall)
                 Column(Modifier.weight(1f)) {
-                    Text("Orkestratör · ${plan.mode.label}", style = MaterialTheme.typography.titleSmall)
+                    Text(if (plan.repair) "Onarım bekliyor" else "Orkestratör · ${plan.mode.label}", style = MaterialTheme.typography.titleSmall)
                     Text("${plan.repo}@${plan.branch} · ${plan.tasks.count { it.status == TaskStatus.DONE }}/${plan.tasks.size} · ${plan.state.label}",
                         style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -93,9 +93,17 @@ fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
                         TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
                     }
                     PlanState.PAUSED -> {
-                        Button(onClick = { vm.startPlan() }, enabled = !busy) { Text("Devam Et") }
-                        OutlinedButton(onClick = { editing = true }, enabled = !busy) { Text("Düzenle") }
-                        TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
+                        val failed = plan.tasks.any { it.status == TaskStatus.FAILED }
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { vm.startPlan() }, enabled = !busy) { Text(if (failed) "Tekrar Dene" else "Devam Et") }
+                                OutlinedButton(onClick = { editing = true }, enabled = !busy) { Text(if (failed) "Yönlendirme Ekle" else "Düzenle") }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (failed) TextButton(onClick = { vm.askArchitect() }, enabled = !busy) { Text("Mimar'a Sor") }
+                                TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
+                            }
+                        }
                     }
                     else -> TextButton(onClick = { vm.dismissPlan() }) { Text("Kartı kapat") }
                 }
@@ -152,7 +160,8 @@ private fun PlanEditor(plan: OrchestratorPlan, onSave: (OrchestratorPlan) -> Uni
                         }
                         if (!locked && t.status != TaskStatus.SKIPPED) {
                             OutlinedTextField(t.description, { d -> tasks = tasks.map { if (it.id == t.id) it.copy(description = d) else it } },
-                                label = { Text("Açıklama") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                                label = { Text(if (t.status == TaskStatus.FAILED) "Açıklama / Uygulayıcı'ya yönlendirme" else "Açıklama") },
+                                minLines = 2, modifier = Modifier.fillMaxWidth())
                         }
                     }
                 }

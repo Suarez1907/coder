@@ -50,6 +50,17 @@ interface AgentUi {
 
 class StopException(message: String) : Exception(message)
 
+/** How a bounded architect turn ended. */
+sealed class ArchOutcome {
+    /** The plan tool was called with a usable plan (its ToolResult is added by the caller). */
+    data class Submitted(val call: ToolCall) : ArchOutcome()
+    /** The architect handed the work to the executor (its ToolResult is added by the caller). */
+    data class Delegated(val call: ToolCall, val instructions: String) : ArchOutcome()
+    /** Answered in text: no code change needed. */
+    object Answered : ArchOutcome()
+    data class Unusable(val why: String) : ArchOutcome()
+}
+
 class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     val tools = ToolRegistry(settings)
     val context = ContextProvider(settings, tools.github)
@@ -106,6 +117,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         const val MAX_CONSECUTIVE_FAILURES = 3
         const val SUMMARIZE_AFTER_CHARS = 24_000
         const val MAX_ARCHITECT_READS = 3
+        /** The architect is called at most this many times per task: plan, or ask for ≤3 files and then plan. */
+        const val MAX_ARCHITECT_CALLS = 2
         /** Decision 1 difficulty (0 trivial … 3 very hard) below which the medium architect is used. */
         const val MEDIUM_COMPLEXITY = 1.5
         const val SNAPSHOT_MAX_COMMITS = 6
@@ -201,6 +214,69 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     }
     fun sessionCost(history: List<ChatMessage>) = history.filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
     fun money(usd: Double) = "${Pricing.formatUsd(usd)} (${Pricing.formatTry(usd * settings.usdTry)})"
+
+    /**
+     * The architect's whole turn, bounded: at most [MAX_ARCHITECT_CALLS] calls with the same system prompt and the same
+     * tool list (so the prefix stays cacheable). Ask-for-files is served once from the repo; after that the architect must
+     * plan, delegate or answer. It never gets a tool loop, write tools or repository operations.
+     */
+    suspend fun architectTurns(
+        history: MutableList<ChatMessage>,
+        ui: AgentUi,
+        role: String,
+        system: String,
+        tools: List<ToolSpec>,
+        submitName: String,
+        validate: (ToolCall) -> String?,
+    ): ArchOutcome {
+        val stable = stableContext("architect", history, ui)
+        var lastError = "Mimar plan göndermedi."
+        for (step in 1..MAX_ARCHITECT_CALLS) {
+            val final = step == MAX_ARCHITECT_CALLS
+            val prepared = HistoryPruner.prepare(history, settings.keepTurns)
+            val reply = callModel(history, prepared.messages, architectRef(), role, system, tools, ui,
+                maxOut = settings.maxOutArchitect, thinking = architectThinking(), stable = stable)
+            history += reply
+            ui.update()
+            if (reply.toolCalls.isEmpty()) return ArchOutcome.Answered
+            val submit = reply.toolCalls.firstOrNull { it.name == submitName }
+            val delegate = reply.toolCalls.firstOrNull { it.name == "delegate_to_executor" }
+            val chosen = submit?.takeIf { validate(it) == null } ?: delegate
+            // Every call needs an answer before the next request; the chosen one is answered by the caller.
+            for (c in reply.toolCalls) {
+                if (c === chosen) continue
+                val text = when {
+                    c === submit -> "Plan kullanılamadı: ${validate(c)}".also { lastError = it }
+                    c.name == "need_more_info" && !final -> {
+                        val repo = context.repo.takeIf { it.isNotBlank() }?.let { this.tools.normalizeRepo(it) }
+                        val paths = com.suarez.coder.tools.Args.stringList(c.args, "paths").orEmpty().take(MAX_ARCHITECT_READS)
+                        val files = if (repo != null && paths.isNotEmpty()) {
+                            runCatching { this.tools.readFilesText(repo, paths, context.ref) }.getOrElse { "(okunamadı: ${it.message})" }
+                        } else "(dosya yolu verilmedi)"
+                        "İstenen dosyalar aşağıda. Bu SON adım: şimdi $submitName veya delegate_to_executor çağır ya da metinle cevap ver.\n\n$files"
+                    }
+                    else -> "Bu adımda kullanılamaz: ${c.name}. $submitName veya delegate_to_executor çağır.".also { lastError = it }
+                }
+                history += ChatMessage.ToolResult(c.id, c.name, text, isError = c === submit || c.name != "need_more_info")
+            }
+            ui.update()
+            when {
+                chosen != null && chosen === delegate -> return ArchOutcome.Delegated(delegate,
+                    delegate.args.optString("instructions").ifBlank { "Kullanıcının isteğini uygula." })
+                chosen != null -> return ArchOutcome.Submitted(chosen)
+            }
+        }
+        return ArchOutcome.Unusable(lastError)
+    }
+
+    /** Runs a delegated task with the executor (full tools); the architect is not involved any more. */
+    suspend fun runDelegated(history: MutableList<ChatMessage>, ui: AgentUi, call: ToolCall, instructions: String) {
+        history += ChatMessage.ToolResult(call.id, call.name, "Uygulayıcı'ya devredildi.")
+        history += ChatMessage.RouteInfo("Mimar → Uygulayıcı'ya devretti (${editorRef().model})", instructions.take(600), Route.SIMPLE_EDIT.name, false)
+        ui.update()
+        agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
+            maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
+    }
 
     /** Orchestrator: the budget is checked between subtasks (and the run paused) instead of asking mid-task. */
     var budgetDeferred = false
@@ -324,33 +400,36 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         append(header()).append('\n').append(tokenRules).append('\n')
         if (settings.terseMode) appendLine(terseCode)
         appendLine("Workflow: understand first, then change; group related edits in one commit; unless told otherwise use the branch the user names, or a new feature branch and offer a PR.")
+        appendLine("You own the implementation and every patch, syntax, build and logic error it causes; there is no one to hand it to. " +
+            "When a patch fails, first re-read the current text of that file (github_read_file, the relevant line range), find the root cause, " +
+            "then apply a corrected patch. Never retry the same SEARCH blindly.")
         if (settings.projectNotes) appendLine(notesRule)
     }
 
+    /**
+     * Fixed text for every architect call (no step-specific parts), so the system prompt + tools + stable context form
+     * an identical, cacheable prefix. [singleShot] is kept for callers; the text no longer depends on it.
+     */
+    @Suppress("UNUSED_PARAMETER")
     fun architectSystem(hasMap: Boolean, singleShot: Boolean = false) = buildString {
         append(header()).append('\n')
         appendLine(
             """
-            You are the ARCHITECT. A cheaper EDITOR model will implement your plan. You must not write the code yourself.
-            1. Inspect only what you need with the read-only tools (tree, files in one github_read_files call, search, web).
-            2. If code must change, call submit_plan exactly once. For each file give short, precise, numbered logical steps:
-               which function/class/section changes, what to add/remove, exact names, signatures and behaviour.
-               Snippets only when essential and at most 5 lines. List every file that must change (action modify/create/delete).
-            3. If the request needs no code change (a question, explanation or research), answer directly and do not call submit_plan.
+            You are the ARCHITECT: a read-only planner. You never write code, edit files, produce diffs, run anything or fix
+            implementation errors; a cheaper EXECUTOR model does all of that and repairs its own mistakes.
+            You are called at most $MAX_ARCHITECT_CALLS times per task. Choose exactly one:
+            1. submit_plan: a short technical contract, NOT code. Per file: path, action (modify/create/delete), the functions/
+               classes/signatures to add or change, data flow and dependency notes, numbered steps and acceptance criteria.
+               No code blocks; a signature or a one-line expression only when essential.
+            2. need_more_info: when the repo map and context are not enough, ask for at most $MAX_ARCHITECT_READS files once;
+               they are given to you and you must then call submit_plan or delegate_to_executor.
+            3. delegate_to_executor: for single-file fixes, UI/text/style tweaks, small refactors, clearly scoped changes and
+               repository operations (branches, pull requests, merges, workflows, CI). Give short, precise instructions.
+            4. If no code change is needed (a question or explanation), answer directly in text.
             Branch: use the one the user names; otherwise choose a short new feature branch name.
-            4. Repository operations are yours to do directly (the user confirms each): create branches and pull requests,
-               merge pull requests (github_merge_pull_request), start workflows (github_run_workflow, then ci_wait), and other
-               GitHub API writes. Never tell the user to do these by hand. Only code changes must go through submit_plan.
             """.trimIndent()
         )
-        if (settings.terseMode) appendLine("Terse mode: no prose outside submit_plan; write plan steps as short imperative bullets.")
-        if (singleShot) {
-            appendLine(
-                "SINGLE-SHOT STEP: in this step you have no read or GitHub tools. If the repo map and the project context are " +
-                    "enough, call submit_plan now. If you need file contents, repository operations or anything else, call " +
-                    "need_more_info (with up to $MAX_ARCHITECT_READS file paths, which will be provided). If no code change is needed, answer directly."
-            )
-        }
+        if (settings.terseMode) appendLine("Terse mode: no prose outside the tool call; write plan steps as short imperative bullets.")
         if (hasMap) {
             appendLine(
                 "Aim for a plan that touches 1-3 files. Use the REPO MAP in the project context first (paths, types, signatures; " +
@@ -377,6 +456,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         - New file: leave SEARCH empty and put the whole file in REPLACE. To remove code, leave REPLACE empty.
         - Write complete, working code; no placeholders. Only touch the files listed.
         - Output nothing except the blocks: no explanations, no whole files.
+        - You own every error of your edits. After a failure you get the error and the CURRENT text of the file:
+          find the root cause and base new SEARCH blocks on that current text. Never repeat a failed SEARCH.
     """.trimIndent() + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
 
     fun questionSystem() = buildString {
@@ -717,8 +798,9 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     private suspend fun cheapRoute(history: MutableList<ChatMessage>, request: String, ui: AgentUi): Triple<Route, ModelRef, Double>? {
         val ref = routerRef() ?: return null
         val system = "You classify requests sent to a coding assistant that edits a GitHub repository. Reply with exactly one word: " +
-            "SIMPLE (small change in one file: UI tweak, text fix, small logic update), COMPLEX (several files, new feature, " +
-            "refactoring, hard debugging) or QUESTION (no code change needed)."
+            "SIMPLE (single-file bug fix, UI/style/text change, small refactor, clearly scoped change, debugging a reported error, " +
+            "or a GitHub operation), COMPLEX (only a new feature or structural change across several files that needs design) " +
+            "or QUESTION (no code change needed). When unsure between SIMPLE and COMPLEX, answer SIMPLE."
         val prompt = (recentContext(history)?.let { "Previous exchange:\n$it\n\n" } ?: "") + "Request:\n" + request.take(2_000)
         val scratch = ArrayList<ChatMessage>()
         return try {
@@ -909,7 +991,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                     continue
                 }
                 if (call.name in setOf("github_read_file", "github_read_files")) reads += readCount
-                val (result, rejected) = executeTool(call, readOnly, allowOps, ui)
+                val (result, rejected) = executeTool(call, readOnly, allowOps, ui, role)
                 history += result
                 ui.update()
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
@@ -935,16 +1017,18 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     }
 
     /** Returns the result and whether the user rejected it. */
-    private suspend fun executeTool(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi): Pair<ChatMessage.ToolResult, Boolean> {
+    private suspend fun executeTool(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi, role: String? = null): Pair<ChatMessage.ToolResult, Boolean> {
         ui.status(if (call.name == "ci_wait") "GitHub Actions derlemesi bekleniyor" else "Araç çalışıyor: ${call.name}")
         return try {
-            val denied = ToolRegistry.accessError(call.name, call.args.optString("method").ifBlank { null }, readOnly, allowOps)
+            val method = call.args.optString("method").ifBlank { null }
+            val denied = (if (role in ToolRegistry.ARCHITECT_ROLES) ToolRegistry.architectDenied(call.name, method) else null)
+                ?: ToolRegistry.accessError(call.name, method, readOnly, allowOps)
             if (denied == null && tools.needsApproval(call) && !settings.autoApprove &&
                 !ui.confirm("İzin ver: ${call.name}", "Bu işlem GitHub'da değişiklik yapacak.\n\n" + call.args.toString(2).take(20_000))
             ) {
                 ChatMessage.ToolResult(call.id, call.name, "Kullanıcı bu işlemi reddetti. Ne yapmak istediğini kullanıcıya sor.", true) to true
             } else {
-                ChatMessage.ToolResult(call.id, call.name, tools.execute(call, readOnly, allowOps)) to false
+                ChatMessage.ToolResult(call.id, call.name, tools.execute(call, readOnly, allowOps, role)) to false
             }
         } catch (e: CancellationException) {
             throw e
@@ -983,7 +1067,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         val kind = if (settings.architectMode) "architect" else "agent"
         val stable = snapshots[kind] // only an already built snapshot; no network work for a preview
         val system = if (settings.architectMode) architectSystem(architectHasMap) else agentSystem()
-        val toolSpecs = if (settings.architectMode) tools.architectSpecs else tools.specs
+        val toolSpecs = if (settings.architectMode) tools.singleShotSpecs else tools.specs
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
         val msgs = prefix + HistoryPruner.prepare(history + ChatMessage.User(input), settings.keepTurns).messages
         val client = client(ref)
