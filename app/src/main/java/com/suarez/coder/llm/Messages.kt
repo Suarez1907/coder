@@ -85,6 +85,8 @@ data class CallOptions(
     val onProgress: ((StreamProgress) -> Unit)? = null,
     /** Called when a long answer continues in another hop (Gemini long decode), with the hop number. */
     val onHop: ((Int) -> Unit)? = null,
+    /** Ask for a JSON object answer (OpenRouter response_format) where the model supports it. */
+    val jsonMode: Boolean = false,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
     val cachedContent: String? = null,
 )

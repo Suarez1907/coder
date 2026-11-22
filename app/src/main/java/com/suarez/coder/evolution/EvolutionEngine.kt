@@ -48,6 +48,13 @@ class EvolutionEngine(
             if (force) store.traces().takeLast(1) else emptyList()
         }
         if (traces.isEmpty()) return "Değerlendirilecek seans yok."
+        // A wrong model id would fail every run: say so once instead of using up sessions.
+        val known = Agent(settings).openRouterModels()
+        if (known.isNotEmpty() && settings.evoModel !in known) {
+            val msg = "Evrim modeli OpenRouter listesinde yok: ${settings.evoModel}. Öz-Gelişim ekranından geçerli bir model seçin."
+            if (store.log().lastOrNull()?.summary != msg) store.addLog(EvoTier.INFO, msg)
+            return msg
+        }
         store.lastRunAt = now
         val results = ArrayList<String>()
         for (t in traces) results += process(t, onStatus)
@@ -76,21 +83,34 @@ class EvolutionEngine(
             if (settings.evoSelfPr && settings.githubToken.isNotBlank()) add(EvoTier.SELF_PR)
         }
         var produced = 0
+        var consumed = true
         try {
             if (EvoTier.ROUTING in tiers) store.routing.record(t)
-            val coderFiles = if (EvoTier.SELF_PR in tiers) runCatching {
+            // A clean session (no errors, retries, CI failures, stops or corrections) teaches nothing: no model call.
+            if (t.troubleScore == 0) return "Temiz seans; model çağrılmadı."
+            val recentTrouble = store.traces().takeLast(5).sumOf { it.troubleScore }
+            // The Coder file list (the biggest part of the prompt) is only sent when a self-PR could follow.
+            val selfPrPossible = maxOf(t.troubleScore, recentTrouble) >= EvolutionGuard.MIN_TROUBLE_FOR_PR && store.pending()?.state != PrState.PENDING
+            val coderFiles = if (EvoTier.SELF_PR in tiers && selfPrPossible) runCatching {
                 agent.tools.github.treeEntries(EvolutionGuard.SELF_REPO, null)?.second.orEmpty().map { it.path }
                     .filter { it.startsWith("app/src/main/java/") && it.endsWith(".kt") && !EvolutionGuard.isProtected(it) }
             }.getOrDefault(emptyList()) else emptyList()
             val tiersForModel = if (coderFiles.isEmpty()) tiers - EvoTier.SELF_PR else tiers
             onStatus("Seans değerlendiriliyor")
             val reflector = ReflectorEngine { system, user, maxOut ->
-                agent.callModel(ArrayList(), listOf(ChatMessage.User(user)), agent.architectRef(), "reflector", system, emptyList(), silent,
-                    useCache = false, maxOut = maxOut).text
+                // JSON mode where supported, low reasoning (thinking tokens are billed and can crowd out the answer).
+                val m = agent.callModel(ArrayList(), listOf(ChatMessage.User(user)), agent.architectRef(), "reflector", system, emptyList(), silent,
+                    useCache = false, maxOut = maxOut, thinking = "low", jsonMode = true)
+                // Some reasoning models leave the JSON in their reasoning and the content empty.
+                if (ReflectorEngine.extractJson(m.text) == null && m.reasoning?.let { ReflectorEngine.extractJson(it) } != null) m.reasoning!! else m.text
             }
             val notes = store.lessons(t.repo)
-            val report = reflector.reflect(t, if (EvoTier.ROUTING in tiers) store.routing.summary() else "", notes, tiersForModel, coderFiles)
-            if (report == null) { log(EvoTier.INFO, "Seans değerlendirildi; model geçerli JSON döndürmedi."); return "JSON okunamadı." }
+            val (report, raw) = reflector.reflect(t, if (EvoTier.ROUTING in tiers) store.routing.summary() else "", notes, tiersForModel, coderFiles)
+            if (report == null) {
+                log(EvoTier.INFO, "Seans değerlendirildi; model geçerli JSON döndürmedi. Yanıt: «" +
+                    raw.replace(Regex("\\s+"), " ").trim().take(160).ifBlank { "(boş)" } + "»")
+                return "JSON okunamadı."
+            }
 
             // Tier 1: lessons (local project memory, injected into the stable context).
             if (EvoTier.MEMORY in tiers && report.lessons.isNotEmpty() && t.repo.isNotBlank()) {
@@ -113,7 +133,6 @@ class EvolutionEngine(
             val si = report.selfImprovement
             if (EvoTier.SELF_PR in tiersForModel && si != null) {
                 val open = runCatching { agent.tools.github.openPullRequests(EvolutionGuard.SELF_REPO).count { it.head.startsWith(EvolutionGuard.BRANCH_PREFIX) } }.getOrDefault(1)
-                val recentTrouble = store.traces().takeLast(5).sumOf { it.troubleScore }
                 val gate = EvolutionGuard.mayOpenPr(open, store.pending()?.state == PrState.PENDING, startedToday + spent, budget,
                     si.topic, store.rejectedTopics(), maxOf(t.troubleScore, recentTrouble))
                 if (gate == EvolutionGuard.Block.OK) {
@@ -140,13 +159,20 @@ class EvolutionEngine(
             log(EvoTier.INFO, e.message ?: "Bütçe doldu.")
             return e.message ?: "Bütçe doldu."
         } catch (e: Exception) {
-            log(EvoTier.INFO, "Değerlendirme hatası: ${e.message?.take(200)}")
+            // Settings problems (wrong model id, key, credits) are not the session's fault: keep it for a later run.
+            consumed = !isConfigError(e.message.orEmpty())
+            log(EvoTier.INFO, (if (consumed) "Değerlendirme hatası: " else "Ayar hatası (seans sonra yeniden değerlendirilecek): ") + e.message?.take(200))
             return "Hata: ${e.message?.take(120)}"
         } finally {
-            store.updateTrace(t.id) { it.copy(processed = true) }
-            store.bump("reviewed")
+            if (consumed) {
+                store.updateTrace(t.id) { it.copy(processed = true) }
+                store.bump("reviewed")
+            }
         }
     }
+
+    private fun isConfigError(msg: String) =
+        Regex("(?i)(not a valid model|model.*not found|no endpoints|\\((401|402|403|404)\\)|api anahtarı|insufficient credits)").containsMatchIn(msg)
 
     private fun describe(before: AdaptiveRouting, after: AdaptiveRouting): String = buildList {
         if (before.complexityThreshold != after.complexityThreshold) {

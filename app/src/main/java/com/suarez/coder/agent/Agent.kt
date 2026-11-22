@@ -174,6 +174,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         Provider.OPENROUTER -> OpenAiCompatClient("OpenRouter", OpenRouterCatalog.BASE_URL, settings.openrouterKey, ref.model,
             vision = openRouterModels()[ref.model]?.vision == true,
             reasoning = openRouterModels()[ref.model]?.reasoning == true,
+            json = openRouterModels()[ref.model]?.json == true,
             openRouter = true,
             cacheControl = OpenRouterCatalog.needsCacheControl(ref.model),
             extraHeaders = mapOf("X-Title" to "Coder"))
@@ -552,6 +553,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         maxOut: Int? = null,
         thinking: String? = null,
         stable: String? = null,
+        jsonMode: Boolean = false,
     ): ChatMessage.Assistant {
         beforeCall?.invoke()
         checkBudget(history, ui)
@@ -564,6 +566,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             maxOutputTokens = maxOut,
             minimalThinking = thinking == "minimal",
             serviceTier = if (flex) "flex" else null,
+            jsonMode = jsonMode,
         )
         var send = full
         if (useCache && client is GeminiClient) {

@@ -21,6 +21,8 @@ class OpenAiCompatClient(
     private val openRouter: Boolean = false,
     /** The model accepts reasoning.effort (known from OpenRouter's model list). */
     private val reasoning: Boolean = false,
+    /** The model accepts response_format (JSON mode). */
+    private val json: Boolean = false,
     /** Waits between retries of temporary errors; visible for tests. */
     private val backoffMs: List<Long> = BACKOFF_MS,
 ) : LlmClient {
@@ -72,6 +74,7 @@ class OpenAiCompatClient(
             .put("messages", buildMessages(system, history))
         options.maxOutputTokens?.let { body.put("max_tokens", it) }
         if (openRouter) body.put("usage", JSONObject().put("include", true))
+        if (json && options.jsonMode && tools.isEmpty()) body.put("response_format", JSONObject().put("type", "json_object"))
         if (reasoning) OpenRouterCatalog.effortFor(options.thinkingLevel, options.minimalThinking)?.let {
             body.put("reasoning", JSONObject().put("effort", it))
         }
@@ -97,6 +100,10 @@ class OpenAiCompatClient(
         if (res.code == 400 && body.has("reasoning") && errorMessage(res.body).contains("reasoning", ignoreCase = true)) {
             // Listed as supporting reasoning but this provider rejects it: answer without it.
             body.remove("reasoning")
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
+        if (res.code == 400 && body.has("response_format") && errorMessage(res.body).contains("response_format", ignoreCase = true)) {
+            body.remove("response_format")
             res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
         }
         if (res.code !in 200..299) {

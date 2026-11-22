@@ -15,7 +15,7 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
             "sessions teach nothing; then return empty lists and null. Never invent facts that are not in the trace."
 
         fun prompt(t: SessionTrace, stats: String, notes: String, tiers: Set<EvoTier>, coderFiles: List<String>): String = buildString {
-            append("SESSION TRACE\n").append(t.toJson().toString(2)).append("\n\n")
+            append("SESSION TRACE\n").append(t.toJson().toString()).append("\n\n")
             if (stats.isNotBlank()) append("ROUTING STATISTICS (route|model)\n").append(stats).append("\n\n")
             if (notes.isNotBlank()) append("CURRENT LESSONS FOR THIS REPO\n").append(notes.take(4_000)).append("\n\n")
             append("Return exactly this JSON shape:\n")
@@ -91,8 +91,11 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
         }
     }
 
-    suspend fun reflect(t: SessionTrace, stats: String, notes: String, tiers: Set<EvoTier>, coderFiles: List<String>): EvolutionReport? =
-        parse(ask(SYSTEM, prompt(t, stats, notes, tiers, coderFiles), 1_500))
+    /** Returns the report (null when the answer had no usable JSON) and the raw answer for the log. */
+    suspend fun reflect(t: SessionTrace, stats: String, notes: String, tiers: Set<EvoTier>, coderFiles: List<String>): Pair<EvolutionReport?, String> {
+        val raw = ask(SYSTEM, prompt(t, stats, notes, tiers, coderFiles), 4_000)
+        return parse(raw) to raw
+    }
 
     /** Above the limit the model merges duplicates and drops stale rules; a hard cut guarantees the limit. */
     suspend fun pruneIfNeeded(notes: String): String {
@@ -100,7 +103,7 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
         val merged = runCatching {
             ask("You compress a list of project lessons. Merge duplicates, drop outdated or generic ones, keep concrete rules. " +
                 "Reply with the list only: the heading line, then one '- ' bullet per lesson.",
-                "Keep it under ${EvolutionGuard.NOTES_LIMIT - 500} characters.\n\n$notes", 1_200).trim()
+                "Keep it under ${EvolutionGuard.NOTES_LIMIT - 500} characters.\n\n$notes", 3_000).trim()
         }.getOrNull()?.takeIf { it.contains("- ") } ?: notes
         val withHeading = if (merged.startsWith("#")) merged else "$LESSONS_HEADING\n$merged"
         return EvolutionGuard.hardPrune(withHeading)

@@ -209,4 +209,29 @@ class OpenRouterTest {
         val old = com.suarez.coder.llm.MessageJson.fromJson(com.suarez.coder.llm.MessageJson.toJson(listOf(rec.copy(actualUsd = null)))).single()
         assertEquals(null, (old as ChatMessage.UsageRecord).actualUsd)
     }
+
+    @Test fun jsonModeIsSentOnlyWhenSupportedAndDroppedIfRejected() = withServer { server ->
+        repeat(3) { server.enqueue(MockResponse().setBody(okBody())) }
+        fun c(json: Boolean) = OpenAiCompatClient("OpenRouter", server.url("/v1").toString().trimEnd('/'), "k", "m",
+            openRouter = true, json = json, backoffMs = listOf(1L))
+        c(true).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(jsonMode = true))
+        assertEquals("json_object", JSONObject(server.takeRequest().body.readUtf8()).getJSONObject("response_format").getString("type"))
+        c(false).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(jsonMode = true))
+        assertFalse(JSONObject(server.takeRequest().body.readUtf8()).has("response_format"))
+        c(true).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions())
+        assertFalse(JSONObject(server.takeRequest().body.readUtf8()).has("response_format"))
+
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"response_format is not supported by this provider"}}"""))
+        server.enqueue(MockResponse().setBody(okBody()))
+        assertEquals("ok", c(true).complete("S", listOf(ChatMessage.User("hi")), emptyList(), CallOptions(jsonMode = true)).message.text)
+        assertTrue(JSONObject(server.takeRequest().body.readUtf8()).has("response_format"))
+        assertFalse(JSONObject(server.takeRequest().body.readUtf8()).has("response_format"))
+    }
+
+    @Test fun jsonCapabilityFromModelList() {
+        val list = OpenRouterCatalog.parse("""{"data":[{"id":"a/j","supported_parameters":["tools","response_format"]},
+            {"id":"b/s","supported_parameters":["structured_outputs"]},{"id":"c/n","supported_parameters":["tools"]}]}""")
+        assertEquals(listOf(true, true, false), list.map { it.json })
+        assertTrue(OpenRouterCatalog.fromMeta(OpenRouterCatalog.toMeta(list)).getValue("a/j").json)
+    }
 }

@@ -101,6 +101,19 @@ fun CoderTheme(mode: String, content: @Composable () -> Unit) {
         oled -> OledCoder
         else -> DarkCoder
     }
+    // Status/navigation bar icons follow the APP theme, not the phone's: dark theme on a light-mode phone
+    // otherwise gets dark icons on a black bar (unreadable).
+    val view = androidx.compose.ui.platform.LocalView.current
+    if (!view.isInEditMode) {
+        androidx.compose.runtime.SideEffect {
+            (view.context as? android.app.Activity)?.window?.let { w ->
+                androidx.core.view.WindowCompat.getInsetsController(w, view).apply {
+                    isAppearanceLightStatusBars = !dark
+                    isAppearanceLightNavigationBars = !dark
+                }
+            }
+        }
+    }
     CompositionLocalProvider(LocalCoderColors provides colors) {
         MaterialTheme(colorScheme = scheme, content = content)
     }

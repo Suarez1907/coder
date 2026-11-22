@@ -107,6 +107,7 @@ private fun MonoSwitch(title: String, subtitle: String?, checked: Boolean, enabl
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun EvolutionPage(vm: ChatViewModel) {
     val s = vm.settings
@@ -129,9 +130,30 @@ fun EvolutionPage(vm: ChatViewModel) {
             MonoSwitch("Sadece Wi-Fi'de çalıştır", null, wifi, enabled) { wifi = it; s.evoWifiOnly = it }
             HorizontalDivider(color = Mono2.line)
             var model by remember { mutableStateOf(s.evoModel) }
+            val known = remember { vm.agent.openRouterModels() }
+            val valid = known.isEmpty() || model.trim().removePrefix("openrouter/") in known
             OutlinedTextField(model, { model = it; s.evoModel = it.ifBlank { "nvidia/nemotron-3-ultra" } }, singleLine = true, textStyle = Mono.body,
-                label = { Text("Evrim modeli (OpenRouter)") }, modifier = Modifier.fillMaxWidth(),
-                supportingText = { Text("Tüm evrim rolleri yalnızca bu modeli kullanır; sohbet modellerinden bağımsızdır.") })
+                label = { Text("Evrim modeli (OpenRouter)") }, modifier = Modifier.fillMaxWidth(), isError = !valid,
+                supportingText = {
+                    Text(when {
+                        !valid -> "Bu kimlik OpenRouter listesinde yok; aşağıdan seçin."
+                        known.isEmpty() -> "Liste yok: Sağlayıcılar > OpenRouter > Modelleri getir ile doğrulanır."
+                        else -> "Tüm evrim rolleri yalnızca bu modeli kullanır; sohbet modellerinden bağımsızdır."
+                    })
+                })
+            // Suggestions from the fetched OpenRouter list (Nemotron first), so a changed slug is one tap away.
+            val suggestions = remember(known) {
+                known.keys.filter { it.contains("nemotron", true) }.sortedByDescending { it.contains("ultra", true) }.take(6)
+            }
+            if (suggestions.isNotEmpty() && (!valid || suggestions.none { it == model })) {
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    suggestions.forEach { id ->
+                        OutlinedButton(onClick = { model = id; s.evoModel = id }, border = BorderStroke(1.dp, Mono2.line)) {
+                            Text(id, style = Mono.tiny, color = Mono2.strong)
+                        }
+                    }
+                }
+            }
             var budget by remember { mutableStateOf(s.evoDailyBudget.toString()) }
             OutlinedTextField(budget, { budget = it; it.replace(',', '.').toDoubleOrNull()?.let { v -> s.evoDailyBudget = v } }, singleLine = true,
                 textStyle = Mono.body, label = { Text("Günlük evrim bütçesi (USD)") }, modifier = Modifier.fillMaxWidth(),

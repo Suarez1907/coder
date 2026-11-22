@@ -11,6 +11,8 @@ data class OpenRouterModel(
     val tools: Boolean,
     /** Accepts reasoning.effort; unknown models get no reasoning field (avoids 400 errors). */
     val reasoning: Boolean = false,
+    /** Accepts response_format (JSON mode). */
+    val json: Boolean = false,
 )
 
 /** Parses OpenRouter's GET /models and stores the bits the app needs. */
@@ -36,13 +38,14 @@ object OpenRouterCatalog {
             val paramSet = params?.let { p -> (0 until p.length()).map { p.optString(it) }.toSet() }
             val tools = paramSet == null || "tools" in paramSet
             val reasoning = paramSet != null && ("reasoning" in paramSet || "include_reasoning" in paramSet)
-            OpenRouterModel(id, Price(input, output, cached), vision, tools, reasoning)
+            val json = paramSet != null && ("response_format" in paramSet || "structured_outputs" in paramSet)
+            OpenRouterModel(id, Price(input, output, cached), vision, tools, reasoning, json)
         }
     }
 
     fun toMeta(models: List<OpenRouterModel>): String = JSONObject().also { root ->
         models.forEach { m ->
-            root.put(m.id, JSONObject().put("i", m.price.input).put("o", m.price.output).put("c", m.price.cachedInput).put("v", m.vision).put("r", m.reasoning))
+            root.put(m.id, JSONObject().put("i", m.price.input).put("o", m.price.output).put("c", m.price.cachedInput).put("v", m.vision).put("r", m.reasoning).put("j", m.json))
         }
     }.toString()
 
@@ -50,7 +53,7 @@ object OpenRouterCatalog {
         val root = JSONObject(json)
         root.keys().asSequence().associateWith { id ->
             val o = root.getJSONObject(id)
-            OpenRouterModel(id, Price(o.optDouble("i", 0.0), o.optDouble("o", 0.0), o.optDouble("c", 0.0)), o.optBoolean("v"), true, o.optBoolean("r"))
+            OpenRouterModel(id, Price(o.optDouble("i", 0.0), o.optDouble("o", 0.0), o.optDouble("c", 0.0)), o.optBoolean("v"), true, o.optBoolean("r"), o.optBoolean("j"))
         }
     }.getOrDefault(emptyMap())
 
