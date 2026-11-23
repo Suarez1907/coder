@@ -344,6 +344,11 @@ private fun ArchitectPage(vm: ChatViewModel) {
             info = "Mobil ağ ve hız sınırları için 2 önerilir.") { s.orchMaxParallel = it }
         NumberSetting("Tam mod: en fazla inceleme turu", s.orchMaxReviewRounds,
             info = "İnceleyici'nin açabileceği düzeltme turu; sınırda durup size sorar.") { s.orchMaxReviewRounds = it }
+        SwitchSetting("Tam mod: Değerlendirici", "Uygulamayı gerçekten çalıştırıp sınar", s.evaluatorEnabled,
+            "Web projelerinde sözleşmedeki (kabul ölçütleri) her maddeyi GitHub Actions'ta Playwright ile tarayıcıda dener; bir madde geçmez " +
+                "veya konsolda hata varsa düzeltme turu açar. Android projelerinde CI testleri esas alınır. Daha pahalıdır: test betiği yazma çağrısı + CI dakikaları.") {
+            s.evaluatorEnabled = it
+        }
     }
 
     Group {

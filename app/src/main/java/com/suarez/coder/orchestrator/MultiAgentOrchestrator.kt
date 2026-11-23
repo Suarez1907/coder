@@ -110,6 +110,36 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                     continue
                 }
             }
+            // Evaluator: the running app against the contract (web: Playwright in GitHub Actions). Failures go back to
+            // the reviewer as evidence and become fix tickets, within the same round limit.
+            if (settings.evaluatorEnabled && changes.isNotEmpty()) {
+                val from = history.size
+                val ev = try {
+                    agent.budgetDeferred = true
+                    runCatching { Evaluator(agent).evaluate(history, ui, plan) }.getOrElse { e ->
+                        if (e is CancellationException) throw e
+                        Evaluator.Result(emptyList(), emptyList(), "Değerlendirme hatası: ${e.message?.take(200)}")
+                    }
+                } finally {
+                    agent.budgetDeferred = false
+                }
+                plan = save(plan.addCost("Değerlendirici", costSince(history, from)), ui)
+                if (ev != null) {
+                    history += ChatMessage.Notice(
+                        "🧪 Değerlendirici: " + (if (ev.criteria.isEmpty()) "ölçülemedi" else ev.summary),
+                        (ev.report() + "\n" + (ev.outputMarker ?: "")).trim(),
+                        isError = ev.criteria.isNotEmpty() && !ev.passed,
+                    )
+                    ui.update()
+                    if (ev.criteria.isNotEmpty() && !ev.passed) {
+                        if (plan.reviewRound >= maxRounds) {
+                            return save(plan.copy(state = PlanState.PAUSED, note = "Değerlendirici: ${ev.summary}; inceleme turu sınırı doldu."), ui)
+                        }
+                        ciReport = ev.report()
+                        continue
+                    }
+                }
+            }
             history += ChatMessage.Assistant("✅ Çoklu ajan planı tamamlandı: ${plan.tasks.size} alt görev, ${plan.reviewRound} düzeltme turu.\n\n" +
                 plan.roleCosts.entries.joinToString("\n") { "${it.key}: ${agent.money(it.value)}" }, model = "coder")
             return save(plan.copy(state = PlanState.DONE, note = null), ui)

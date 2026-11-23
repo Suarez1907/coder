@@ -202,7 +202,10 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 MarkdownText(m.text)
                                 ApkActions(vm, m.text)
                             }
-                            is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
+                            is ChatMessage.Notice -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                NoticeItem(m.text, m.detail, m.isError)
+                                m.detail?.let { CloudResultCards(vm, it) }
+                            }
                             is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi", m.text, false)
                             is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
                             is ChatMessage.ContextBlock -> NoticeItem("📎 Bağlam: ${m.label}", m.text.take(20_000), false)

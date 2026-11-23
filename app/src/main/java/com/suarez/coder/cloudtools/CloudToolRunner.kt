@@ -90,7 +90,8 @@ class CloudToolRunner(
         return "${tool.file} ${if (current == null) "kuruldu" else "güncellendi"} ($b)."
     }
 
-    suspend fun run(repo: String, tool: String, scriptPath: String, outputDir: String?, branch: String?, blenderVersion: String?): String {
+    suspend fun run(repo: String, tool: String, scriptPath: String, outputDir: String?, branch: String?, blenderVersion: String?,
+                    extraInputs: Map<String, String> = emptyMap()): String {
         val t = CloudWorkflowTemplates.forTool(tool) ?: throw ToolException("Bilinmeyen bulut aracı: $tool (blender veya toolbox).")
         val script = cleanPath(scriptPath) ?: throw ToolException("Geçersiz script_path: $scriptPath (repo içi göreli yol olmalı).")
         val out = outputDir?.let { cleanPath(it) } ?: "coder-out"
@@ -104,6 +105,7 @@ class CloudToolRunner(
 
         val inputs = JSONObject().put("script_path", script).put("output_dir", out)
         if (t == CloudWorkflowTemplates.BLENDER && !blenderVersion.isNullOrBlank()) inputs.put("blender_version", blenderVersion)
+        extraInputs.forEach { (k, v) -> inputs.put(k, v) }
         val since = System.currentTimeMillis()
         onStatus("${t.title} bulutta başlatılıyor")
         github.dispatchWorkflow(repo, t.file, ref, inputs)

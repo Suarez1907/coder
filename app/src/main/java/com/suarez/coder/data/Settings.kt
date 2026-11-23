@@ -360,6 +360,11 @@ class Settings(context: Context) {
         get() = bool("evo_wifi", false)
         set(v) = putBool("evo_wifi", v)
 
+    /** Full orchestrator: an evaluator tests the running app (web: Playwright in GitHub Actions) against the contract. */
+    var evaluatorEnabled: Boolean
+        get() = bool("evaluator_enabled", false)
+        set(v) = putBool("evaluator_enabled", v)
+
     /** OrchestratorMode name; OFF keeps the normal flow untouched. */
     var orchestratorMode: String
         get() = str("orchestrator_mode", "OFF")
