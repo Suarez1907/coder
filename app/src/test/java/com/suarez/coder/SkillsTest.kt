@@ -88,7 +88,7 @@ class SkillCatalogTest {
         val catalog = r.catalog("me/app")!!
         assertTrue(catalog.contains("- blender-3d: Headless Blender"))
         assertFalse(catalog.contains("read_factory_settings")) // body never in the prompt
-        assertEquals(2, catalog.lines().size) // header + one skill
+        assertEquals(1 + BuiltinSkills.ALL.size, catalog.lines().size) // header + one line per skill
         val loaded = r.load("blender-3d", "me/app")
         assertTrue(loaded.contains("read_factory_settings(use_empty=True)"))
         assertTrue(loaded.contains("run_cloud_tool(tool=\"blender\""))
@@ -126,7 +126,10 @@ class SkillCatalogTest {
         r1.deleteGlobal("blender-3d")
         r1.saveGlobal(SkillParser.parse("---\nname: ffmpeg-gif\ndescription: Videodan GIF\n---\nffmpeg -i ...")!!)
         val r2 = SkillRepository(dir, { null }, { _, _ -> null })
-        assertEquals(listOf("ffmpeg-gif"), r2.globals().map { it.name }) // deleted builtin is not re-seeded
+        val names = r2.globals().map { it.name }
+        assertTrue("ffmpeg-gif" in names)
+        assertFalse("blender-3d" in names) // a deleted builtin is not re-seeded
+        assertTrue("systematic-debugging" in names)
         assertNull(SkillRepository.catalogText(emptyList()))
     }
 }

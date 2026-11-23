@@ -30,7 +30,19 @@ class SkillImporter(
     /** owner/repo, an optional ref and an optional path inside it. */
     data class Ref(val repo: String, val ref: String?, val path: String?)
 
+    /** A curated source shown in the import screen (researched; licenses checked). */
+    data class Source(val repo: String, val note: String)
+
     companion object {
+        /** Skill collections that fit Coder (instructions, not local scripts). Each is scanned only when tapped. */
+        val RECOMMENDED = listOf(
+            Source("obra/superpowers", "MIT · hata ayıklama, doğrulama, test önce, plan, kod incelemesi alma/verme"),
+            Source("addyosmani/agent-skills", "MIT · inceleme, güvenlik, CI/CD, performans, API tasarımı, sadeleştirme"),
+            Source("new-silvermoon/awesome-android-agent-skills", "Apache-2.0 · Compose, ViewModel, coroutine, Gradle, test"),
+            Source("skydoves/compose-performance-skills", "Apache-2.0 · Compose performansı: stabilite, listeler, efektler, R8"),
+            Source("anthropics/skills", "Apache-2.0 · skill-creator, frontend-design (belge skill'leri betik ister)"),
+        )
+
         const val MAX_SKILLS_PER_REPO = 40
         const val MAX_FILE_BYTES = 100_000L
         const val MAX_TOTAL_BYTES = 300_000L
@@ -103,10 +115,10 @@ class SkillImporter(
 
     /** Reads SKILL.md and its files; the result is a global skill that remembers where it came from. */
     suspend fun import(c: Candidate): Skill? {
-        val text = read(c.repo, c.path, c.ref) ?: return null
+        val text = SkillSafety.clean(read(c.repo, c.path, c.ref) ?: return null)
         val fallback = c.folder.substringAfterLast('/').ifBlank { c.repo.substringAfter('/') }
         val s = SkillParser.parse(text, fallback, Skill.Source.GLOBAL) ?: return null
-        val res = c.files.mapNotNull { f -> read(c.repo, f.path, c.ref)?.let { c.relative(f.path) to it } }.toMap()
+        val res = c.files.mapNotNull { f -> read(c.repo, f.path, c.ref)?.let { c.relative(f.path) to SkillSafety.clean(it) } }.toMap()
         return s.copy(origin = c.origin, resources = res)
     }
 

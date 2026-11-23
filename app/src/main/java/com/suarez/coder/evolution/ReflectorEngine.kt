@@ -21,11 +21,14 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
             append("Return exactly this JSON shape:\n")
             append("{\"lessons\": [\"...\"], \"routing\": {\"complexity_threshold\": null, \"local_hints\": [{\"pattern\": \"...\", \"route\": \"SIMPLE|QUESTION|COMPLEX\"}], ")
             append("\"escalation_notes\": [{\"task_type\": \"SIMPLE_EDIT\", \"model\": \"...\", \"note\": \"...\"}]}, ")
-            append("\"self_improvement\": null}\n\nRules:\n")
+            append("\"self_improvement\": null, \"skill_proposal\": null}\n\nRules:\n")
             if (EvoTier.MEMORY in tiers) {
                 append("- lessons: 0-3 short, concrete, reusable facts about the TARGET project that would have prevented an error in this ")
                 append("trace (e.g. a build requirement, a file convention). Not generic advice. Do not repeat CURRENT LESSONS.\n")
-            } else append("- lessons: always [].\n")
+                append("- skill_proposal: only if the trace shows a multi-step procedure for THIS repo that will clearly recur ")
+                append("(e.g. releasing, adding a level, regenerating assets) and is not already a lesson. Then return ")
+                append("{\"name\": \"kebab-case\", \"description\": \"one line: what and when\", \"body\": \"numbered steps, < 4000 chars\"}. Otherwise null.\n")
+            } else append("- lessons: always []. skill_proposal: always null.\n")
             if (EvoTier.ROUTING in tiers) {
                 append("- routing: only when the statistics or the trace show a clear pattern. complexity_threshold must be between 1.0 and 2.2 ")
                 append("or null. local_hints: short phrases (3-40 chars) from requests that should always take that route. escalation_notes: ")
@@ -76,6 +79,11 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
                 hints = hints,
                 escalationNotes = notes,
                 selfImprovement = si,
+                skillProposal = o.optJSONObject("skill_proposal")?.let { p ->
+                    com.suarez.coder.skills.SkillParser.normalizeName(p.optString("name")).takeIf { com.suarez.coder.skills.SkillParser.isValidName(it) }?.let { n ->
+                        SkillProposal(n, p.optString("description").trim().lines().first().take(160), p.optString("body").trim())
+                    }
+                }?.takeIf { it.description.length >= 10 && it.body.length in 80..6_000 },
             )
         }
 

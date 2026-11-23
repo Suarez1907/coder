@@ -107,6 +107,7 @@ fun SkillsPage(vm: ChatViewModel) {
     var editing by remember { mutableStateOf<Pair<String, String>?>(null) } // (markdown, fallback name)
     var deleting by remember { mutableStateOf<Skill?>(null) }
     var importing by remember { mutableStateOf(false) }
+    var warnings by remember { mutableStateOf<Pair<String, List<com.suarez.coder.skills.SkillSafety.Finding>>?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         MonoCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -127,12 +128,14 @@ fun SkillsPage(vm: ChatViewModel) {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 3.dp)) {
                                 Tag(s.source.label)
                                 s.workflow?.let { Tag("bulut: $it") }
-                                if (s.origin != null) Tag("GitHub")
+                                if (s.origin?.startsWith("evolution:") == true) Tag("öz-gelişim önerisi") else if (s.origin != null) Tag("GitHub")
                                 if (s.hasScripts) Tag("betik içerir")
+                                val findings = remember(s) { if (s.origin != null) com.suarez.coder.skills.SkillSafety.scan(s) else emptyList() }
+                                if (findings.isNotEmpty()) Box(Modifier.clickable { warnings = s.name to findings }) { Tag("uyarı ${findings.size}") }
                             }
                             Text(s.description, style = MaterialTheme.typography.bodySmall, color = weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
-                        if (s.origin != null) IconButton(onClick = { vm.updateSkill(s.name) }) { Icon(Icons.Outlined.Refresh, "Kaynaktan güncelle", tint = weak) }
+                        if (s.origin != null && !s.origin.startsWith("evolution:")) IconButton(onClick = { vm.updateSkill(s.name) }) { Icon(Icons.Outlined.Refresh, "Kaynaktan güncelle", tint = weak) }
                         if (s.source != Skill.Source.REPO) {
                             IconButton(onClick = { editing = s.toMarkdown() to s.name }) { Icon(Icons.Outlined.Edit, "Düzenle", tint = weak) }
                             IconButton(onClick = { deleting = s }) { Icon(Icons.Outlined.Delete, "Sil", tint = weak) }
@@ -187,6 +190,23 @@ fun SkillsPage(vm: ChatViewModel) {
         )
     }
     if (importing) ImportDialog(vm) { importing = false; vm.clearCandidates() }
+    warnings?.let { (name, list) ->
+        AlertDialog(
+            onDismissRequest = { warnings = null },
+            title = { Text("/$name: güvenlik uyarıları") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Bu yetenek ajana talimat olarak verilir. Aşağıdaki satırları okuyup güveniyorsanız açın; değilse silin.",
+                        style = MaterialTheme.typography.bodySmall, color = weak)
+                    list.forEach { f ->
+                        Text("${f.file}${if (f.line > 0) ":" + f.line else ""} · ${f.reason}", style = Mono.small, color = strong)
+                        if (f.excerpt.isNotBlank()) Text(f.excerpt, style = Mono.tiny, color = weak)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { warnings = null }) { Text("Kapat") } },
+        )
+    }
     deleting?.let { s ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -230,6 +250,14 @@ private fun ImportDialog(vm: ChatViewModel, onDismiss: () -> Unit) {
                             border = BorderStroke(1.dp, line)) { Text("Tara", color = strong) }
                     }
                     Spacer(Modifier.size(12.dp))
+                    Text("Önerilen kaynaklar", style = MaterialTheme.typography.titleSmall, color = strong)
+                    SkillImporter.RECOMMENDED.forEach { r ->
+                        Column(Modifier.fillMaxWidth().clickable(enabled = vm.importBusy == null) { vm.scanForSkills(r.repo) }.padding(vertical = 6.dp)) {
+                            Text(r.repo, style = Mono.small, color = strong)
+                            Text(r.note, style = MaterialTheme.typography.bodySmall, color = weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    Spacer(Modifier.size(8.dp))
                     Text("Yıldızlı repolar", style = MaterialTheme.typography.titleSmall, color = strong)
                     OutlinedTextField(filter, { filter = it }, singleLine = true, placeholder = { Text("Filtrele") },
                         textStyle = Mono.small, modifier = Modifier.fillMaxWidth())

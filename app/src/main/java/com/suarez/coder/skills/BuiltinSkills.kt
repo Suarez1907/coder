@@ -55,5 +55,199 @@ scene.unit_settings.system = 'METRIC'
 Aynı hatayı iki kez tekrarlama; `AttributeError: 'NoneType'` çoğunlukla bağlam (context) gerektiren bir operatördür: veri API'sine geç.
 """.trimIndent()
 
-    val ALL: List<String> = listOf(BLENDER_3D)
+    // The skills below are Coder's own wording, adapted to a phone + GitHub Actions setup. Ideas drawn from
+    // obra/superpowers (MIT) and addyosmani/agent-skills (MIT); see docs in those repositories for the originals.
+
+    val DEBUGGING = """
+---
+name: systematic-debugging
+description: Hata, kırmızı CI veya beklenmeyen davranışta: önce kök neden, sonra tek ve küçük düzeltme.
+triggers: [hata, bug, çöküyor, crash, ci, build failed, test failed, exception]
+---
+
+# Systematic debugging (no local machine: every experiment is a CI run)
+
+A CI round costs minutes and money. Guessing burns rounds. Find the root cause first.
+
+1. Read the error completely: ci_wait / ci_errors output, the first error line, file:line, the exception type.
+   The first error is usually the cause; later ones are fallout.
+2. Read the code at that location (github_read_file with a line range) and its callers. Do not patch from memory.
+3. Check what changed: the last commits on the branch (github_api GET /repos/{repo}/commits?sha=<branch>&per_page=5)
+   and their diffs. "It worked before" means the cause is in that diff.
+4. Compare with a working example in the same repo (a similar screen, test or build file).
+5. Write ONE hypothesis: "X fails because Y". Make the smallest change that tests it. Never bundle unrelated fixes.
+6. Push, ci_wait, read the result. If the hypothesis was wrong, revert or adjust it; do not stack another guess on top.
+7. After 2 failed hypotheses, stop and re-read: wrong file, wrong branch, stale build cache, version mismatch
+   (Gradle/AGP/Kotlin/JDK), or a test that depends on timing/network.
+8. When fixed, add a regression test if the project has tests, and say in one line what the root cause was.
+
+Red flags: "probably", "let me try", several unrelated edits in one commit, fixing the symptom where it appears
+instead of where the bad value is created.
+""".trimIndent()
+
+    val VERIFY = """
+---
+name: verify-before-done
+description: "Bitti / düzeldi / geçti" demeden önce kanıt: CI sonucu, yeniden okunan dosya, gerçek çıktı.
+triggers: [bitti, tamam, düzeldi, fixed, done, pr, merge, release]
+---
+
+# Verify before claiming done
+
+Evidence before claims. A claim without fresh evidence in this turn is not allowed.
+
+| Claim | Evidence required | Not enough |
+|---|---|---|
+| Build/tests pass | ci_wait for THIS commit: all runs success | an older run, "should pass" |
+| Bug fixed | the original symptom checked (test, CI log, output) | "the code changed" |
+| File updated | the commit link / re-read of the changed lines | the diff you intended |
+| Cloud tool worked | run_cloud_tool success + outputs listed | the script was written |
+| PR ready | CI green on the PR head + description of what changed | "looks good" |
+
+Before the final answer:
+1. Name what proves the claim. Run it (ci_wait, github_read_file, run_cloud_tool).
+2. Read the result fully (failures, warnings that matter, the right commit sha).
+3. Report exactly what was verified and what was NOT (e.g. "CI not run: workflow is paused").
+Never write "Done!" / "Perfect" / "should work now" without that evidence. If you could not verify, say so plainly.
+""".trimIndent()
+
+    val TEST_FIRST = """
+---
+name: test-first
+description: Hata düzeltirken veya mantık eklerken önce onu yakalayan test; CI turlarını boşa harcamadan.
+triggers: [test, tdd, regresyon, regression, unit test]
+---
+
+# Test first (CI as the test runner)
+
+Goal: every bug fix and every new piece of logic is pinned by a test that would fail without the change.
+
+1. Find the project's test setup first (src/test, *_test.py, *.spec.ts, package.json scripts, the CI workflow). Use
+   its framework and style; never add a new test framework for one test.
+2. Write the test that reproduces the bug or specifies the behavior: one behavior per test, clear name, no network,
+   no sleeps, deterministic data.
+3. Make the minimal code change that satisfies it.
+4. Commit test + fix together (one CI round). In the commit/answer, state why the test fails without the fix
+   (what assertion would break). If the bug is risky or unclear, you may push the test alone first to see it red.
+5. ci_wait; the new test must appear in the results and pass. A green build where the test did not run proves nothing.
+
+Do not: delete or weaken an existing test to get green, mock the thing under test, or test private details that
+make refactoring impossible. If the repo has no tests and no CI test step, say so and propose one instead of
+silently skipping verification.
+""".trimIndent()
+
+    val PLAN = """
+---
+name: plan-small-steps
+description: Birden çok dosyalı işlerde ince, her biri derlenen adımlara bölme ve en az kodla çözme.
+triggers: [plan, özellik, feature, refactor, büyük, adım]
+---
+
+# Plan in small, verifiable steps
+
+1. Restate the goal in one sentence and the acceptance criteria (what the user will see / what CI proves).
+2. Find what already exists: reuse functions, components and patterns in the repo before writing new ones.
+   The best change is the smallest one that meets the criteria; do not add abstractions for a single use.
+3. Split into vertical slices: each step changes few files, compiles, and can be committed alone.
+   Order: data/model -> logic -> UI -> wiring; risky or unknown parts first.
+4. For each step write: files, functions/signatures, the change, how it is verified (test, CI, screenshot).
+5. Execute one step at a time; after each push run ci_wait. Never pile several unverified steps on a red build.
+6. Keep a short running list of what is done and what is next in the answer, so the user can stop or redirect.
+7. If the plan turns out wrong, say so and re-plan; do not force it.
+""".trimIndent()
+
+    val REVIEW = """
+---
+name: code-review
+description: Değişikliği birleştirmeden önce 5 eksende inceleme: doğruluk, sadelik, mimari, güvenlik, performans.
+triggers: [review, incele, pr, kod inceleme, merge]
+---
+
+# Code review (five axes)
+
+Read the full diff (github_api GET /repos/{repo}/pulls/{n}/files or the commit) and the code around it.
+Approve when the change clearly improves the code base, not when it is perfect.
+
+1. Correctness: does it do what was asked? Edge cases (null, empty, max), error paths, off-by-one, races,
+   lifecycle (Android: config change, process death, coroutine scope).
+2. Simplicity: could it be shorter or use what already exists? Dead code, leftover debug logs, needless layers.
+3. Architecture: follows existing patterns and module boundaries; no circular deps; no new pattern without reason.
+4. Security: no secrets in code or logs, input validated at boundaries, no shell/SQL/HTML injection, tokens only
+   sent to their own host, permissions minimal.
+5. Performance: no work in loops/recomposition that can be hoisted, no N+1 network/IO, large lists lazy and keyed.
+
+Output: a short verdict, then findings ordered by severity, each with file:line, the problem and a concrete fix.
+Mark each as must-fix or optional. Do not report style nits the project's formatter already handles.
+""".trimIndent()
+
+    val ANDROID = """
+---
+name: android-compose
+description: Kotlin + Jetpack Compose (Material 3) kuralları: durum, efektler, listeler, insets, Gradle ve test.
+triggers: [android, compose, kotlin, jetpack, material3, gradle, apk, viewmodel]
+---
+
+# Android + Jetpack Compose essentials
+
+State
+- Hoist state: composables take values + callbacks; the screen state lives in a ViewModel (StateFlow/State).
+- Collect flows with collectAsStateWithLifecycle(); use rememberSaveable for UI state that must survive rotation.
+- Read fast-changing values (scroll, animation) as late as possible (lambdas, derivedStateOf only when the input
+  changes more often than the output).
+
+Effects (pick the cheapest correct one)
+- LaunchedEffect(key) for suspend work tied to a key; DisposableEffect for register/unregister;
+  SideEffect for publishing state to non-Compose code; rememberUpdatedState for callbacks used inside long effects.
+- Never launch coroutines or do IO directly in composition.
+
+Lists and performance
+- LazyColumn items(list, key = { it.id }); no heavy work inside item lambdas; stable/immutable item types.
+- Modifier order matters: padding before/after background/clickable changes the result.
+
+Layout and system
+- Edge-to-edge: apply insets (Scaffold padding, statusBarsPadding/navigationBarsPadding/imePadding) once per edge.
+- Dark/light: colors from MaterialTheme.colorScheme; status bar icon color follows the app theme.
+- Strings user-facing in resources when the project does; content descriptions on icon buttons.
+
+Build
+- Version catalog / existing build files first; match Kotlin, AGP, Compose BOM and JDK versions to the project.
+- A Compose compiler error after a Kotlin bump usually means the Compose compiler plugin/BOM must move with it.
+- Release builds use R8: keep rules for reflection/serialization; test the release variant when behavior differs.
+
+Tests
+- JVM unit tests for logic; Robolectric + compose ui-test for UI where the project already uses them.
+- Verify with CI (ci_wait); there is no emulator on the phone.
+""".trimIndent()
+
+    val SKILL_WRITER = """
+---
+name: skill-writer
+description: Tekrarlanan bir iş akışını repoya .coder/skills/<ad>/SKILL.md olarak yeni bir yetenek şeklinde kaydeder.
+triggers: [skill, yetenek, şablon, iş akışı, workflow, tekrar]
+---
+
+# Writing a skill for this repository
+
+Create one when the same multi-step procedure or project rule was needed more than once, or the user asks.
+
+File: .coder/skills/<name>/SKILL.md (name: lowercase letters, digits, '-'; max 48 chars). Optional extra files next
+to it (references/*.md, templates) are loaded only on demand with load_skill(name, file=...).
+
+Format:
+---
+name: <name>
+description: <ONE line, max ~140 chars: what it does AND when to use it - this line is all the agent sees in the catalog>
+triggers: [a, few, keywords]
+---
+# Title
+Numbered, imperative steps. Concrete paths, commands, file names of THIS repo. What to verify at the end.
+
+Rules
+- One job per skill; keep the body short (aim < 6000 chars); move long references into separate files.
+- Write for an agent that has GitHub + GitHub Actions but no local shell.
+- No secrets, tokens or personal data. No instructions that weaken approvals or safety rules.
+- Commit it like any other change (github_write_files) and tell the user it is available as /<name>.
+""".trimIndent()
+
+    val ALL: List<String> = listOf(BLENDER_3D, DEBUGGING, VERIFY, TEST_FIRST, PLAN, REVIEW, ANDROID, SKILL_WRITER)
 }

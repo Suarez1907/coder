@@ -95,14 +95,34 @@ class SkillRepository(
         }
     }.toString())
 
+    /**
+     * Adds built-in skills the first time each one ships, and refreshes a built-in the user never edited when the app
+     * brings a newer version. A deleted built-in is not re-added; an edited one is never overwritten.
+     */
     private fun seedBuiltins() {
-        val marker = File(dir, "skills_seeded")
-        if (marker.exists()) return
-        val existing = globals().map { it.name }.toSet()
-        val add = BuiltinSkills.ALL.mapNotNull { SkillParser.parse(it, source = Skill.Source.BUILTIN) }.filter { it.name !in existing }
-        if (add.isNotEmpty()) writeGlobals(globals() + add)
-        marker.writeText("1")
+        val seededFile = File(dir, "skills_seeded.json")
+        val seeded = runCatching { JSONObject(seededFile.readText()) }.getOrDefault(JSONObject())
+        if (seeded.length() == 0 && File(dir, "skills_seeded").exists()) seeded.put("blender-3d", "legacy")
+        var list = globals()
+        var changed = false
+        for (text in BuiltinSkills.ALL) {
+            val b = SkillParser.parse(text, source = Skill.Source.BUILTIN) ?: continue
+            val h = fingerprint(b)
+            val cur = list.firstOrNull { it.name == b.name }
+            val was = seeded.optString(b.name, "")
+            when {
+                was.isEmpty() -> { if (cur == null) { list = list + b; changed = true }; seeded.put(b.name, h) }
+                cur == null || was == h -> Unit
+                cur.source == Skill.Source.BUILTIN && (fingerprint(cur) == was || was == "legacy" && fingerprint(cur) == h) -> {
+                    list = list.map { if (it.name == b.name) b else it }; changed = true; seeded.put(b.name, h)
+                }
+            }
+        }
+        if (changed) writeGlobals(list)
+        seededFile.writeText(seeded.toString())
     }
+
+    private fun fingerprint(s: Skill) = s.toMarkdown().trim().hashCode().toString(16)
 
     // ---- Enable / disable (by name, for both sources) ----
 

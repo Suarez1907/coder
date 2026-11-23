@@ -107,6 +107,9 @@ data class RouteStat(val runs: Int = 0, val successes: Int = 0, val costUsd: Dou
     val avgCost get() = if (runs == 0) 0.0 else costUsd / runs
 }
 
+/** A reusable workflow the reflector wants to keep as a skill (added disabled; the user turns it on). */
+data class SkillProposal(val name: String, val description: String, val body: String)
+
 data class SelfImprovement(val title: String, val problem: String, val files: List<String>, val topic: String, val repeatable: Boolean)
 
 /** What the reflector returns (strict JSON, parsed leniently). */
@@ -116,6 +119,7 @@ data class EvolutionReport(
     val hints: List<LocalHint>,
     val escalationNotes: List<EscalationNote>,
     val selfImprovement: SelfImprovement?,
+    val skillProposal: SkillProposal? = null,
 )
 
 enum class PrState { PENDING, MERGED, REJECTED, CONFLICT }

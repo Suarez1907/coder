@@ -447,14 +447,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (selected.isEmpty() || importBusy != null) return
         importBusy = "İçe aktarılıyor"
         viewModelScope.launch {
-            val done = ArrayList<String>(); val failed = ArrayList<String>()
+            val done = ArrayList<String>(); val failed = ArrayList<String>(); val flagged = ArrayList<String>()
             withContext(Dispatchers.IO) {
                 for (c in selected) {
                     val s = runCatching { importer.import(c) }.getOrNull()
-                    if (s == null) failed += c.name else { agent.tools.skills?.saveGlobal(s); done += s.name }
+                    if (s == null) { failed += c.name; continue }
+                    agent.tools.skills?.saveGlobal(s)
+                    // Suspicious content: imported but switched off until the user has looked at it.
+                    if (com.suarez.coder.skills.SkillSafety.scan(s).isNotEmpty()) { agent.tools.skills?.setEnabled(s.name, false); flagged += s.name }
+                    else { agent.tools.skills?.setEnabled(s.name, true); done += s.name }
                 }
             }
-            importStatus = "İçe aktarıldı: ${done.joinToString().ifBlank { "-" }}" + if (failed.isNotEmpty()) " · Başarısız: ${failed.joinToString()}" else ""
+            importStatus = "İçe aktarıldı: ${done.joinToString().ifBlank { "-" }}" +
+                (if (flagged.isNotEmpty()) " · Uyarı nedeniyle kapalı eklendi (inceleyip açın): ${flagged.joinToString()}" else "") +
+                if (failed.isNotEmpty()) " · Başarısız: ${failed.joinToString()}" else ""
             importBusy = null
             refreshSkills()
         }

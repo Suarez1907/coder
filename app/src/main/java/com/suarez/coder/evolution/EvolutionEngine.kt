@@ -17,7 +17,7 @@ import java.util.Locale
  * touches the chat, and its own model calls are an evolution session (never recorded, never chained).
  */
 class EvolutionEngine(
-    context: Context,
+    private val context: Context,
     private val settings: Settings = Settings(context),
     val store: EvolutionStore = storeFor(context),
 ) {
@@ -122,6 +122,8 @@ class EvolutionEngine(
                     produced++
                 }
             }
+            // Tier 1b: a recurring workflow becomes a skill proposal, added switched off (the user turns it on).
+            report.skillProposal?.takeIf { EvoTier.MEMORY in tiers }?.let { p -> if (proposeSkill(p, t.repo)) produced++ }
             // Tier 2: bounded routing parameters, undoable.
             if (EvoTier.ROUTING in tiers) {
                 store.routing.apply(report)?.let { (before, after) ->
@@ -170,6 +172,19 @@ class EvolutionEngine(
                 store.bump("reviewed")
             }
         }
+    }
+
+    /** At most one proposal a day; never over an existing skill; never one with unsafe content. */
+    private fun proposeSkill(p: SkillProposal, repo: String): Boolean {
+        val skills = com.suarez.coder.skills.SkillRepository(File(context.filesDir, "skills"), { null }, { _, _ -> null })
+        if (skills.globals().any { it.name == p.name }) return false
+        if (store.log().any { it.summary.startsWith("Yetenek önerisi") && it.at >= EvolutionGuard.dayStart(System.currentTimeMillis()) }) return false
+        val skill = com.suarez.coder.skills.Skill(p.name, p.description, body = p.body, origin = "evolution:$repo")
+        if (com.suarez.coder.skills.SkillSafety.scan(skill).isNotEmpty()) return false
+        skills.saveGlobal(skill)
+        skills.setEnabled(p.name, false)
+        store.addLog(EvoTier.MEMORY, "Yetenek önerisi: /${p.name} — ${p.description} (Ayarlar > Yetenekler'den inceleyip açın)")
+        return true
     }
 
     private fun isConfigError(msg: String) =
