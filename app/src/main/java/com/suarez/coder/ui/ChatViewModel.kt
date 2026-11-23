@@ -276,7 +276,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun send(text: String) {
-        if ((text.isBlank() && attachments.isEmpty()) || running) return
+        if ((text.isBlank() && attachments.isEmpty() && docs.none { it.text != null }) || running) return
+        if (docs.any { it.busy != null }) { docStatus = "Belge hâlâ okunuyor; bitince gönder."; return }
         if (attachments.isNotEmpty() && !visionSupported()) {
             pendingSendText = text
             visionWarning = "Seçili model(ler)den biri görselleri göremiyor. Görseller bu modellere gönderilmez; " +
@@ -306,7 +307,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         previewJob?.cancel(); preview = null
         val images = attachments.toList()
         attachments.clear()
-        messages += ChatMessage.User(expandSkillCommand(text.trim()).ifBlank { "(Ekran görüntüsüne bak.)" }, images)
+        val docBlocks = docs.mapNotNull { d -> d.text?.let { com.suarez.coder.docs.DocumentReader.block(d.name, it) } }
+        docs.clear(); docStatus = null
+        val body = expandSkillCommand(text.trim()).ifBlank { if (docBlocks.isNotEmpty()) "Ekteki belgeyi oku." else "(Ekran görüntüsüne bak.)" }
+        messages += ChatMessage.User(if (docBlocks.isEmpty()) body else body + "\n\n" + docBlocks.joinToString("\n\n"), images)
         save()
         // "Hayır, olmadı" right after a run is a correction signal for the previous trace.
         lastTraceId?.takeIf { SessionTraceRecorder.isCorrection(text) }?.let { id ->
@@ -321,6 +325,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastTraceId = null
         start(null)
     }
+
+    /** A document attached to the next message: read on the phone, or converted by markitdown in the cloud. */
+    data class DocAttachment(val id: Long, val name: String, val text: String? = null, val busy: String? = null, val error: String? = null)
+    val docs = mutableStateListOf<DocAttachment>()
+    var docStatus by mutableStateOf<String?>(null)
+
+    fun addDocuments(uris: List<Uri>) {
+        val app = getApplication<Application>()
+        for (uri in uris.take(com.suarez.coder.docs.DocumentReader.MAX_DOCS - docs.size)) {
+            val name = runCatching {
+                app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) c.getString(0) else null
+                }
+            }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "belge"
+            val id = System.nanoTime()
+            docs += DocAttachment(id, name, busy = "okunuyor")
+            fun update(f: (DocAttachment) -> DocAttachment) { val i = docs.indexOfFirst { it.id == id }; if (i >= 0) docs[i] = f(docs[i]) }
+            viewModelScope.launch {
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val bytes = app.contentResolver.openInputStream(uri)?.use { s ->
+                            val b = s.readBytes(); if (b.size > com.suarez.coder.docs.DocumentReader.MAX_BYTES) throw IllegalStateException("Belge 15 MB'tan büyük."); b
+                        } ?: throw IllegalStateException("Belge açılamadı.")
+                        com.suarez.coder.docs.DocumentReader.extract(name, bytes) ?: run {
+                            withContext(Dispatchers.Main) { update { it.copy(busy = "bulutta dönüştürülüyor (markitdown)") } }
+                            val runner = agent.tools.cloud ?: throw IllegalStateException("Bulut araçları için GitHub token gerekli.")
+                            com.suarez.coder.docs.DocsConverter(agent.tools.github, runner).convert(agent.tools.activeRepo(), name, bytes)
+                        }
+                    }
+                }
+                result.onSuccess { t -> update { it.copy(text = t, busy = null) } }
+                    .onFailure { e -> update { it.copy(busy = null, error = e.message?.take(240) ?: "Okunamadı") } }
+            }
+        }
+    }
+
+    fun removeDocument(id: Long) { docs.removeAll { it.id == id }; docStatus = null }
 
     /** Resizes picked images on a background thread (long edge ≤ 1568 px, JPEG 80%). */
     fun addImages(uris: List<Uri>) {

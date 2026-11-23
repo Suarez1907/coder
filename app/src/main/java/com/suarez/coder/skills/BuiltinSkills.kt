@@ -249,5 +249,68 @@ Rules
 - Commit it like any other change (github_write_files) and tell the user it is available as /<name>.
 """.trimIndent()
 
-    val ALL: List<String> = listOf(BLENDER_3D, DEBUGGING, VERIFY, TEST_FIRST, PLAN, REVIEW, ANDROID, SKILL_WRITER)
+    val REMOTION_VIDEO = """
+---
+name: remotion-video
+description: React ile kodla video (Remotion); GitHub Actions'ta MP4'e render eder, video.mp4 + preview.png sohbete gelir.
+triggers: [video, remotion, mp4, animasyon, tanıtım, reklam, motion, intro]
+workflow: video
+---
+
+# Remotion video (bulutta render)
+
+Video, repoda bir Remotion projesi olarak yazılır ve `run_cloud_tool(tool="video", script_path="src/index.ts", app_dir=".", composition="Main")`
+ile GitHub Actions'ta render edilir. Çıktı: `video.mp4` ve 30. kareden `preview.png`.
+
+## Proje yoksa kur (github_write_files, tek commit)
+- `package.json`: bağımlılıklar `remotion`, `@remotion/cli`, `react`, `react-dom` (aynı sürüm ailesi; remotion ve @remotion/* sürümleri birebir aynı olmalı), `typescript`.
+- `src/index.ts`: `registerRoot(RemotionRoot)`.
+- `src/Root.tsx`: `<Composition id="Main" component={Main} durationInFrames={...} fps={30} width={1920} height={1080} />`.
+- `src/Main.tsx`: sahne bileşeni.
+
+## Kurallar
+1. Zaman her zaman kareyle: `useCurrentFrame()`, `useVideoConfig()`, `interpolate(frame, [a, b], [x, y], {extrapolateRight: "clamp"})`, `spring({frame, fps})`.
+   CSS animasyonu, `setTimeout`, `Date.now()` ve `Math.random()` KULLANMA (render deterministik olmalı; rastgelelik için `random(seed)`).
+2. Sahneleri `<Sequence from={..} durationInFrames={..}>` veya `<Series>` ile sırala; geçişler için `@remotion/transitions` (aynı sürüm).
+3. Görsel/ses dosyaları `public/` altında ve `staticFile("x.png")` ile; dış URL'ye bağlı kalma.
+4. Yazı tipleri için `@remotion/google-fonts` (aynı sürüm) ya da sistem yazı tipi.
+5. Süre kısa tut (taslakta 5-15 sn): render dakikaları sınırlı.
+6. Render hatası dönerse hatadaki dosya/satırı düzelt ve tekrar çalıştır. "Kompozisyon bulunamadı" ise `id` ile `composition` aynı olmalı.
+
+## Teslim
+Sonuçta kullanıcıya ne çizildiğini kısaca anlat; önizleme ve MP4 sohbette görünür (İndir / Paylaş).
+""".trimIndent()
+
+    val MANIM = """
+---
+name: manim-animation
+description: Manim ile matematik/açıklama animasyonu; GitHub Actions'ta (Python + LaTeX) render eder, MP4 + önizleme döner.
+triggers: [manim, matematik animasyonu, açıklama videosu, explainer, formül, grafik animasyonu]
+workflow: manim
+---
+
+# Manim (bulutta)
+
+Ortam: Python 3.12, Manim Community, LaTeX, FFmpeg. Sahne `anim/sahne.py` içinde (`class Main(Scene)`), çalıştırıcı
+`anim/run.py` manim'i çağırır ve çıktıları `CODER_OUTPUT_DIR`'e kopyalar:
+
+```python
+import glob, os, shutil, subprocess
+out = os.environ.get("CODER_OUTPUT_DIR", "coder-out"); os.makedirs(out, exist_ok=True)
+subprocess.run(["manim", "-ql", "anim/sahne.py", "Main"], check=True)
+subprocess.run(["manim", "-ql", "-s", "anim/sahne.py", "Main"], check=True)
+shutil.copy(sorted(glob.glob("media/videos/**/*.mp4", recursive=True))[-1], os.path.join(out, "video.mp4"))
+shutil.copy(sorted(glob.glob("media/images/**/*.png", recursive=True))[-1], os.path.join(out, "preview.png"))
+```
+
+`run_cloud_tool(tool="manim", script_path="anim/run.py")` ile çalıştır.
+
+## Kurallar
+1. Taslakta `-ql` (480p15), kullanıcı isterse `-qh`.
+2. Sahne sınıfı `Scene` (3B için `ThreeDScene`); `self.play(...)` ve `self.wait()` ile akış.
+3. Türkçe metin için `Text(...)` kullan (LaTeX `MathTex` yalnız formüller için).
+4. Hata dönerse traceback'teki satırı düzelt ve tekrar çalıştır.
+""".trimIndent()
+
+    val ALL: List<String> = listOf(BLENDER_3D, DEBUGGING, VERIFY, TEST_FIRST, PLAN, REVIEW, ANDROID, SKILL_WRITER, REMOTION_VIDEO, MANIM)
 }

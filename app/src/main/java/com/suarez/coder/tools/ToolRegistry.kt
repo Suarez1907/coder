@@ -129,13 +129,18 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Runs a script in GitHub Actions (Blender headless or Python/FFmpeg); no local computer is involved. */
     private val runCloudTool = ToolSpec("run_cloud_tool",
-        "Repodaki bir betiği GitHub Actions'ta çalıştırır: tool=blender (Blender --background --python) veya toolbox " +
-            "(Python 3.12 + FFmpeg). Workflow yoksa kurar, bitmesini bekler. Hata olursa traceback döner: betiği düzeltip tekrar çağır. " +
-            "Başarılıysa çıktılar (preview.png, .glb, .blend) indirilir ve sohbette gösterilir. Önce betiği commit et.",
-        obj("repo" to str(repoDesc), "tool" to str("blender veya toolbox"), "script_path" to str("Betiğin repo içi yolu"),
+        "Repodaki bir betiği GitHub Actions'ta çalıştırır: tool=blender (Blender --background --python), toolbox " +
+            "(Python 3.12 + FFmpeg), manim (toolbox + Manim/LaTeX; betik manim'i kendisi çağırır) veya video (Remotion: " +
+            "script_path giriş dosyası, ör. src/index.ts; video.mp4 + preview.png üretir). Workflow yoksa kurar, bitmesini bekler. " +
+            "Hata olursa traceback döner: betiği düzeltip tekrar çağır. Başarılıysa çıktılar (preview.png, .glb, .mp4) indirilir ve " +
+            "sohbette gösterilir. Önce betiği commit et.",
+        obj("repo" to str(repoDesc), "tool" to str("blender, toolbox, manim veya video"), "script_path" to str("Betiğin (video: giriş dosyasının) repo içi yolu"),
             "output_dir" to str("Çıktı klasörü (varsayılan coder-out; betik CODER_OUTPUT_DIR ortam değişkenini kullanmalı)"),
             "branch" to str("Betiğin bulunduğu dal (boş = varsayılan dal)"),
             "blender_version" to str("Blender major.minor (varsayılan 4.2)"),
+            "app_dir" to str("video: package.json'ın olduğu klasör (varsayılan .)"),
+            "composition" to str("video: Remotion kompozisyon kimliği (boş = ilk)"),
+            "requirements" to str("toolbox/manim: pip gereksinim dosyası (isteğe bağlı)"),
             required = listOf("tool", "script_path")))
 
     val specs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
@@ -290,7 +295,8 @@ class ToolRegistry(private val settings: Settings) {
                 ciListener?.started(r, "Bulut aracı: ${s("tool") ?: ""}")
                 var ok = false
                 try {
-                    runner.run(r, req("tool"), req("script_path"), s("output_dir"), s("branch"), s("blender_version")).also { ok = !it.contains("BAŞARISIZ") }
+                    runner.run(r, req("tool"), req("script_path"), s("output_dir"), s("branch"), s("blender_version"),
+                        listOf("app_dir", "composition", "requirements").mapNotNull { k -> s(k)?.let { k to it } }.toMap()).also { ok = !it.contains("BAŞARISIZ") }
                 } finally {
                     ciListener?.finished(r, ok, if (ok) "Bulut aracı bitti" else "Bulut aracı başarısız", null)
                 }

@@ -11,7 +11,7 @@ object CloudWorkflowTemplates {
     }
 
     /** Bumped when a template changes; the installed file carries it so the Skills screen can offer an update. */
-    const val VERSION = 1
+    const val VERSION = 2
     private fun marker(id: String) = "# coder-cloud-tool: $id v$VERSION (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)"
 
     // § stands for $ (keeps the GitHub expressions readable inside Kotlin strings).
@@ -123,6 +123,10 @@ object CloudWorkflowTemplates {
                 description: pip gereksinim dosyası (isteğe bağlı)
                 required: false
                 default: ""
+              preset:
+                description: Hazır ortam (boş veya manim)
+                required: false
+                default: ""
 
         permissions:
           contents: read
@@ -139,6 +143,7 @@ object CloudWorkflowTemplates {
               SCRIPT: §{{ inputs.script_path }}
               CODER_OUTPUT_DIR: §{{ inputs.output_dir }}
               REQUIREMENTS: §{{ inputs.requirements }}
+              PRESET: §{{ inputs.preset }}
             steps:
               - uses: actions/checkout@v4
 
@@ -154,6 +159,12 @@ object CloudWorkflowTemplates {
               - name: Gereksinimler
                 run: |
                   if [ -n "§REQUIREMENTS" ] && [ -f "§REQUIREMENTS" ]; then pip install -q -r "§REQUIREMENTS"; fi
+
+              - name: Manim
+                if: inputs.preset == 'manim'
+                run: |
+                  sudo apt-get install -y -qq libcairo2-dev libpango1.0-dev texlive-latex-extra texlive-fonts-extra dvisvgm > /dev/null
+                  pip install -q manim
 
               - name: Betiği çalıştır
                 run: |
@@ -254,7 +265,144 @@ object CloudWorkflowTemplates {
                   path: §{{ env.CODER_OUTPUT_DIR }}/
     """))
 
-    val ALL = listOf(BLENDER, TOOLBOX, EVALUATE)
+    /**
+     * Remotion: renders a React video composition to MP4 plus a still (preview.png). script_path is the entry file
+     * (e.g. src/index.ts) relative to app_dir, the folder with package.json.
+     */
+    val VIDEO = CloudTool("video", "Video (Remotion)", "coder-video.yml", "coder-video-output", y("""
+        ${marker("video")}
+        name: Coder Video
+
+        on:
+          workflow_dispatch:
+            inputs:
+              script_path:
+                description: Remotion giriş dosyası (app_dir'e göre, ör. src/index.ts)
+                required: true
+              output_dir:
+                description: Çıktı klasörü
+                required: false
+                default: coder-out
+              app_dir:
+                description: package.json'ın olduğu klasör
+                required: false
+                default: "."
+              composition:
+                description: Kompozisyon kimliği (boş = ilk kompozisyon)
+                required: false
+                default: ""
+
+        permissions:
+          contents: read
+
+        concurrency:
+          group: coder-video-§{{ github.ref }}
+          cancel-in-progress: true
+
+        jobs:
+          video:
+            runs-on: ubuntu-latest
+            timeout-minutes: 30
+            env:
+              SCRIPT: §{{ inputs.script_path }}
+              CODER_OUTPUT_DIR: §{{ inputs.output_dir }}
+              APP_DIR: §{{ inputs.app_dir }}
+              COMPOSITION: §{{ inputs.composition }}
+            steps:
+              - uses: actions/checkout@v4
+
+              - uses: actions/setup-node@v4
+                with:
+                  node-version: "20"
+
+              - name: Bağımlılıklar
+                run: |
+                  cd "§APP_DIR"
+                  if [ -f package-lock.json ]; then npm ci; else npm install; fi
+                  npx remotion browser ensure
+
+              - name: Render
+                run: |
+                  OUT="§GITHUB_WORKSPACE/§CODER_OUTPUT_DIR"
+                  mkdir -p "§OUT"
+                  cd "§APP_DIR"
+                  if [ -z "§COMPOSITION" ]; then
+                    COMPOSITION=§(npx remotion compositions "§SCRIPT" -q | head -1 | awk '{print §1}')
+                  fi
+                  test -n "§COMPOSITION" || { echo "Kompozisyon bulunamadı"; exit 1; }
+                  npx remotion render "§SCRIPT" "§COMPOSITION" "§OUT/video.mp4" --log=error
+                  npx remotion still "§SCRIPT" "§COMPOSITION" "§OUT/preview.png" --frame=30 --log=error || true
+
+              - name: Çıktıları yükle
+                if: success()
+                uses: actions/upload-artifact@v4
+                with:
+                  name: coder-video-output
+                  if-no-files-found: warn
+                  retention-days: 7
+                  path: §{{ env.CODER_OUTPUT_DIR }}/
+    """))
+
+    /** markitdown: converts a document (PDF, Office, HTML, ...) in the repo to document.md. Used for chat attachments. */
+    val DOCS = CloudTool("docs", "Belge okuyucu (markitdown)", "coder-docs.yml", "coder-docs-output", y("""
+        ${marker("docs")}
+        name: Coder Docs
+
+        on:
+          workflow_dispatch:
+            inputs:
+              script_path:
+                description: Dönüştürülecek belge (repo içi yol)
+                required: true
+              output_dir:
+                description: Çıktı klasörü
+                required: false
+                default: coder-out
+
+        permissions:
+          contents: read
+
+        jobs:
+          docs:
+            runs-on: ubuntu-latest
+            timeout-minutes: 15
+            env:
+              SCRIPT: §{{ inputs.script_path }}
+              CODER_OUTPUT_DIR: §{{ inputs.output_dir }}
+            steps:
+              - uses: actions/checkout@v4
+
+              - uses: actions/setup-python@v5
+                with:
+                  python-version: "3.12"
+
+              - name: markitdown
+                run: |
+                  pip install -q 'markitdown[all]'
+                  mkdir -p "§CODER_OUTPUT_DIR"
+                  markitdown "§SCRIPT" > "§CODER_OUTPUT_DIR/document.md"
+                  test -s "§CODER_OUTPUT_DIR/document.md" || { echo "Belgeden metin çıkmadı"; exit 1; }
+
+              - name: Çıktıları yükle
+                if: success()
+                uses: actions/upload-artifact@v4
+                with:
+                  name: coder-docs-output
+                  if-no-files-found: error
+                  retention-days: 1
+                  path: §{{ env.CODER_OUTPUT_DIR }}/document.md
+    """))
+
+    val ALL = listOf(BLENDER, TOOLBOX, EVALUATE, VIDEO, DOCS)
+
+    /** Inputs a template accepts besides script_path/output_dir: anything else would make the dispatch fail. */
+    fun extraInputNames(t: CloudTool): Set<String> = when (t) {
+        BLENDER -> setOf("blender_version")
+        TOOLBOX -> setOf("requirements", "preset")
+        EVALUATE -> setOf("app_dir", "start_command")
+        VIDEO -> setOf("app_dir", "composition")
+        else -> emptySet()
+    }
 
     /** Maps the run_cloud_tool `tool` argument (also "coder-blender.yml", "Blender", "python", "ffmpeg") to a template. */
     fun forTool(tool: String): CloudTool? {
@@ -263,6 +411,9 @@ object CloudWorkflowTemplates {
             "blender", "bpy", "3d" -> BLENDER
             "toolbox", "python", "ffmpeg", "py" -> TOOLBOX
             "evaluate", "evaluator", "playwright", "e2e" -> EVALUATE
+            "video", "remotion", "mp4" -> VIDEO
+            "manim" -> TOOLBOX
+            "docs", "markitdown", "document", "belge" -> DOCS
             else -> null
         }
     }

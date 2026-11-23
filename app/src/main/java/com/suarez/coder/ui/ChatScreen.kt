@@ -46,6 +46,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -197,7 +198,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             CloudResultCards(vm, results)
                         }
                         is DItem.Msg -> when (val m = item.m) {
-                            is ChatMessage.User -> UserBubble(m.text, m.images)
+                            is ChatMessage.User -> UserBubble(com.suarez.coder.docs.DocumentReader.collapse(m.text), m.images)
                             is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 MarkdownText(m.text)
                                 ApkActions(vm, m.text)
@@ -234,11 +235,17 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 }
             }
             if (vm.attachments.isNotEmpty()) AttachmentRow(vm.attachments) { vm.removeImage(it) }
+            val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addDocuments(uris) }
+            if (vm.docs.isNotEmpty()) DocumentRow(vm)
             SlashSuggestions(input, vm.settings.promptTemplates + vm.skills.filter { it.enabled }.map { "/" + it.name to it.description }) { text ->
                 input = if (text.startsWith("/")) text.substringBefore(' ') + " " else text
                 vm.onInputChanged(input)
             }
-            InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty(),
+            InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty() || vm.docs.any { it.text != null },
+                onDoc = {
+                    if (vm.docs.size >= com.suarez.coder.docs.DocumentReader.MAX_DOCS) Toast.makeText(context, "En fazla ${com.suarez.coder.docs.DocumentReader.MAX_DOCS} belge", Toast.LENGTH_SHORT).show()
+                    else docPicker.launch(arrayOf("*/*"))
+                },
                 onChange = { input = it; vm.onInputChanged(it) },
                 onSend = { vm.send(input); if (vm.visionWarning == null) input = "" },
                 onStop = { vm.stop() },
@@ -409,6 +416,7 @@ private fun InputRow(
     onStop: () -> Unit,
     onPick: () -> Unit,
     onMic: () -> Unit,
+    onDoc: () -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp, top = 2.dp), verticalAlignment = Alignment.Bottom) {
         OutlinedTextField(
@@ -417,7 +425,12 @@ private fun InputRow(
             modifier = Modifier.weight(1f).heightIn(max = 180.dp),
             placeholder = { Text("Ne yapmamı istersin?") },
             // Thumb-reachable extras inside the field: screenshots (left) and dictation (right).
-            leadingIcon = { IconButton(onClick = onPick, enabled = !running) { Text("🖼", fontSize = 18.sp) } },
+            leadingIcon = {
+                Row {
+                    IconButton(onClick = onPick, enabled = !running) { Text("🖼", fontSize = 18.sp) }
+                    IconButton(onClick = onDoc, enabled = !running) { Icon(Icons.Outlined.Add, "Belge ekle", tint = coder.muted) }
+                }
+            },
             trailingIcon = { IconButton(onClick = onMic, enabled = !running) { Text("🎙", fontSize = 18.sp) } },
             shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
@@ -500,6 +513,24 @@ private fun AttachmentRow(paths: List<String>, onRemove: (String) -> Unit) {
             }
         }
         Text("${paths.size}/${ImagePrep.MAX_IMAGES}", style = Mono.tiny, color = coder.muted, modifier = Modifier.align(Alignment.CenterVertically))
+    }
+}
+
+/** Documents waiting to be sent: name, state, and remove. */
+@Composable
+private fun DocumentRow(vm: ChatViewModel) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)) {
+        vm.docs.forEach { d ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(d.name, style = Mono.small, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Text(d.busy?.let { "$it…" } ?: d.error ?: "${d.text?.length ?: 0} karakter okundu",
+                        style = Mono.tiny, color = if (d.error != null) MaterialTheme.colorScheme.error else coder.muted, maxLines = 3)
+                }
+                TextButton(onClick = { vm.removeDocument(d.id) }) { Text("Kaldır") }
+            }
+        }
+        vm.docStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
     }
 }
 

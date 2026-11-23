@@ -13,7 +13,8 @@ class ToolException(message: String) : Exception(message)
 class GitHub(private val token: () -> String) {
     private val api = "https://api.github.com"
 
-    data class FileChange(val path: String, val content: String?, val delete: Boolean)
+    /** [base64]: content is base64-encoded binary (documents); it goes through a blob instead of inline text. */
+    data class FileChange(val path: String, val content: String?, val delete: Boolean, val base64: Boolean = false)
 
     /** Builds an authenticated request (for streaming downloads). */
     fun request(method: String, path: String, accept: String = "application/vnd.github+json"): Request {
@@ -178,7 +179,12 @@ class GitHub(private val token: () -> String) {
         val entries = JSONArray()
         for (f in files) {
             val e = JSONObject().put("path", f.path.trim('/')).put("mode", "100644").put("type", "blob")
-            if (f.delete) e.put("sha", JSONObject.NULL) else e.put("content", f.content ?: "")
+            when {
+                f.delete -> e.put("sha", JSONObject.NULL)
+                f.base64 -> e.put("sha", json("POST", "/repos/$repo/git/blobs",
+                    JSONObject().put("content", f.content ?: "").put("encoding", "base64")).getString("sha"))
+                else -> e.put("content", f.content ?: "")
+            }
             entries.put(e)
         }
         val newTree = json("POST", "/repos/$repo/git/trees", JSONObject().put("base_tree", baseTree).put("tree", entries)).getString("sha")
@@ -193,7 +199,7 @@ class GitHub(private val token: () -> String) {
     private suspend fun commitToEmptyRepo(repo: String, branch: String, message: String, files: List<FileChange>): String {
         val out = StringBuilder("Repo boştu; dosyalar tek tek eklendi:\n")
         for (f in files.filter { !it.delete }) {
-            val b64 = Base64.encodeToString((f.content ?: "").toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            val b64 = if (f.base64) f.content ?: "" else Base64.encodeToString((f.content ?: "").toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
             json("PUT", "/repos/$repo/contents/${encPath(f.path)}",
                 JSONObject().put("message", message).put("content", b64).put("branch", branch))
             out.append("+ ").append(f.path).append('\n')

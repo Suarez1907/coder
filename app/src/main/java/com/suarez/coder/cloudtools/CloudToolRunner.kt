@@ -81,10 +81,12 @@ class CloudToolRunner(
     }
 
     /** Writes (or overwrites, when [force]) the workflow file on [branch]. */
-    suspend fun install(repo: String, tool: CloudWorkflowTemplates.CloudTool, branch: String?, force: Boolean): String {
+    suspend fun install(repo: String, tool: CloudWorkflowTemplates.CloudTool, branch: String?, force: Boolean, upgrade: Boolean = false): String {
         val b = branch?.takeIf { it.isNotBlank() } ?: github.defaultBranch(repo)
         val current = runCatching { github.readFileRaw(repo, tool.path, b) }.getOrNull()
-        if (current != null && !force) return "${tool.file} zaten var ($b)."
+        // An older copy of our own template is upgraded (new inputs); a hand-edited one is left alone.
+        val outdated = upgrade && CloudWorkflowTemplates.state(tool, current) == CloudWorkflowTemplates.InstallState.OUTDATED
+        if (current != null && !force && !outdated) return "${tool.file} zaten var ($b)."
         if (current?.trim() == tool.yaml.trim()) return "${tool.file} güncel ($b)."
         github.commitFiles(repo, b, "Coder: ${tool.title} bulut aracı (${tool.file})", listOf(GitHub.FileChange(tool.path, tool.yaml, false)), null)
         return "${tool.file} ${if (current == null) "kuruldu" else "güncellendi"} ($b)."
@@ -92,7 +94,7 @@ class CloudToolRunner(
 
     suspend fun run(repo: String, tool: String, scriptPath: String, outputDir: String?, branch: String?, blenderVersion: String?,
                     extraInputs: Map<String, String> = emptyMap()): String {
-        val t = CloudWorkflowTemplates.forTool(tool) ?: throw ToolException("Bilinmeyen bulut aracı: $tool (blender veya toolbox).")
+        val t = CloudWorkflowTemplates.forTool(tool) ?: throw ToolException("Bilinmeyen bulut aracı: $tool (blender, toolbox, manim veya video).")
         val script = cleanPath(scriptPath) ?: throw ToolException("Geçersiz script_path: $scriptPath (repo içi göreli yol olmalı).")
         val out = outputDir?.let { cleanPath(it) } ?: "coder-out"
         val base = github.defaultBranch(repo)
@@ -101,11 +103,13 @@ class CloudToolRunner(
             throw ToolException("$script, $ref dalında yok. Önce betiği commit et, sonra run_cloud_tool çağır.")
         }
         // workflow_dispatch needs the file on the default branch, and on the branch it runs from.
-        val installed = listOf(base, ref).distinct().map { install(repo, t, it, force = false) }
+        val installed = listOf(base, ref).distinct().map { install(repo, t, it, force = false, upgrade = true) }
 
         val inputs = JSONObject().put("script_path", script).put("output_dir", out)
         if (t == CloudWorkflowTemplates.BLENDER && !blenderVersion.isNullOrBlank()) inputs.put("blender_version", blenderVersion)
-        extraInputs.forEach { (k, v) -> inputs.put(k, v) }
+        if (tool.trim().lowercase() == "manim") inputs.put("preset", "manim")
+        val allowed = CloudWorkflowTemplates.extraInputNames(t)
+        extraInputs.filter { (k, v) -> k in allowed && v.isNotBlank() }.forEach { (k, v) -> inputs.put(k, v) }
         val since = System.currentTimeMillis()
         onStatus("${t.title} bulutta başlatılıyor")
         github.dispatchWorkflow(repo, t.file, ref, inputs)
