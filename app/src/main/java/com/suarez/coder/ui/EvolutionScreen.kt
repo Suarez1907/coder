@@ -114,6 +114,7 @@ fun EvolutionPage(vm: ChatViewModel) {
     LaunchedEffect(Unit) { vm.refreshEvolution() }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         vm.evoPending?.let { PendingPrCard(vm, it) }
+        ManagerSection(vm)
 
         EvoCard {
             CardTitle("Otomasyon")

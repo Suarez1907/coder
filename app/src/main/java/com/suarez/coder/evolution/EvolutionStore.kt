@@ -6,7 +6,7 @@ import java.io.File
 import java.util.UUID
 
 /** All evolution state on the device (no Room/DataStore: small JSON files like the rest of the app). */
-class EvolutionStore(private val dir: File) {
+class EvolutionStore(val dir: File) {
     init { dir.mkdirs() }
 
     private val tracesFile = File(dir, "traces.json")
@@ -85,6 +85,51 @@ class EvolutionStore(private val dir: File) {
         o.keys().asSequence().sumOf { k -> o.optString(k).lines().count { it.trimStart().startsWith("- ") } }
     } ?: 0
 
+    // ---- Experiments, adopted rules, exam baselines ----
+
+    private val experimentsFile = File(dir, "experiments.json")
+    private val policyFile = File(dir, "policy.json")
+    private val baselineFile = File(dir, "baselines.json")
+    private val seenFile = File(dir, "scout_seen.json")
+
+    @Synchronized fun experiments(): List<Experiment> = readArray(experimentsFile).let { a ->
+        (0 until a.length()).mapNotNull { runCatching { Experiment.fromJson(a.getJSONObject(it)) }.getOrNull() }
+    }
+
+    @Synchronized fun saveExperiment(e: Experiment) {
+        val list = experiments().filter { it.id != e.id } + e
+        write(experimentsFile, JSONArray().also { a -> list.takeLast(100).forEach { a.put(it.toJson()) } }.toString())
+    }
+
+    /** Queues an experiment unless the same change is already queued, running or decided. */
+    @Synchronized fun queue(e: Experiment): Boolean {
+        if (experiments().any { it.key == e.key }) return false
+        saveExperiment(e)
+        return true
+    }
+
+    @Synchronized fun policyRules(): List<String> = readArray(policyFile).let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } }
+
+    @Synchronized fun setPolicyRules(rules: List<String>) =
+        write(policyFile, JSONArray(rules.map { it.trim() }.filter { it.isNotBlank() }.distinct().takeLast(MAX_RULES)).toString())
+
+    /** Exam result of a case under a configuration (reused while the configuration is unchanged). */
+    @Synchronized fun baseline(config: String, case: String): ExamScore? =
+        runCatching { JSONObject(baselineFile.readText()).optJSONObject("$config|$case") }.getOrNull()?.let { ExamScore.fromJson(it) }
+
+    @Synchronized fun saveBaseline(config: String, case: String, s: ExamScore) {
+        val o = runCatching { JSONObject(baselineFile.readText()) }.getOrDefault(JSONObject())
+        o.put("$config|$case", s.toJson())
+        write(baselineFile, o.toString())
+    }
+
+    @Synchronized fun seenRepos(): Set<String> = readArray(seenFile).let { a -> (0 until a.length()).map { a.optString(it).lowercase() }.toSet() }
+
+    @Synchronized fun markSeen(repos: Collection<String>) = write(seenFile, JSONArray((seenRepos() + repos.map { it.lowercase() }).toList().takeLast(500)).toString())
+
+    /** Spend of one tier since [from] (the weekly exam budget). */
+    fun spentSince(from: Long, tier: EvoTier) = log().filter { it.at >= from && it.tier == tier }.sumOf { it.costUsd }
+
     // ---- Meta ----
 
     @Synchronized private fun meta(): JSONObject = runCatching { JSONObject(metaFile.readText()) }.getOrDefault(JSONObject())
@@ -99,6 +144,7 @@ class EvolutionStore(private val dir: File) {
 
     companion object {
         const val MAX_TRACES = 50
-        const val MAX_LOG = 200
+        const val MAX_LOG = 300
+        const val MAX_RULES = 12
     }
 }

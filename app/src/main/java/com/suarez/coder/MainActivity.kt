@@ -27,6 +27,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Crashes are written to disk: a learning signal and the trigger for rolling back a bad self-update.
+        com.suarez.coder.evolution.CrashRecorder.install(this)
         enableEdgeToEdge()
         handleInstallIntent(intent)
         setContent {

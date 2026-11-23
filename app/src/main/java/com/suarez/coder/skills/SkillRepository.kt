@@ -152,12 +152,15 @@ class SkillRepository(
 
     @Synchronized fun cachedRepo(repo: String): List<Skill> = repoCache[repo.lowercase()]?.second.orEmpty()
 
+    /** Exam runs: skills switched on for this repository instance only (the user's own setting is untouched). */
+    var forceEnabled: Set<String> = emptySet()
+
     /** Global + repo skills (repo wins on a name clash), with their enabled state. */
     fun all(repo: String): List<Skill> {
-        val disabled = disabled()
+        val disabled = disabled() - forceEnabled
         val repoSkills = cachedRepo(repo).map { it.copy(enabled = it.name !in disabled) }
         val names = repoSkills.map { it.name }.toSet()
-        return (globals().filter { it.name !in names } + repoSkills).sortedBy { it.name }
+        return (globals().filter { it.name !in names }.map { if (it.name in forceEnabled) it.copy(enabled = true) else it } + repoSkills).sortedBy { it.name }
     }
 
     fun catalog(repo: String): String? = catalogText(all(repo))

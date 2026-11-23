@@ -14,6 +14,9 @@ import org.json.JSONObject
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import org.junit.Rule
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -216,6 +219,24 @@ class ScreenshotTest {
         compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
         compose.waitForIdle()
         compose.onRoot().captureRoboImage("build/outputs/roborazzi/cloud_result.png")
+    }
+
+    @Test fun managerSection() {
+        val vm = vm()
+        vm.settings.modelPool = listOf("gemini/gemini-4-hydrogen", "gemini/gemini-3.8-flash", "deepseek/deepseek-chat")
+        vm.evoStore.saveExperiment(com.suarez.coder.evolution.Experiment.model("editor", "deepseek/deepseek-chat", "daha ucuz model denemesi")
+            .copy(state = com.suarez.coder.evolution.Experiment.State.PROPOSED, baseline = com.suarez.coder.evolution.ExamScore(2, 3, 0.21),
+                candidate = com.suarez.coder.evolution.ExamScore(2, 3, 0.06)))
+        vm.evoStore.saveExperiment(com.suarez.coder.evolution.Experiment.rule("Read the failing file before patching it", "öz-gelişim")
+            .copy(state = com.suarez.coder.evolution.Experiment.State.REJECTED, baseline = com.suarez.coder.evolution.ExamScore(3, 3, 0.2),
+                candidate = com.suarez.coder.evolution.ExamScore(2, 3, 0.2)))
+        compose.setContent { CoderTheme("dark") { androidx.compose.foundation.layout.Column(
+            androidx.compose.ui.Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(16.dp)) { com.suarez.coder.ui.ManagerSection(vm) } } }
+        compose.waitForIdle()
+        Thread.sleep(300)
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/manager.png")
+        vm.settings.modelPool = emptyList()
     }
 
     @Test fun settingsHome() {

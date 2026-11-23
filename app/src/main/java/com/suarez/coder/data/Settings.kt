@@ -307,6 +307,34 @@ class Settings(context: Context) {
         get() = str("decision_model", "gemini-decision-1")
         set(v) = put("decision_model", v.trim())
 
+    // ---- Self-improvement manager (learned model choice, exams, earned autonomy) ----
+
+    /** 1 = only proposes; 2 = applies data changes (models, prompts, skills) that won an exam; 3 = also merges self-PRs that pass the gates. */
+    var autonomyLevel: Int
+        get() = prefs.getInt("autonomy_level", 1).coerceIn(1, 3)
+        set(v) = prefs.edit().putInt("autonomy_level", v.coerceIn(1, 3)).apply()
+    /** 0 = best quality whatever it costs … 1 = cheapest that still works. */
+    var costWeight: Double
+        get() = str("cost_weight", "0.5").toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 0.5
+        set(v) = put("cost_weight", v.coerceIn(0.0, 1.0).toString())
+    /** Models the manager may choose from ("provider/model"); fewer than two = the user's fixed choice. */
+    var modelPool: List<String>
+        get() = str("model_pool").lines().map { it.trim() }.filter { it.isNotBlank() }
+        set(v) = put("model_pool", v.map { it.trim() }.filter { it.isNotBlank() }.distinct().joinToString("\n"))
+    var learnedRouting: Boolean
+        get() = bool("learned_routing", true)
+        set(v) = putBool("learned_routing", v)
+    var examWeeklyBudget: Double
+        get() = str("exam_budget", "1.0").toDoubleOrNull()?.coerceIn(0.0, 20.0) ?: 1.0
+        set(v) = put("exam_budget", v.coerceIn(0.0, 20.0).toString())
+    var scoutEnabled: Boolean
+        get() = bool("scout_enabled", true)
+        set(v) = putBool("scout_enabled", v)
+    /** The user's goal in their own words (shown in the manager card). */
+    var managerGoal: String
+        get() = str("manager_goal")
+        set(v) = put("manager_goal", v.trim())
+
     // ---- Self-evolution ----
 
     var evoEnabled: Boolean

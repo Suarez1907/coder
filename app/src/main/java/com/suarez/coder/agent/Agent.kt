@@ -179,9 +179,9 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     private var architectOverride: ModelRef? = null
     private var architectThinkingOverride: String? = null
 
-    fun architectRef() = modelOverride ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
+    fun architectRef() = modelOverride ?: roleOverrides["architect"] ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
     fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
-    fun editorRef() = modelOverride ?: ModelRef.parse(settings.editorModel) ?: singleRef()
+    fun editorRef() = modelOverride ?: roleOverrides["editor"] ?: ModelRef.parse(settings.editorModel) ?: singleRef()
     fun mainRef() = if (settings.architectMode) architectRef() else singleRef()
 
     fun client(ref: ModelRef): LlmClient = when (ref.provider) {
@@ -295,6 +295,18 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
     }
 
+    // ---- Self-improvement manager hooks ----
+
+    /** Per-role models for the current run (learned choice) or for a whole exam run (the variant under test). */
+    var roleOverrides: Map<String, ModelRef> = emptyMap()
+    /** Picks models for a route ("role" -> model); null/empty = keep the user's models. */
+    var modelPicker: ((route: String) -> Map<String, ModelRef>)? = null
+    /** What the last run used, for its trace. */
+    var lastArm: String? = null
+    var lastRoute: String? = null
+    /** Working rules adopted by the manager (appended to every system prompt). */
+    var policyText: (() -> String?)? = null
+
     // ---- Self-evolution hooks ----
 
     /** Runs of the evolution engine: never recorded as traces, so they can never start another evolution. */
@@ -401,15 +413,17 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     /** Static per mode: no date or other per-request content, so the prompt prefix stays identical across requests. */
     private fun header(): String {
-        val repo = settings.defaultRepo.takeIf { it.isNotBlank() }
+        val repo = (tools.repoOverride ?: settings.defaultRepo).takeIf { it.isNotBlank() }
         return buildString {
             appendLine("You are Coder, a software engineering agent inside an Android app. The user works only from a phone.")
             appendLine("Tools give you GitHub (read, commit, branches, PRs, Actions) and the web (search, fetch).")
             appendLine("You cannot run code on the device; builds and tests run in the repo's GitHub Actions.")
             appendLine("Reply in the user's language (default Turkish). Keep answers short; the screen is small.")
             if (repo != null) appendLine("Default repository: $repo.")
-            settings.defaultBranch.takeIf { it.isNotBlank() }?.let { appendLine("Default branch: $it.") }
+            (context.refOverride ?: settings.defaultBranch).takeIf { it.isNotBlank() }?.let { appendLine("Default branch: $it.") }
             if (settings.customInstructions.isNotBlank()) appendLine("User instructions: ${settings.customInstructions}")
+            // Rules the self-improvement manager adopted after they won an exam (rarely changes: stays cacheable).
+            policyText?.invoke()?.takeIf { it.isNotBlank() }?.let { appendLine("Learned working rules:\n$it") }
             // Progressive disclosure: only one line per skill here; the body comes from load_skill.
             tools.skills?.catalog(tools.activeRepo())?.let { appendLine(it) }
         }
@@ -689,6 +703,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     /** [override] forces a route for this request (e.g. the user re-runs it in Architect mode). */
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, override: Route? = null) {
         flexDisabledForRun = false
+        lastArm = null
+        lastRoute = null
         // Repo skills (.coder/skills/*/SKILL.md), cached for minutes so the catalog line stays stable.
         tools.skills?.let { s -> runCatching { kotlinx.coroutines.withTimeout(8_000) { s.refreshRepo(tools.activeRepo()) } } }
         architectOverride = null
@@ -768,6 +784,15 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 } else ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))
                 history.add(requestIndex + 1, block)
             }
+            // Learned model choice for this run (the user's pool; otherwise their fixed models).
+            lastRoute = (route ?: if (settings.architectMode) Route.COMPLEX_ARCHITECT else Route.SIMPLE_EDIT).name
+            modelPicker?.invoke(lastRoute!!)?.takeIf { it.isNotEmpty() }?.let { picks ->
+                roleOverrides = picks
+                lastArm = picks.entries.joinToString(";") { "${lastRoute}|${it.key}|${it.value.key}" }
+                history += ChatMessage.Notice("🎯 Yönetici seçimi: " + picks.entries.joinToString(", ") { "${roleLabel(it.key)} ${it.value.model}" },
+                    "Öğrenen model seçimi: geçmiş başarı ve maliyete göre seçildi (arada bir alternatif denenir).")
+                ui.update()
+            }
             val questionSpecs = tools.readOnlySpecs.filter { it.name != "submit_plan" }
             when (route) {
                 Route.COMPLEX_ARCHITECT -> architectFlow(history, ui)
@@ -786,6 +811,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             usageSummary(history, start)?.let { history += it }
             architectOverride = null
             architectThinkingOverride = null
+            roleOverrides = emptyMap()
             ui.update()
         }
     }

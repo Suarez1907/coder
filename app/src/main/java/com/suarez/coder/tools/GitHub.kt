@@ -150,7 +150,16 @@ class GitHub(private val token: () -> String) {
     }
 
     /** Creates a single commit with all changes on [branch] (created from [baseBranch]/default if missing). */
+    /**
+     * Exam runs: every write must go to the one scratch branch; PRs, merges, deletions and workflow dispatches are refused.
+     * Returns why a write is refused, or null when allowed.
+     */
+    var writeGuard: ((repo: String, branch: String?) -> String?)? = null
+
+    private fun checkWrite(repo: String, branch: String?) { writeGuard?.invoke(repo, branch)?.let { throw ToolException(it) } }
+
     suspend fun commitFiles(repo: String, branch: String, message: String, files: List<FileChange>, baseBranch: String?): String {
+        checkWrite(repo, branch)
         if (files.isEmpty()) throw ToolException("Değiştirilecek dosya yok.")
         var refRes = call("GET", "/repos/$repo/git/ref/heads/${enc(branch)}")
         if (refRes.code == 409) return commitToEmptyRepo(repo, branch, message, files)
@@ -192,7 +201,14 @@ class GitHub(private val token: () -> String) {
         return out.toString()
     }
 
+    /** Creates [branch] pointing at an exact commit (exam runs start from the task's original base). */
+    suspend fun createBranchAt(repo: String, branch: String, sha: String) {
+        checkWrite(repo, branch)
+        json("POST", "/repos/$repo/git/refs", JSONObject().put("ref", "refs/heads/$branch").put("sha", sha))
+    }
+
     suspend fun createBranch(repo: String, branch: String, from: String?): String {
+        checkWrite(repo, branch)
         val base = from?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val sha = json("GET", "/repos/$repo/git/ref/heads/${enc(base)}").getJSONObject("object").getString("sha")
         json("POST", "/repos/$repo/git/refs", JSONObject().put("ref", "refs/heads/$branch").put("sha", sha))
@@ -200,6 +216,7 @@ class GitHub(private val token: () -> String) {
     }
 
     suspend fun createPullRequest(repo: String, title: String, head: String, base: String?, body: String?): String {
+        checkWrite(repo, null)
         val b = base?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val pr = json("POST", "/repos/$repo/pulls",
             JSONObject().put("title", title).put("head", head).put("base", b).put("body", body ?: ""))
@@ -207,6 +224,7 @@ class GitHub(private val token: () -> String) {
     }
 
     suspend fun mergePullRequest(repo: String, number: Int, method: String, title: String?): String {
+        checkWrite(repo, null)
         val body = JSONObject().put("merge_method", method)
         title?.let { body.put("commit_title", it) }
         val o = json("PUT", "/repos/$repo/pulls/$number/merge", body)
@@ -264,6 +282,28 @@ class GitHub(private val token: () -> String) {
         }.getOrDefault(emptyList())
     }
 
+    data class CommitInfo(val sha: String, val parents: List<String>, val files: List<Pair<String, String>>)
+
+    /** Parents and (filename, status) of a commit. */
+    suspend fun commitInfo(repo: String, sha: String): CommitInfo {
+        val o = json("GET", "/repos/$repo/commits/$sha")
+        val parents = o.optJSONArray("parents")?.let { a -> (0 until a.length()).map { a.getJSONObject(it).getString("sha") } }.orEmpty()
+        val files = o.optJSONArray("files")?.let { a -> (0 until a.length()).map { a.getJSONObject(it).let { f -> f.optString("filename") to f.optString("status") } } }.orEmpty()
+        return CommitInfo(o.optString("sha"), parents, files)
+    }
+
+    data class FoundRepo(val fullName: String, val stars: Int, val description: String, val pushedAt: String)
+
+    /** Public repository search (the scout); most-starred first. */
+    suspend fun searchRepos(query: String, perPage: Int = 10): List<FoundRepo> {
+        val r = call("GET", "/search/repositories?q=${enc(query)}&sort=stars&order=desc&per_page=$perPage")
+        if (r.code !in 200..299) throw ToolException("Arama başarısız: HTTP ${r.code}")
+        val arr = JSONObject(r.body).optJSONArray("items") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.map {
+            FoundRepo(it.getString("full_name"), it.optInt("stargazers_count"), it.optString("description").takeIf { d -> d != "null" }.orEmpty(), it.optString("pushed_at"))
+        }
+    }
+
     data class PrInfo(val number: Int, val title: String, val head: String, val url: String)
 
     suspend fun openPullRequests(repo: String): List<PrInfo> {
@@ -278,16 +318,18 @@ class GitHub(private val token: () -> String) {
 
     /** Merges; returns (HTTP code, message or merge sha). 405/409 mean "not mergeable / conflict". */
     suspend fun tryMerge(repo: String, number: Int, method: String): Pair<Int, String> {
+        checkWrite(repo, null)
         val r = call("PUT", "/repos/$repo/pulls/$number/merge", JSONObject().put("merge_method", method))
         val body = runCatching { JSONObject(r.body) }.getOrNull()
         return r.code to (if (r.code in 200..299) body?.optString("sha").orEmpty() else body?.optString("message") ?: r.body.take(300))
     }
 
     suspend fun closePullRequest(repo: String, number: Int) {
+        checkWrite(repo, null)
         json("PATCH", "/repos/$repo/pulls/$number", JSONObject().put("state", "closed"))
     }
 
-    suspend fun deleteBranch(repo: String, branch: String): Boolean =
+    suspend fun deleteBranch(repo: String, branch: String): Boolean = writeGuard?.let { false } ?:
         call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}").code in 200..299
 
     /** "path +add −del" lines of a pull request. */
@@ -300,6 +342,7 @@ class GitHub(private val token: () -> String) {
 
     /** Starts a workflow_dispatch run; [workflow] is the file name (e.g. android.yml) or id. */
     suspend fun dispatchWorkflow(repo: String, workflow: String, ref: String?, inputs: JSONObject?): String {
+        checkWrite(repo, null)
         val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val body = JSONObject().put("ref", branch)
         if (inputs != null && inputs.length() > 0) body.put("inputs", inputs)
@@ -376,6 +419,7 @@ class GitHub(private val token: () -> String) {
     }
 
     suspend fun raw(method: String, path: String, body: String?): String {
+        if (method.uppercase() != "GET") checkWrite("", null)
         val parsedBody: Any? = body?.takeIf { it.isNotBlank() }?.let {
             runCatching { JSONObject(it) }.getOrElse { _ -> runCatching { JSONArray(it) }.getOrElse { _ -> throw ToolException("body geçerli JSON değil") } }
         }

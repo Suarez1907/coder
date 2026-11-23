@@ -89,8 +89,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var evoBusy by mutableStateOf(false)
         private set
-    /** Last trace of this app run, so a corrective follow-up message can be attached to it. */
+    /** Last trace of this app run, so a corrective follow-up message or the thumbs can be attached to it. */
     private var lastTraceId: String? = null
+    /** Thumbs on the latest answer (1 / -1 / 0); reset by the next message. */
+    var lastRating by mutableStateOf(0)
+        private set
+    /** True while the latest finished run has a trace that can be rated. */
+    var canRate by mutableStateOf(false)
+        private set
+    val manager = com.suarez.coder.evolution.SelfManager(settings, evoStore)
+    /** Branch head when the current run started (lets a good run become an exam question). */
+    private var runBase: Pair<String, String>? = null
 
     /** Orchestrator plan of the chat on screen (shown as a card), or null. */
     var activePlan by mutableStateOf<OrchestratorPlan?>(null)
@@ -154,6 +163,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         profiles = settings.profiles()
         activePlan = planStore.recover(currentSessionId)
         agent.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
+        agent.modelPicker = { route -> manager.pick(route) }
+        agent.policyText = { manager.policyText() }
+        if (settings.evoEnabled) com.suarez.coder.evolution.WeeklyWorker.schedule(app, settings.evoWifiOnly)
+        viewModelScope.launch(Dispatchers.IO) {
+            // New crashes and, after a self-update, a crash spike (rolled back at level 3).
+            val cycle = com.suarez.coder.evolution.WeeklyCycle(app, settings, evoStore)
+            cycle.watchCrashes()
+            val msg = runCatching { cycle.rollbackIfNeeded() }.getOrNull()
+            withContext(Dispatchers.Main) { crashNotice = msg }
+        }
         agent.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
         refreshEvolution()
         agent.orchestratorHooks = object : OrchestratorHooks {
@@ -291,7 +310,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         save()
         // "Hayır, olmadı" right after a run is a correction signal for the previous trace.
         lastTraceId?.takeIf { SessionTraceRecorder.isCorrection(text) }?.let { id ->
-            viewModelScope.launch(Dispatchers.IO) { evoStore.updateTrace(id) { t -> if (t.processed) t else t.copy(userCorrection = true) } }
+            viewModelScope.launch(Dispatchers.IO) {
+                evoStore.traces().firstOrNull { it.id == id }?.let { before ->
+                    val after = before.copy(userCorrection = true)
+                    evoStore.updateTrace(id) { after }
+                    manager.relearn(before, after)
+                }
+            }
         }
         lastTraceId = null
         start(null)
@@ -356,6 +381,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun launchRun(block: suspend (MutableList<ChatMessage>, AgentUi) -> Unit) {
         running = true
         jobSession = currentSessionId
+        canRate = false
+        lastRating = 0
+        runBase = null
+        val baseRepo = agent.tools.normalizeRepo(repoNow())
+        if (baseRepo.isNotBlank() && settings.githubToken.isNotBlank()) viewModelScope.launch(Dispatchers.IO) {
+            val branch = settings.contextRef.ifBlank { settings.defaultBranch }.ifBlank { null }
+            runCatching { agent.tools.github.headSha(baseRepo, branch) }.getOrNull()?.let { runBase = it to (branch ?: "") }
+        }
         job = viewModelScope.launch {
             val work = messages.toMutableList()
             val runStart = work.size
@@ -567,6 +600,133 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return m.groupValues[2].ifBlank { skill.description } + "\n\n(Önce load_skill(\"$name\") ile \"$name\" yeteneğini yükle ve talimatlarına uy.)"
     }
 
+    // ---- Self-improvement manager ----
+
+    var crashNotice by mutableStateOf<String?>(null)
+        private set
+    var experiments by mutableStateOf<List<com.suarez.coder.evolution.Experiment>>(emptyList())
+        private set
+    var weekly by mutableStateOf<com.suarez.coder.evolution.WeeklyReport?>(null)
+        private set
+    var goalPlan by mutableStateOf<com.suarez.coder.evolution.GoalPlan?>(null)
+        private set
+
+    /** Thumbs on the latest answer: the strongest learning signal (changes the model statistics at once). */
+    fun rate(value: Int) {
+        val id = lastTraceId ?: return
+        lastRating = if (lastRating == value) 0 else value
+        val v = lastRating
+        viewModelScope.launch(Dispatchers.IO) {
+            evoStore.traces().firstOrNull { it.id == id }?.let { before ->
+                val after = before.copy(rating = v, processed = before.processed && v == before.rating)
+                evoStore.updateTrace(id) { after }
+                manager.relearn(before, after)
+            }
+        }
+    }
+
+    fun refreshManager() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val exps = evoStore.experiments().asReversed()
+            val best = listOf("SIMPLE_EDIT", "COMPLEX_ARCHITECT", "QUESTION_ONLY").mapNotNull { r ->
+                com.suarez.coder.evolution.ModelBandit.rolesFor(r).mapNotNull { role ->
+                    manager.bandit.best(r, role, settings.costWeight)?.let { "${r.substringBefore('_').lowercase()}/${if (role == "architect") "mimar" else "uyg"}: ${it.substringAfterLast('/')}" }
+                }.takeIf { it.isNotEmpty() }?.joinToString(", ")
+            }.joinToString(" · ")
+            val since = System.currentTimeMillis() - com.suarez.coder.evolution.WeeklyReport.WEEK_MS
+            val report = com.suarez.coder.evolution.WeeklyReport.compute(evoStore.traces(), evoStore.log(), exps,
+                com.suarez.coder.evolution.CrashRecorder.recent(getApplication(), since), best)
+            withContext(Dispatchers.Main) { experiments = exps; weekly = report }
+        }
+    }
+
+    /** "Haftalık döngüyü şimdi çalıştır": crash watch, GitHub scout, exams (within the weekly exam budget). */
+    fun runWeeklyNow() {
+        if (evoBusy) return
+        evoBusy = true
+        viewModelScope.launch {
+            evoStatus = runCatching {
+                withContext(Dispatchers.IO) { com.suarez.coder.evolution.WeeklyCycle(getApplication(), settings, evoStore) { s -> viewModelScope.launch { evoStatus = s } }.run() }
+            }.getOrElse { "Hata: ${it.message?.take(160)}" }
+            evoBusy = false
+            refreshEvolution(); refreshManager(); refreshSkills()
+        }
+    }
+
+    /** A PROPOSED experiment (autonomy level 1): the user applies or rejects it. */
+    fun decideExperiment(e: com.suarez.coder.evolution.Experiment, apply: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val skills = com.suarez.coder.skills.SkillRepository(File(getApplication<Application>().filesDir, "skills"), { null }, { _, _ -> null })
+            if (apply) com.suarez.coder.evolution.ExperimentApplier(settings, evoStore, skills).apply(e)
+            evoStore.saveExperiment(e.copy(state = if (apply) com.suarez.coder.evolution.Experiment.State.ADOPTED else com.suarez.coder.evolution.Experiment.State.REJECTED,
+                decidedAt = System.currentTimeMillis()))
+            refreshEvolution(); refreshManager(); refreshSkills()
+            withContext(Dispatchers.Main) { refreshSettings() }
+        }
+    }
+
+    /** The goal in the user's words → bounded settings (shown before applying). Uses the evolution model, else the editor. */
+    fun planGoal(goal: String) {
+        if (goal.isBlank() || evoBusy) return
+        settings.managerGoal = goal
+        evoBusy = true
+        viewModelScope.launch {
+            val available = (settings.modelCatalog + listOf(settings.architectModel, settings.editorModel)).filter { it.isNotBlank() }.distinct()
+            val plan = runCatching {
+                withContext(Dispatchers.IO) {
+                    val a = com.suarez.coder.agent.Agent(settings).apply {
+                        isEvolutionSession = true
+                        budgetDeferred = true
+                        if (settings.openrouterKey.isNotBlank()) modelOverride = com.suarez.coder.llm.ModelRef(com.suarez.coder.data.Provider.OPENROUTER, settings.evoModel)
+                    }
+                    val silent = object : com.suarez.coder.agent.AgentUi {
+                        override fun update() {}
+                        override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) = false
+                    }
+                    val local = ArrayList<ChatMessage>()
+                    val reply = a.callModel(local, listOf(ChatMessage.User(com.suarez.coder.evolution.GoalPlan.prompt(goal, available, settings))),
+                        a.editorRef(), "reflector", com.suarez.coder.evolution.GoalPlan.SYSTEM, emptyList(), silent, useCache = false, maxOut = 1_500, jsonMode = true)
+                    val cost = local.filterIsInstance<ChatMessage.UsageRecord>().sumOf { a.costOf(it) }
+                    if (cost > 0) evoStore.addLog(EvoTier.POLICY, "Hedef yorumlandı: ${goal.take(80)}", cost)
+                    com.suarez.coder.evolution.GoalPlan.parse(reply.text, available)
+                }
+            }.getOrNull()
+            goalPlan = plan
+            evoStatus = if (plan == null) "Hedef ayarlara çevrilemedi; daha açık yazmayı deneyin." else null
+            evoBusy = false
+        }
+    }
+
+    fun applyGoal() {
+        val plan = goalPlan ?: return
+        val before = org.json.JSONObject().put("cw", settings.costWeight).put("al", settings.autonomyLevel).put("eb", settings.examWeeklyBudget)
+            .put("db", settings.evoDailyBudget).put("pool", settings.modelPool.joinToString("\n")).put("lr", settings.learnedRouting).put("sc", settings.scoutEnabled)
+        plan.apply(settings)
+        evoStore.addLog(EvoTier.POLICY, "Hedef uygulandı: " + plan.summary, undo = org.json.JSONObject().put("kind", "GOAL").put("before", before).toString())
+        goalPlan = null
+        refreshSettings(); refreshEvolution()
+        if (settings.evoEnabled) com.suarez.coder.evolution.WeeklyWorker.schedule(getApplication(), settings.evoWifiOnly)
+    }
+
+    fun dismissGoal() { goalPlan = null }
+
+    fun rollbackLastMerge() {
+        if (evoBusy) return
+        evoBusy = true
+        viewModelScope.launch {
+            evoStatus = runCatching {
+                withContext(Dispatchers.IO) {
+                    val cycle = com.suarez.coder.evolution.WeeklyCycle(getApplication(), settings, evoStore)
+                    val m = cycle.actions.lastMerge() ?: return@withContext "Geri alınacak merge yok."
+                    cycle.actions.revert(m, "kullanıcı geri aldı")
+                }
+            }.getOrElse { "Geri alınamadı: ${it.message?.take(160)}" }
+            crashNotice = null
+            evoBusy = false
+            refreshEvolution()
+        }
+    }
+
     // ---- Self-evolution ----
 
     /** Saves a trace of the finished run (never for evolution runs) and queues the background evolution worker. */
@@ -574,9 +734,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val run = work.drop(runStart)
         val request = (work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
         val trace = SessionTraceRecorder.record(run, request, currentSessionId, agent.tools.normalizeRepo(repoNow()),
-            agent.isEvolutionSession, agent::costOf) ?: return
+            agent.isEvolutionSession, agent::costOf)?.copy(arm = agent.lastArm, route = agent.lastRoute,
+            baseSha = runBase?.first, branch = runBase?.second?.ifBlank { null }) ?: return
+        canRate = true
         viewModelScope.launch(Dispatchers.IO) {
             evoStore.addTrace(trace)
+            manager.learn(trace)
             lastTraceId = trace.id
             if (settings.evoEnabled) EvolutionWorker.schedule(getApplication(), settings.evoWifiOnly)
         }
@@ -616,7 +779,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun evoUndo(entry: EvolutionLogEntry) {
         val prev = entry.undo ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            evoStore.routing.undo(prev)
+            val o = runCatching { org.json.JSONObject(prev) }.getOrNull()
+            when (o?.optString("kind")) {
+                "GOAL" -> o.optJSONObject("before")?.let { b ->
+                    settings.costWeight = b.optDouble("cw", 0.5); settings.autonomyLevel = b.optInt("al", 1)
+                    settings.examWeeklyBudget = b.optDouble("eb", 1.0); settings.evoDailyBudget = b.optDouble("db", 0.15)
+                    settings.modelPool = b.optString("pool").lines(); settings.learnedRouting = b.optBoolean("lr", true); settings.scoutEnabled = b.optBoolean("sc", true)
+                }
+                "MODEL", "RULE", "SKILL" -> com.suarez.coder.evolution.ExperimentApplier(settings, evoStore,
+                    com.suarez.coder.skills.SkillRepository(File(getApplication<Application>().filesDir, "skills"), { null }, { _, _ -> null })).undo(prev)
+                else -> evoStore.routing.undo(prev)
+            }
+            withContext(Dispatchers.Main) { refreshSettings(); refreshSkills() }
             evoStore.markUndone(entry.id)
             evoStore.addLog(EvoTier.ROUTING, "Geri alındı: ${entry.summary.take(160)}")
             refreshEvolution()

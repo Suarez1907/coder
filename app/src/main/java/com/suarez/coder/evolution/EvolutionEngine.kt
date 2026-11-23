@@ -124,6 +124,10 @@ class EvolutionEngine(
             }
             // Tier 1b: a recurring workflow becomes a skill proposal, added switched off (the user turns it on).
             report.skillProposal?.takeIf { EvoTier.MEMORY in tiers }?.let { p -> if (proposeSkill(p, t.repo)) produced++ }
+            // A working rule is never adopted directly: it waits for an exam.
+            report.workingRule?.let { r ->
+                if (store.queue(Experiment.rule(r, "öz-gelişim"))) { store.addLog(EvoTier.POLICY, "Kural adayı sınava alındı: $r"); produced++ }
+            }
             // Tier 2: bounded routing parameters, undoable.
             if (EvoTier.ROUTING in tiers) {
                 store.routing.apply(report)?.let { (before, after) ->
@@ -141,6 +145,15 @@ class EvolutionEngine(
                     val out = SelfPrOrchestrator(agent, onStatus).run(si) { spent }
                     // The topic is closed as soon as a PR exists (merged or rejected later), so it is never opened twice.
                     out.pr?.let { store.savePending(it); store.bump("prs"); store.reject(it.topic) }
+                    // Level 3: merge without asking when every gate holds (CI green, small, unprotected, trusted history).
+                    out.pr?.let { pr ->
+                        val actions = SelfPrActions(agent.tools.github, store)
+                        val watching = actions.lastMerge()?.let { m -> !m.counted && !m.reverted && System.currentTimeMillis() < m.at + SelfPrActions.WATCH_MS } == true
+                        if (SelfPrActions.mayAutoMerge(settings.autonomyLevel, pr, store.counter("merged_ok"), watching)) {
+                            val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode }.getOrDefault(0L)
+                            runCatching { actions.merge(pr, version, auto = true) }
+                        }
+                    }
                     log(EvoTier.SELF_PR, (if (out.pr != null) "PR #${out.pr.number} açıldı: ${out.pr.title}. " else "Self-PR denemesi: ") + out.summary)
                     produced++
                 } else {
@@ -183,7 +196,8 @@ class EvolutionEngine(
         if (com.suarez.coder.skills.SkillSafety.scan(skill).isNotEmpty()) return false
         skills.saveGlobal(skill)
         skills.setEnabled(p.name, false)
-        store.addLog(EvoTier.MEMORY, "Yetenek önerisi: /${p.name} — ${p.description} (Ayarlar > Yetenekler'den inceleyip açın)")
+        store.addLog(EvoTier.MEMORY, "Yetenek önerisi: /${p.name} — ${p.description} (sınava alındı; Ayarlar > Yetenekler'den de açılabilir)")
+        store.queue(Experiment.skill(p.name, "öz-gelişim önerisi"))
         return true
     }
 

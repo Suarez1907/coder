@@ -210,6 +210,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                         }
                     }
                 }
+                if (!vm.running && vm.canRate && items.isNotEmpty()) item(key = "rate") { RateRow(vm) }
                 vm.activePlan?.let { plan -> item(key = "plan-${plan.id}") { PlanCard(vm, plan) } }
                 if (vm.running) item(key = "running") { RunningRow(vm) }
             }

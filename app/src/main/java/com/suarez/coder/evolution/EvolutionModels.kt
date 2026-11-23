@@ -26,6 +26,15 @@ data class SessionTrace(
     val processed: Boolean = false,
     /** CI waits during the run (passed or failed). */
     val ciRuns: Int = 0,
+    /** The user's thumbs: 1 good, -1 bad, 0 none. Strongest signal there is. */
+    val rating: Int = 0,
+    /** "route|role|model" the manager picked for this run (learned model choice), if any. */
+    val arm: String? = null,
+    /** Branch head before the run, so a successful run can later be replayed as an exam question. */
+    val baseSha: String? = null,
+    val branch: String? = null,
+    /** Route the run took (SIMPLE_EDIT, COMPLEX_ARCHITECT, QUESTION_ONLY), when known. */
+    val route: String? = null,
 ) {
     /** Problems that are worth learning from (a clean, cheap run teaches nothing). */
     val troubleScore get() = diffErrorCount + ciFailureCount * 2 + escalations.size + (if (stopped) 1 else 0) + (if (userCorrection) 2 else 0)
@@ -36,6 +45,8 @@ data class SessionTrace(
         .put("diffErr", diffErrorCount).put("diffSamples", JSONArray(diffErrorSamples)).put("ciFail", ciFailureCount)
         .put("ciSig", JSONArray(ciSignatures)).put("esc", JSONArray(escalations)).put("routing", routing ?: JSONObject.NULL)
         .put("upgraded", upgradedToArchitect).put("stopped", stopped).put("correction", userCorrection).put("processed", processed).put("ciRuns", ciRuns)
+        .put("rating", rating).put("arm", arm ?: JSONObject.NULL).put("base", baseSha ?: JSONObject.NULL)
+        .put("branch", branch ?: JSONObject.NULL).put("route", route ?: JSONObject.NULL)
 
     companion object {
         private fun list(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -45,11 +56,14 @@ data class SessionTrace(
             o.optDouble("cost", 0.0), o.optInt("diffErr"), list(o.optJSONArray("diffSamples")), o.optInt("ciFail"),
             list(o.optJSONArray("ciSig")), list(o.optJSONArray("esc")), if (o.isNull("routing")) null else o.optString("routing"),
             o.optBoolean("upgraded"), o.optBoolean("stopped"), o.optBoolean("correction"), o.optBoolean("processed"), o.optInt("ciRuns"),
+            o.optInt("rating"), o.optNullableString("arm"), o.optNullableString("base"), o.optNullableString("branch"), o.optNullableString("route"),
         )
     }
 }
 
-enum class EvoTier(val label: String) { MEMORY("Hafıza"), ROUTING("Yönlendirme"), SELF_PR("Self-PR"), INFO("Bilgi") }
+internal fun JSONObject.optNullableString(k: String): String? = if (has(k) && !isNull(k)) optString(k).ifBlank { null } else null
+
+enum class EvoTier(val label: String) { MEMORY("Hafıza"), ROUTING("Yönlendirme"), SELF_PR("Self-PR"), INFO("Bilgi"), EXAM("Sınav"), MODEL("Model"), POLICY("Politika") }
 
 data class EvolutionLogEntry(
     val id: String,
@@ -120,6 +134,8 @@ data class EvolutionReport(
     val escalationNotes: List<EscalationNote>,
     val selfImprovement: SelfImprovement?,
     val skillProposal: SkillProposal? = null,
+    /** A short working rule to test in an exam (e.g. "Run ci_wait after every push"). */
+    val workingRule: String? = null,
 )
 
 enum class PrState { PENDING, MERGED, REJECTED, CONFLICT }

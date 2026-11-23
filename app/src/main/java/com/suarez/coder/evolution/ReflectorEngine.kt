@@ -21,7 +21,10 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
             append("Return exactly this JSON shape:\n")
             append("{\"lessons\": [\"...\"], \"routing\": {\"complexity_threshold\": null, \"local_hints\": [{\"pattern\": \"...\", \"route\": \"SIMPLE|QUESTION|COMPLEX\"}], ")
             append("\"escalation_notes\": [{\"task_type\": \"SIMPLE_EDIT\", \"model\": \"...\", \"note\": \"...\"}]}, ")
-            append("\"self_improvement\": null, \"skill_proposal\": null}\n\nRules:\n")
+            append("\"self_improvement\": null, \"skill_proposal\": null, \"working_rule\": null}\n\nRules:\n")
+            append("- working_rule: only if the trace shows a mistake in HOW the assistant worked that a one-line rule would prevent ")
+            append("in any repository (e.g. \"Read the failing file before patching it\"). Max 160 chars, imperative. It is tested in an exam ")
+            append("before use. Otherwise null.\n")
             if (EvoTier.MEMORY in tiers) {
                 append("- lessons: 0-3 short, concrete, reusable facts about the TARGET project that would have prevented an error in this ")
                 append("trace (e.g. a build requirement, a file convention). Not generic advice. Do not repeat CURRENT LESSONS.\n")
@@ -84,6 +87,8 @@ class ReflectorEngine(private val ask: suspend (system: String, user: String, ma
                         SkillProposal(n, p.optString("description").trim().lines().first().take(160), p.optString("body").trim())
                     }
                 }?.takeIf { it.description.length >= 10 && it.body.length in 80..6_000 },
+                workingRule = o.optString("working_rule").takeIf { !o.isNull("working_rule") }?.trim()?.lines()?.first()
+                    ?.takeIf { it.length in 15..160 && com.suarez.coder.skills.SkillSafety.scan(mapOf("rule" to it)).isEmpty() },
             )
         }
 

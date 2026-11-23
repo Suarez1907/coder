@@ -149,7 +149,10 @@ class ToolRegistry(private val settings: Settings) {
     var cloud: com.suarez.coder.cloudtools.CloudToolRunner? = null
 
     /** The repository skills belong to: the pinned context repo, else the default repo. */
-    fun activeRepo(): String = normalizeRepo(settings.contextRepo.ifBlank { settings.defaultRepo })
+    fun activeRepo(): String = normalizeRepo(repoOverride ?: settings.contextRepo.ifBlank { settings.defaultRepo })
+
+    /** Exam runs: the repo to use when a tool call names none. */
+    var repoOverride: String? = null
 
     private val needMoreInfo = ToolSpec("need_more_info",
         "Plan için harita ve bağlam yetmiyorsa çağır: istediğin dosyalar (en fazla 3) verilir ve okuma/GitHub araçların açılır.",
@@ -231,7 +234,7 @@ class ToolRegistry(private val settings: Settings) {
         fun req(k: String) = s(k) ?: throw ToolException("'$k' parametresi gerekli")
         fun i(k: String) = if (a.has(k) && !a.isNull(k)) a.optInt(k) else null
         fun repo(): String {
-            val r = s("repo") ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
+            val r = s("repo") ?: repoOverride ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
             return normalizeRepo(r)
         }
         if (role in ARCHITECT_ROLES) architectDenied(call.name, s("method"))?.let { throw ToolException(it) }
