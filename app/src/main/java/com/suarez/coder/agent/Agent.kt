@@ -135,6 +135,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         const val MAX_ARCHITECT_READS = 3
         /** The architect is called at most this many times per task: plan, or ask for ≤3 files and then plan. */
         const val MAX_ARCHITECT_CALLS = 2
+        const val CLARIFY_MARK = "❓"
         /** Decision 1 difficulty (0 trivial … 3 very hard) below which the medium architect is used. */
         const val MEDIUM_COMPLEXITY = 1.5
         const val SNAPSHOT_MAX_COMMITS = 6
@@ -740,6 +741,12 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                                 history += ChatMessage.Notice("↪️ Yedek karar sağlayıcısı kullanıldı", s.joinToString("\n"))
                             }
                             route = d.route
+                            // A vague change request: ask 1-3 cheap questions instead of planning the wrong thing.
+                            if (needsClarification(d, history)) {
+                                history += routeInfo(d)
+                                askClarification(history, ui, request.text, d.clarity!!)
+                                return
+                            }
                             // Moderate work does not need the most expensive architect or deep thinking.
                             val medium = ModelRef.parse(settings.architectModelMedium)
                             if (d.route == Route.COMPLEX_ARCHITECT && d.complexity != null && d.complexity < mediumThreshold() &&
@@ -814,6 +821,27 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             roleOverrides = emptyMap()
             ui.update()
         }
+    }
+
+    /** True for a vague change request when the user has not just answered our questions. */
+    fun needsClarification(d: RoutingDecision, history: List<ChatMessage>): Boolean {
+        if (!settings.clarifyFirst || isEvolutionSession || d.route == Route.QUESTION_ONLY) return false
+        val clarity = d.clarity ?: return false
+        if (clarity >= com.suarez.coder.decision.RouterLogic.CLARITY_MIN) return false
+        val lastUser = history.indexOfLast { it is ChatMessage.User }
+        val prev = history.subList(0, maxOf(lastUser, 0)).lastOrNull { it is ChatMessage.Assistant } as? ChatMessage.Assistant
+        return prev?.text?.startsWith(CLARIFY_MARK) != true
+    }
+
+    /** One short, cheap call (the executor model): at most 3 questions, each with a sensible default. */
+    private suspend fun askClarification(history: MutableList<ChatMessage>, ui: AgentUi, request: String, clarity: Double) {
+        val system = "The user's request to a coding assistant is too vague to implement well. Ask at most 3 short, numbered questions " +
+            "in the user's language whose answers would change what gets built (what, where, how it should behave). For each, offer a " +
+            "sensible default in parentheses so the user can just say \"varsayılanlarla devam\". No preamble."
+        val reply = callModel(history, listOf(ChatMessage.User(request.take(3_000) + (recentContext(history)?.let { "\n\nPrevious exchange:\n$it" } ?: ""))),
+            editorRef(), "agent", system, emptyList(), ui, useCache = false, maxOut = 500, thinking = "low")
+        history += ChatMessage.Assistant("$CLARIFY_MARK Başlamadan önce netleştirelim (istek netliği %${(clarity * 100).toInt()}):\n\n" + reply.text.trim(), model = reply.model)
+        ui.update()
     }
 
     /** The previous exchange as plain text, so follow-ups like "devam et" can be classified. */

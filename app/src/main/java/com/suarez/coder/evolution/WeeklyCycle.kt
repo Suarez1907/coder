@@ -53,6 +53,18 @@ class WeeklyCycle(
             out += runCatching { SkillScout(agent.tools.github, importer, skills, store).run(repos) }.getOrElse { "Keşif hatası: ${it.message?.take(120)}" }
             store.addLog(EvoTier.INFO, out.last())
         }
+        if (settings.githubToken.isNotBlank()) {
+            onStatus("Proje sağlığı kontrol ediliyor")
+            val repos = (settings.profiles().map { it.repo } + settings.defaultRepo).filter { it.isNotBlank() }.distinct().take(8)
+            val health = ProjectHealth(agent.tools.github)
+            val results = repos.map { health.check(agent.tools.normalizeRepo(it)) }
+            File(store.dir, "health.json").writeText(org.json.JSONArray().also { a -> results.forEach { a.put(it.toJson()) } }.toString())
+            val bad = results.filter { !it.ok }
+            if (results.isNotEmpty()) {
+                store.addLog(EvoTier.INFO, "Proje sağlığı: " + (if (bad.isEmpty()) "${results.size} repo sorunsuz." else bad.joinToString(" | ") { it.line() }))
+                out += "Proje sağlığı: ${results.size - bad.size}/${results.size} sorunsuz."
+            }
+        }
         queueDefaultExperiment()
         out += runExperiments()
         return out.filter { it.isNotBlank() }.joinToString(" ")

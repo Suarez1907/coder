@@ -360,6 +360,16 @@ class Settings(context: Context) {
         get() = bool("evo_wifi", false)
         set(v) = putBool("evo_wifi", v)
 
+    /** Vague change requests get 1-3 short clarifying questions before any expensive planning. */
+    var clarifyFirst: Boolean
+        get() = bool("clarify_first", true)
+        set(v) = putBool("clarify_first", v)
+
+    /** Full orchestrator: two models build the same plan; the evaluator (or CI / reviewer) keeps the better one. */
+    var bestOfTwo: Boolean
+        get() = bool("best_of_two", false)
+        set(v) = putBool("best_of_two", v)
+
     /** Full orchestrator: an evaluator tests the running app (web: Playwright in GitHub Actions) against the contract. */
     var evaluatorEnabled: Boolean
         get() = bool("evaluator_enabled", false)

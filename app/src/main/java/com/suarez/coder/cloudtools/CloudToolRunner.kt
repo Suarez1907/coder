@@ -16,7 +16,7 @@ import java.util.zip.ZipInputStream
 class CloudToolRunner(
     private val github: GitHub,
     private val downloader: ApkDownloader,
-    private val outDir: File,
+    val outDir: File,
     private val ciErrors: suspend (repo: String, runId: Long) -> String,
     private val onStatus: (String?) -> Unit = {},
     private val pollMs: Long = 15_000,

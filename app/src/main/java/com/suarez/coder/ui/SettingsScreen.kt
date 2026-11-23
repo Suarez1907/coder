@@ -349,11 +349,20 @@ private fun ArchitectPage(vm: ChatViewModel) {
                 "veya konsolda hata varsa düzeltme turu açar. Android projelerinde CI testleri esas alınır. Daha pahalıdır: test betiği yazma çağrısı + CI dakikaları.") {
             s.evaluatorEnabled = it
         }
+        SwitchSetting("Tam mod: İki aday", "Zor işlerde iki model yarışır", s.bestOfTwo,
+            "Mimar'ın planını iki farklı Uygulayıcı modeli (model havuzundan veya yükseltme modeli) ayrı ayrı uygular; ikisi geçici dallarda " +
+                "Değerlendirici veya CI ile sınanır, daha iyi (eşitse daha ucuz) olan devam eder. Yaklaşık iki kat maliyet ve süre.") {
+            s.bestOfTwo = it
+        }
     }
 
     Group {
         Title("Yönlendirme", "Akıllı Yönlendirme açıkken sıra: yerel kural ($0) → Decision 1 → ucuz model → manuel ayar.")
         SwitchSetting("Akıllı Yönlendirme", "Görevi otomatik sınıflandır", s.smartRouting) { s.smartRouting = it; vm.refreshSettings() }
+        SwitchSetting("Belirsizse önce sor", "Net olmayan isteklerde 1-3 kısa soru", s.clarifyFirst,
+            "Decision isteği belirsiz bulursa (netlik %35 altı) kod yazmadan önce varsayılanlı kısa sorular sorar. Cevabından sonra bir daha sormaz.") {
+            s.clarifyFirst = it
+        }
         SwitchSetting("Decision 1 kullan", "Sınıflandırma + dosya seçimi + zorluk", s.useDecision1,
             "Kapalıysa yalnızca yerel kural ve ucuz model kullanılır.") { s.useDecision1 = it }
         var dp by remember { mutableStateOf(s.decisionProvider) }

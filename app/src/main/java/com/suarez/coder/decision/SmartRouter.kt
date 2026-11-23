@@ -37,6 +37,8 @@ data class RoutingDecision(
     /** Decision model that answered and its reported cost (null = estimate from tokens). */
     val decisionModel: String? = null,
     val costUsd: Double? = null,
+    /** Probability the request is specific enough to implement without questions (same Decision call). */
+    val clarity: Double? = null,
 )
 
 /** Pure decision rules (unit-tested). */
@@ -50,6 +52,15 @@ object RouterLogic {
 
     const val ROUTE_KEY = "route"
     const val COMPLEXITY_KEY = "complexity"
+    const val CLARITY_KEY = "clear"
+    /** Below this probability of "specific enough", a change request gets 1-3 clarifying questions first. */
+    const val CLARITY_MIN = 0.35
+
+    fun clarityQuestion() = DecisionQuestion(
+        CLARITY_KEY, "noul",
+        "Is the request specific enough that an engineer could implement it in this repository without asking the user anything " +
+            "(what to change, where, and how it should behave)? Follow-ups to the previous exchange count as specific when the context makes them clear.",
+    )
 
     fun complexityQuestion() = DecisionQuestion(
         COMPLEXITY_KEY, "score",
@@ -131,7 +142,7 @@ object RouterLogic {
         }.sortedByDescending { it.yes }.take(MAX_SELECTED_FILES)
         return RoutingDecision(route, raw, conf, upgraded, selected, files.size, manualFiles,
             result.latencyMs, result.inputTokens, null, repo, ref, r?.probabilities ?: emptyMap(),
-            result.answers[COMPLEXITY_KEY]?.score, result.model, result.costUsd)
+            result.answers[COMPLEXITY_KEY]?.score, result.model, result.costUsd, result.answers[CLARITY_KEY]?.noul)
     }
 }
 
@@ -161,7 +172,7 @@ class SmartRouter(
                 prefetchPreviews(repo, ref, ranked.take(PREVIEW_FILES).mapNotNull { byPath[it] })
                 files = ranked.map { p -> FilePreview(p, byPath[p]?.sha?.let { previewCache[it] }) }
             }
-            val questions = listOf(RouterLogic.routeQuestion(), RouterLogic.complexityQuestion()) +
+            val questions = listOf(RouterLogic.routeQuestion(), RouterLogic.complexityQuestion(), RouterLogic.clarityQuestion()) +
                 files.mapIndexed { i, f -> RouterLogic.fileQuestion(i, f) }
             val input = RouterLogic.buildInput(request, recent, repo, files.map { it.path })
             RouterLogic.interpret(decide(input, questions), files, manualFiles, repo, ref)

@@ -258,7 +258,15 @@ private fun ImportDialog(vm: ChatViewModel, onDismiss: () -> Unit) {
                         }
                     }
                     Spacer(Modifier.size(8.dp))
-                    Text("Yıldızlı repolar", style = MaterialTheme.typography.titleSmall, color = strong)
+                    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Yıldızlı repolar", style = MaterialTheme.typography.titleSmall, color = strong, modifier = Modifier.weight(1f))
+                        TextButton(onClick = {
+                            val all = vm.starred.orEmpty()
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(all.joinToString("\n") { r ->
+                                r.fullName + if (r.description.isNotBlank()) " - " + r.description.take(120) else "" }))
+                        }, enabled = !vm.starred.isNullOrEmpty()) { Text("Listeyi kopyala", color = strong) }
+                    }
                     OutlinedTextField(filter, { filter = it }, singleLine = true, placeholder = { Text("Filtrele") },
                         textStyle = Mono.small, modifier = Modifier.fillMaxWidth())
                     val list = vm.starred.orEmpty().filter { filter.isBlank() || it.fullName.contains(filter, true) || it.description.contains(filter, true) }

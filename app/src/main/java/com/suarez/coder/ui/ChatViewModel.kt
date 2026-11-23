@@ -607,6 +607,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var experiments by mutableStateOf<List<com.suarez.coder.evolution.Experiment>>(emptyList())
         private set
     var weekly by mutableStateOf<com.suarez.coder.evolution.WeeklyReport?>(null)
+    /** Last weekly project health check (report only). */
+    var health by mutableStateOf<List<String>>(emptyList())
         private set
     var goalPlan by mutableStateOf<com.suarez.coder.evolution.GoalPlan?>(null)
         private set
@@ -636,7 +638,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val since = System.currentTimeMillis() - com.suarez.coder.evolution.WeeklyReport.WEEK_MS
             val report = com.suarez.coder.evolution.WeeklyReport.compute(evoStore.traces(), evoStore.log(), exps,
                 com.suarez.coder.evolution.CrashRecorder.recent(getApplication(), since), best)
-            withContext(Dispatchers.Main) { experiments = exps; weekly = report }
+            val h = runCatching {
+                val a = org.json.JSONArray(java.io.File(evoStore.dir, "health.json").readText())
+                (0 until a.length()).map { com.suarez.coder.evolution.ProjectHealth.lineFromJson(a.getJSONObject(it)) }
+            }.getOrDefault(emptyList())
+            withContext(Dispatchers.Main) { experiments = exps; weekly = report; health = h }
         }
     }
 

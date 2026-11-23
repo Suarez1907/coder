@@ -107,6 +107,14 @@ fun ManagerSection(vm: ChatViewModel) {
         }
     }
 
+    if (vm.health.isNotEmpty()) {
+        Card {
+            Heading("Proje sağlığı (haftalık)")
+            Text("Yalnızca rapor: sürüm yükseltmeleri otomatik yapılmaz; istersen sohbette iste.", style = MaterialTheme.typography.bodySmall, color = dim)
+            vm.health.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = ink) }
+        }
+    }
+
     Card {
         Heading("Yönetici")
         Text("Hedefini kendi cümlelerinle yaz; yönetici bunu sınırlı ayarlara çevirir ve uygulamadan önce gösterir.",

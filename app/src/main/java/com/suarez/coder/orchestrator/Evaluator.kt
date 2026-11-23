@@ -15,11 +15,16 @@ import java.io.File
  * criterion passes and the console is clean. Android projects are judged by their CI (unit/screenshot tests).
  */
 class Evaluator(private val agent: Agent) {
+    /** The script is written once and reused on every branch this evaluator checks (two candidates, re-checks). */
+    private var cachedScript: String? = null
+
     enum class Kind { WEB, ANDROID, NONE }
 
     data class Criterion(val name: String, val pass: Boolean, val evidence: String)
 
-    data class Result(val criteria: List<Criterion>, val consoleErrors: List<String>, val note: String? = null, val outputMarker: String? = null) {
+    data class Result(val criteria: List<Criterion>, val consoleErrors: List<String>, val note: String? = null, val outputMarker: String? = null,
+                      /** Share of the screen that changed compared with the last passing run (0..1), if there was one. */
+                      val visualChange: Double? = null) {
         /** Hard threshold: all criteria pass, no console errors, at least one criterion checked. */
         val passed get() = criteria.isNotEmpty() && criteria.all { it.pass } && consoleErrors.isEmpty()
         val summary get() = "${criteria.count { it.pass }}/${criteria.size} ölçüt geçti" + if (consoleErrors.isNotEmpty()) ", ${consoleErrors.size} konsol hatası" else ""
@@ -29,6 +34,9 @@ class Evaluator(private val agent: Agent) {
             append("EVALUATOR (running app in a real browser): ").append(summary).append('\n')
             criteria.filter { !it.pass }.forEach { append("FAIL: ").append(it.name).append(" — ").append(it.evidence.take(400)).append('\n') }
             consoleErrors.take(10).forEach { append("CONSOLE: ").append(it.take(300)).append('\n') }
+            visualChange?.takeIf { it >= VisualDiff.NOTICE }?.let {
+                append("VISUAL: the main screen changed %${(it * 100).toInt()} compared with the last passing version; check it was intended.\n")
+            }
             note?.let { append(it).append('\n') }
         }
     }
@@ -91,6 +99,11 @@ class Evaluator(private val agent: Agent) {
         val dir = appDir(paths) ?: return Result(emptyList(), emptyList(), "Statik index.html bulunamadı; değerlendirici atlandı.")
         val script = ".coder/eval/${plan.id}.mjs"
         if (gh.readFileRaw(plan.repo, script, plan.branch) == null) {
+            cachedScript?.let { code ->
+                gh.commitFiles(plan.repo, plan.branch, "coder: değerlendirme betiği", listOf(GitHub.FileChange(script, code, false)), plan.base)
+            }
+        }
+        if (gh.readFileRaw(plan.repo, script, plan.branch) == null) {
             ui.status("Değerlendirici test betiğini yazıyor")
             val files = plan.tasks.flatMap { it.ownedFiles }.distinct().take(6)
                 .mapNotNull { p -> gh.readFileRaw(plan.repo, p, plan.branch)?.let { "### $p\n${it.take(8_000)}" } }.joinToString("\n\n")
@@ -100,6 +113,7 @@ class Evaluator(private val agent: Agent) {
             val reply = agent.callModel(history, listOf(ChatMessage.User(prompt)), agent.escalationRef() ?: agent.editorRef(), "reviewer",
                 SCRIPT_SYSTEM, emptyList(), ui, useCache = false, maxOut = 6_000)
             val code = extractCode(reply.text) ?: return Result(emptyList(), emptyList(), "Değerlendirici geçerli bir test betiği yazamadı.")
+            cachedScript = code
             gh.commitFiles(plan.repo, plan.branch, "coder: değerlendirme betiği", listOf(GitHub.FileChange(script, code, false)), plan.base)
         }
         ui.status("Uygulama tarayıcıda test ediliyor (GitHub Actions)")
@@ -109,6 +123,13 @@ class Evaluator(private val agent: Agent) {
             ?: return Result(emptyList(), emptyList(), "Değerlendirme çalışmadı:\n" + out.take(2_000))
         val json = output.files.firstOrNull { it.name == RESULTS }?.let { File(it.path).readText() }
         val r = json?.let { parse(it) } ?: return Result(emptyList(), emptyList(), "results.json yok veya bozuk.", CloudToolRunner.marker(output.tool, output.runId, output.dir))
-        return r.copy(outputMarker = CloudToolRunner.marker(output.tool, output.runId, output.dir))
+        // Visual regression: compare the main screenshot with the last passing run of this repository.
+        val visualDir = File(runner.outDir.parentFile, "visual").apply { mkdirs() }
+        val baseline = File(visualDir, plan.repo.replace('/', '_') + ".png")
+        val preview = output.preview
+        val change = if (preview != null && baseline.isFile) VisualDiff.compare(baseline, preview) else null
+        val result = r.copy(outputMarker = CloudToolRunner.marker(output.tool, output.runId, output.dir), visualChange = change)
+        if (result.passed && preview != null) runCatching { preview.copyTo(baseline, overwrite = true) }
+        return result
     }
 }
