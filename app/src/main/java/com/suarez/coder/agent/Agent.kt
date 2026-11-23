@@ -39,6 +39,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
+import org.json.JSONObject
 
 /** What the agent needs from the screen. */
 interface AgentUi {
@@ -79,7 +80,105 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 java.io.File(filesDir, "cloud"),
                 ciErrors = { repo, id -> tools.ciErrors(repo, id) },
             )
+            tools.semantic = com.suarez.coder.context.SemanticIndex(tools.github, { r, ref -> tools.filteredTree(r, ref) },
+                java.io.File(filesDir, "semantic"), { settings.geminiKey })
         }
+        tools.preCommit = { repo, branch, changes -> selfReview(repo, branch, changes) }
+        tools.beforeWrite = { repo, branch -> checkpoint(repo, branch) }
+    }
+
+    // ---- Run-scoped helpers: self-review, checkpoints, @-mentions, similar tasks, custom modes ----
+
+    /** The conversation of the current run (hooks called from tools write their notices and costs here). */
+    private var liveHistory: MutableList<ChatMessage>? = null
+    private val reviewedOnce = HashSet<Int>()
+    private val runCheckpoints = HashSet<String>()
+    /** Set by the app: a hint from similar successful earlier tasks, or null. */
+    var similarFor: ((repo: String, request: String) -> String?)? = null
+    private val depCache = HashMap<String, List<String>>()
+
+    private suspend fun selfReview(repo: String, branch: String, changes: List<Triple<String, String?, String?>>) {
+        if (!settings.selfReview || isEvolutionSession) return
+        val code = changes.filter { (p, b, a) -> a != null && a != b && !Regex("\\.(md|txt|json|ya?ml|xml|svg|csv|properties)$", RegexOption.IGNORE_CASE).containsMatchIn(p) }
+        if (code.isEmpty()) return
+        val key = code.joinToString("|") { "${it.first}:${it.third.hashCode()}" }.hashCode()
+        if (!reviewedOnce.add(key)) return // the same change again after a warning: the model judged it a false alarm
+        val history = liveHistory ?: ArrayList()
+        val ref = routerRef() ?: editorRef()
+        val reply = runCatching {
+            callModel(history, listOf(ChatMessage.User("Change to $repo ($branch):\n\n" + SelfReview.view(code))), ref, "review",
+                SelfReview.SYSTEM, emptyList(), NoUi, useCache = false, maxOut = 400, thinking = "low")
+        }.getOrNull() ?: return
+        val v = SelfReview.parse(reply.text) ?: return
+        if (v.ok || v.problems.isEmpty()) return
+        history += ChatMessage.Notice("Öz-denetim commit'i durdurdu (${v.problems.size} sorun)", v.problems.joinToString("\n"))
+        throw com.suarez.coder.tools.ToolException("Öz-denetim (commit YAPILMADI) şu sorunları buldu:\n- " + v.problems.joinToString("\n- ") +
+            "\nDosyayı gerekirse yeniden oku, düzelt ve tekrar gönder. Bu bir yanlış alarmsa aynı değişikliği bir kez daha gönder; ikinci kez denetlenmez.")
+    }
+
+    private suspend fun checkpoint(repo: String, branch: String) {
+        if (!settings.checkpoints || isEvolutionSession || !runCheckpoints.add("$repo@$branch")) return
+        val sha = try { tools.github.branchSha(repo, branch) } catch (e: CancellationException) { throw e } catch (e: Exception) { runCheckpoints.remove("$repo@$branch"); return }
+        liveHistory?.add(ChatMessage.Notice("Kontrol noktası: $branch" + (sha?.let { " @ ${it.take(7)}" } ?: " (yeni dal)"),
+            Checkpoints.marker(Checkpoints.Point(repo, branch, sha))))
+    }
+
+    private object NoUi : AgentUi {
+        override fun update() {}
+        override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) = false
+    }
+
+    /** @file, @ci, @diff, @url in the request become one context block (read once, before routing). */
+    private suspend fun mentionContext(text: String): ChatMessage.ContextBlock? {
+        val ms = Mentions.parse(text)
+        if (ms.isEmpty()) return null
+        val repo = tools.activeRepo()
+        val ref = context.ref?.ifBlank { null }
+        val parts = ArrayList<String>()
+        val files = ms.filterIsInstance<Mentions.Mention.File>().map { it.path }
+        if (files.isNotEmpty() && repo.isNotBlank()) runCatching { tools.readFilesText(repo, files, ref) }.onSuccess { parts += it }
+        for (m in ms) runCatching {
+            when (m) {
+                Mentions.Mention.Ci -> {
+                    val runs = JSONObject(tools.github.raw("GET", "/repos/$repo/actions/runs?per_page=1" + (ref?.let { "&branch=$it" } ?: ""), null).substringAfter('\n'))
+                    val r = runs.optJSONArray("workflow_runs")?.optJSONObject(0)
+                    parts += if (r == null) "@ci: çalıştırma yok." else "@ci: ${r.optString("name")} ${r.optString("conclusion").ifBlank { r.optString("status") }} " +
+                        "(${r.optString("html_url")})\n" + (if (r.optString("conclusion") == "failure") tools.ciErrors(repo, r.optLong("id")) else "")
+                }
+                Mentions.Mention.Diff -> parts += "@diff:\n" + tools.github.lastCommitDiff(repo, ref)
+                is Mentions.Mention.Url -> parts += "@${m.url}:\n" + tools.fetchUrl(m.url)
+                is Mentions.Mention.File -> Unit
+            }
+        }.onFailure { e -> if (e is CancellationException) throw e; parts += "@ bağlamı okunamadı: ${e.message?.take(160)}" }
+        if (parts.isEmpty()) return null
+        return ChatMessage.ContextBlock("Context the user referenced with @:\n\n" + parts.joinToString("\n\n").take(60_000),
+            "@ " + ms.joinToString(", ") { when (it) { is Mentions.Mention.File -> it.path; Mentions.Mention.Ci -> "ci"; Mentions.Mention.Diff -> "diff"; is Mentions.Mention.Url -> it.url } })
+    }
+
+    fun customModes(): List<CustomMode> = CustomMode.list(settings.customModes)
+    fun activeMode(): CustomMode? = settings.activeMode.takeIf { it.isNotBlank() }?.let { n -> customModes().firstOrNull { it.name == n } }
+
+    private suspend fun runMode(history: MutableList<ChatMessage>, ui: AgentUi, mode: CustomMode) {
+        val ref = ModelRef.parse(mode.model)?.takeIf { settings.keyFor(it.provider).isNotBlank() } ?: editorRef()
+        history += ChatMessage.RouteInfo("Mod: ${mode.name} (${ref.model}, ${mode.access.label})", mode.instructions.take(400), "MODE", false)
+        ui.update()
+        val readOnly = mode.access == CustomMode.Access.READ_ONLY
+        val specs = when (mode.access) {
+            CustomMode.Access.READ_ONLY -> tools.readOnlySpecs.filter { it.name != "submit_plan" }
+            CustomMode.Access.NO_OPS -> tools.specs.filter { it.name !in setOf("github_create_pull_request", "github_merge_pull_request", "github_run_workflow") }
+            CustomMode.Access.FULL -> tools.specs
+        }
+        val system = (if (readOnly) questionSystem() else agentSystem()) + "\nACTIVE MODE \"${mode.name}\" (follow it): ${mode.instructions}"
+        agentLoop(history, ui, ref, "agent", system, "agent", specs, readOnly = readOnly, stopTool = null,
+            maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
+    }
+
+    /** Library versions of the project, read once per repo (for lookup_docs and to avoid outdated APIs). */
+    private suspend fun dependencies(): List<String> {
+        val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return emptyList()
+        depCache[repo]?.let { return it }
+        val files = DepVersions.FILES.mapNotNull { p -> runCatching { tools.github.readFileRaw(repo, p, context.ref?.ifBlank { null }) }.getOrNull()?.let { p to it } }.toMap()
+        return DepVersions.extract(files).also { depCache[repo] = it }
     }
     private val cache = GeminiCacheManager(settings)
     private var budgetApprovedUpTo = 0.0
@@ -458,6 +557,11 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             "When a patch fails, first re-read the current text of that file (github_read_file, the relevant line range), find the root cause, " +
             "then apply a corrected patch. Never retry the same SEARCH blindly.")
         if (settings.projectNotes) appendLine(notesRule)
+        if (settings.todoList) appendLine("Task list: for work with 3 or more steps, call update_todos first with the steps, keep exactly one " +
+            "item in_progress, and send the full updated list as you finish each step. Skip it for one-step work.")
+        if (settings.docsLookup) appendLine("Library APIs: when you are not sure an API exists in the version the project uses (see DEPENDENCIES), " +
+            "or a build error points at a library call, call lookup_docs before writing the code.")
+        if (settings.semanticSearch && tools.semantic != null && settings.geminiKey.isNotBlank()) appendLine("Finding code: if you do not know which file holds something, use semantic_search (by meaning) before reading files one by one.")
     }
 
     /**
@@ -536,6 +640,9 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         var hasMap = false
         if (kind == "architect") repoMapFor(history, ui)?.let { parts += "REPO MAP (paths, types, signatures; bodies removed):\n$it"; hasMap = true }
         context.load()?.let { parts += it.text }
+        if (settings.docsLookup) runCatching { dependencies() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
+            parts += "DEPENDENCIES (versions the project uses; write code for these, check unsure APIs with lookup_docs):\n" + it.joinToString(", ")
+        }
         if (kind == "architect") architectHasMap = hasMap
         // No date in the prefix: an identical snapshot stays cacheable across days.
         val text = if (parts.isEmpty()) null else
@@ -711,9 +818,22 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         architectOverride = null
         architectThinkingOverride = null
         val start = history.size
+        liveHistory = history
+        runCheckpoints.clear()
+        reviewedOnce.clear()
         try {
             val requestIndex = history.indexOfLast { it is ChatMessage.User }
             val request = history.getOrNull(requestIndex) as? ChatMessage.User
+            // @-mentions and similar earlier tasks go right after the request (the volatile end, not the cached prefix).
+            if (request != null && requestIndex >= 0 && !isEvolutionSession) {
+                var at = requestIndex + 1
+                mentionContext(request.text)?.let { history.add(at++, it); ui.update() }
+                if (settings.similarTasks) similarFor?.invoke(tools.activeRepo(), request.text)?.let {
+                    history.add(at, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
+                }
+            }
+            val mode = if (override == null && !isEvolutionSession) activeMode() else null
+            if (mode != null) { runMode(history, ui, mode); return }
             var route: Route? = override
             var auto: com.suarez.coder.context.ContextProvider.Loaded? = null
             var autoPaths: List<String> = emptyList()
@@ -815,6 +935,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
             }
         } finally {
+            liveHistory = null
             usageSummary(history, start)?.let { history += it }
             architectOverride = null
             architectThinkingOverride = null

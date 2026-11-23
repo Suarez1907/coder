@@ -28,6 +28,40 @@ class GitHub(private val token: () -> String) {
     }
 
     /** Commit sha of a branch/tag (default branch when [ref] is null). */
+    /** Head of a branch, or null when the branch does not exist (404). Other failures throw. */
+    suspend fun branchSha(repo: String, branch: String): String? {
+        val r = call("GET", "/repos/$repo/git/ref/heads/${enc(branch)}")
+        if (r.code == 404) return null
+        if (r.code !in 200..299) throw ToolException("Branch okunamadı ($branch): HTTP ${r.code}")
+        return JSONObject(r.body).getJSONObject("object").getString("sha")
+    }
+
+    /** Moves a branch back to [sha] (force), or deletes it when [sha] is null (it did not exist before). */
+    suspend fun resetBranch(repo: String, branch: String, sha: String?) {
+        checkWrite(repo, branch)
+        if (sha == null) {
+            val r = call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}")
+            if (r.code !in 200..299 && r.code != 422) throw ToolException("Branch silinemedi: HTTP ${r.code} ${r.body.take(200)}")
+            return
+        }
+        val r = call("PATCH", "/repos/$repo/git/refs/heads/${enc(branch)}", JSONObject().put("sha", sha).put("force", true))
+        if (r.code !in 200..299) throw ToolException("Geri alınamadı: HTTP ${r.code} ${r.body.take(300)}")
+    }
+
+    /** Files changed by the head commit of a branch with their patches (for @diff). */
+    suspend fun lastCommitDiff(repo: String, branch: String?, maxChars: Int = 15_000): String {
+        val ref = branch?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
+        val o = json("GET", "/repos/$repo/commits/${enc(ref)}")
+        val sb = StringBuilder("Son commit ${o.optString("sha").take(7)} ($ref): ${o.optJSONObject("commit")?.optString("message")?.lineSequence()?.firstOrNull() ?: ""}\n")
+        val files = o.optJSONArray("files") ?: JSONArray()
+        for (i in 0 until files.length()) {
+            val f = files.getJSONObject(i)
+            sb.append("\n### ").append(f.optString("filename")).append(" (").append(f.optString("status")).append(")\n").append(f.optString("patch"))
+            if (sb.length > maxChars) { sb.setLength(maxChars); sb.append("\n…(kesildi)"); break }
+        }
+        return sb.toString()
+    }
+
     suspend fun headSha(repo: String, ref: String?): String {
         val r = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val res = call("GET", "/repos/$repo/commits/${enc(r)}", accept = "application/vnd.github.sha")

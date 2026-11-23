@@ -103,6 +103,7 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text(s.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (s.id in vm.backgroundRuns) Text("Arka planda çalışıyor", style = Mono.tiny, color = coder.architect)
                             Text(
                                 listOfNotNull(s.repo.substringAfterLast('/').ifBlank { null }, fmt.format(Date(s.updatedAt)), Pricing.formatUsd(s.costUsd))
                                     .joinToString(" · "),

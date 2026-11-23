@@ -333,6 +333,29 @@ private fun ArchitectPage(vm: ChatViewModel) {
     }
 
     Group {
+        Title("Akıllı özellikler", "Hatayı azaltan yardımcılar. Hepsi ucuzdur; kapatmak araç listesini ve istemi kısaltır.")
+        SwitchSetting("Güncel belge (lookup_docs)", "Kütüphane API'sini sürüme göre kontrol eder", s.docsLookup,
+            "Projedeki sürümler (Gradle, package.json, pubspec, Godot) bağlama eklenir; model emin olmadığı API'yi Context7'den, " +
+                "olmazsa resmi siteden okur. Eski/var olmayan API hatalarını azaltır.") { s.docsLookup = it; vm.projectSettingsChanged() }
+        TextSetting("Context7 API anahtarı (isteğe bağlı)", s.context7Key, secret = true,
+            info = "Boşken de çalışır; anahtar yalnızca hız sınırını yükseltir (context7.com/dashboard).") { s.context7Key = it }
+        SwitchSetting("Görev listesi", "Çok adımlı işlerde canlı yapılacaklar kartı", s.todoList,
+            "Model 3+ adımlı işlerde önce listeyi çıkarır, her adımda işaretler. Adım atlamayı ve konudan sapmayı azaltır.") { s.todoList = it; vm.projectSettingsChanged() }
+        SwitchSetting("Commit öncesi öz-denetim", "Ucuz model diff'e bakar", s.selfReview,
+            "Kod commit edilmeden önce eksik import, silinen ama kullanılan kod, yarım değişiklik gibi kesin hataları arar. Bulursa commit " +
+                "yapılmaz ve model düzeltir; yanlış alarmda aynı değişiklik ikinci kez gönderilince denetlenmeden geçer.") { s.selfReview = it }
+        SwitchSetting("Benzer geçmiş görevler", "Başarılı eski çözümleri ipucu olarak verir", s.similarTasks,
+            "Öz-gelişimin kaydettiği başarılı görevlerden en benzer 1-2 tanesinin özeti isteğin yanına eklenir.") { s.similarTasks = it }
+        SwitchSetting("Kontrol noktaları", "Her görevden önce dal başını kaydeder", s.checkpoints,
+            "Sohbette \"Buraya geri dön\" düğmesi dalı o noktaya geri alır (onay ister).") { s.checkpoints = it }
+        SwitchSetting("Anlamsal kod araması", "Kodu anlamına göre bulur (Gemini anahtarı)", s.semanticSearch,
+            "Repo bir kez gömme modeliyle dizinlenir (telefonda saklanır, sonra yalnızca değişen dosyalar). Maliyet: 1M token başına " +
+                "yaklaşık 0,15 $; orta boy bir repo birkaç sent.") { s.semanticSearch = it; vm.projectSettingsChanged() }
+    }
+
+    Group { ModesEditor(vm) }
+
+    Group {
         Title("Orkestratör", "Yalnızca Mimar'a giden (çok dosyalı) işlerde kullanılır. Kapalı: normal akış, ek çağrı yok. " +
             "Hafif Sıralı: plan → alt görevler sırayla, her biri ayrı commit. Tam: plan → dosyaları çakışmayan işçiler paralel → " +
             "İnceleyici → tek commit. Sohbet ekranındaki kontrol panelinden görev başına değiştirilebilir.")
@@ -496,6 +519,60 @@ private fun TemplatesPage(vm: ChatViewModel) {
 }
 
 // ---- Building blocks ----
+
+/** User-defined modes: name, instructions, tool access, model. Chosen from the chat's control sheet. */
+@Composable
+private fun ModesEditor(vm: ChatViewModel) {
+    var modes by remember { mutableStateOf(vm.customModes()) }
+    var editing by remember { mutableStateOf<Pair<Int, com.suarez.coder.agent.CustomMode>?>(null) }
+    Title("Özel modlar", "Kendi çalışma modun: talimat, araç izni ve model. Sohbetteki kontrol panelinden seçilir; seçiliyken " +
+        "yönlendirme atlanır ve her istek bu modla çalışır. Otomatik'e dönmek için panelden Otomatik'i seç.")
+    if (modes.isEmpty()) Label("Henüz mod yok.", coder.muted)
+    modes.forEachIndexed { i, m ->
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(m.name, style = MaterialTheme.typography.bodyMedium)
+                Text("${m.access.label}" + (if (m.model.isNotBlank()) " · ${m.model}" else ""), style = MaterialTheme.typography.bodySmall, color = coder.muted)
+            }
+            TextButton(onClick = { editing = i to m }) { Text("Düzenle") }
+            TextButton(onClick = { modes = modes.filterIndexed { j, _ -> j != i }; vm.saveModes(modes) }) { Text("Sil") }
+        }
+    }
+    Row {
+        TextButton(onClick = { editing = -1 to com.suarez.coder.agent.CustomMode("", "") }) { Text("Yeni mod") }
+        if (modes.isEmpty()) TextButton(onClick = { modes = com.suarez.coder.agent.CustomMode.EXAMPLES; vm.saveModes(modes) }) { Text("Örnekleri ekle") }
+    }
+    editing?.let { (idx, m) ->
+        var name by remember(idx) { mutableStateOf(m.name) }
+        var instr by remember(idx) { mutableStateOf(m.instructions) }
+        var access by remember(idx) { mutableStateOf(m.access) }
+        var model by remember(idx) { mutableStateOf(m.model) }
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text(if (idx < 0) "Yeni mod" else "Modu düzenle") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(name, { name = it.take(30) }, singleLine = true, label = { Text("Ad") })
+                    OutlinedTextField(instr, { instr = it }, minLines = 3, maxLines = 8, label = { Text("Talimat") })
+                    Segmented(com.suarez.coder.agent.CustomMode.Access.entries.map { it.name to it.label }, access.name) {
+                        access = com.suarez.coder.agent.CustomMode.Access.valueOf(it)
+                    }
+                    OutlinedTextField(model, { model = it.trim() }, singleLine = true, label = { Text("Model (boş = Uygulayıcı)") },
+                        placeholder = { Text("ör. gemini/gemini-2.5-flash") })
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = name.isNotBlank() && instr.isNotBlank() && modes.filterIndexed { j, _ -> j != idx }.none { it.name == name.trim() }, onClick = {
+                    val nm = com.suarez.coder.agent.CustomMode(name.trim(), instr.trim(), access, model)
+                    modes = if (idx < 0) modes + nm else modes.mapIndexed { j, o -> if (j == idx) nm else o }
+                    vm.saveModes(modes)
+                    editing = null
+                }) { Text("Kaydet") }
+            },
+            dismissButton = { TextButton(onClick = { editing = null }) { Text("Vazgeç") } },
+        )
+    }
+}
 
 @Composable
 private fun Group(content: @Composable ColumnScope.() -> Unit) {

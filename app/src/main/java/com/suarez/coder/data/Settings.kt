@@ -365,6 +365,51 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** lookup_docs: current library documentation (Context7, then the web). */
+    var docsLookup: Boolean
+        get() = bool("docs_lookup", true)
+        set(v) = putBool("docs_lookup", v)
+
+    /** Optional Context7 API key (higher rate limits). */
+    var context7Key: String
+        get() = str("context7_key")
+        set(v) = put("context7_key", v.trim())
+
+    /** update_todos: the agent keeps a visible task list on multi-step work. */
+    var todoList: Boolean
+        get() = bool("todo_list", true)
+        set(v) = putBool("todo_list", v)
+
+    /** A cheap model checks every change right before it is committed. */
+    var selfReview: Boolean
+        get() = bool("self_review", true)
+        set(v) = putBool("self_review", v)
+
+    /** Successful earlier tasks similar to the request are given as a hint. */
+    var similarTasks: Boolean
+        get() = bool("similar_tasks", true)
+        set(v) = putBool("similar_tasks", v)
+
+    /** The branch head before the agent's first write is saved, so the chat can rewind to it. */
+    var checkpoints: Boolean
+        get() = bool("checkpoints", true)
+        set(v) = putBool("checkpoints", v)
+
+    /** semantic_search over an embedding index of the repo (Gemini key needed). */
+    var semanticSearch: Boolean
+        get() = bool("semantic_search", true)
+        set(v) = putBool("semantic_search", v)
+
+    /** User-defined modes (JSON list of CustomMode). */
+    var customModes: String
+        get() = str("custom_modes")
+        set(v) = put("custom_modes", v)
+
+    /** Name of the active custom mode; empty = automatic routing. */
+    var activeMode: String
+        get() = str("active_mode")
+        set(v) = put("active_mode", v)
+
     /** Full orchestrator: two models build the same plan; the evaluator (or CI / reviewer) keeps the better one. */
     var bestOfTwo: Boolean
         get() = bool("best_of_two", false)

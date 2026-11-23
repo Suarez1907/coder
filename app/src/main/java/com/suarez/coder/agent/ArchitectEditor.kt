@@ -197,6 +197,7 @@ class ArchitectEditor(private val agent: Agent) {
             )
             if (!ok) return Outcome(false, "Kullanıcı commit'i reddetti. Değişiklikler yazılmadı.")
         }
+        agent.tools.beforeWrite?.invoke(repo, branch)
         val result = agent.tools.github.commitFiles(repo, branch, message, changes, base)
         agent.tools.onRepoChanged()
         // Keep the applied blocks in the conversation so later turns know the new code without re-reading it.

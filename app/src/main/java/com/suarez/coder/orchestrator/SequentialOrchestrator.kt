@@ -58,6 +58,7 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
         val (changes, summary) = editor.changesFor(t.files.map { it.path to (it.action == "delete") }, originals, state)
         if (changes.isEmpty()) return t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, "değişiklik gerekmedi"))
         return try {
+            agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
             val res = agent.tools.github.commitFiles(plan.repo, plan.branch, "${plan.commitMessage} — ${t.title}", changes, plan.base)
             agent.tools.onRepoChanged()
             history += ChatMessage.Notice("✅ ${t.id} commit edildi", "$res\n$summary")

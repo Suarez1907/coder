@@ -143,11 +143,47 @@ class ToolRegistry(private val settings: Settings) {
             "requirements" to str("toolbox/manim: pip gereksinim dosyası (isteğe bağlı)"),
             required = listOf("tool", "script_path")))
 
-    val specs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
-        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool)
+    private val lookupDocs = ToolSpec("lookup_docs",
+        "Bir kütüphanenin GÜNCEL belgesini getirir (Context7, yoksa resmi site). Emin olmadığın bir API'yi, yeni bir sürümü veya " +
+            "hata veren bir çağrıyı kullanmadan ÖNCE çağır; projedeki sürümü (DEPENDENCIES satırı) version olarak ver.",
+        obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
+            "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
+            "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
+    private val updateTodos = ToolSpec("update_todos",
+        "Kullanıcının gördüğü görev listesini yazar/günceller. 3+ adımlı işlerde ilk iş olarak listeyi çıkar; her adımda tam listeyi " +
+            "tekrar gönder, aynı anda yalnızca bir madde in_progress olsun, biten maddeyi hemen done yap.",
+        obj("items" to JSONObject().put("type", "array").put("description", "Tüm maddeler, sırayla")
+            .put("items", obj("text" to str("Kısa madde"),
+                "status" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("pending", "in_progress", "done"))),
+                required = listOf("text", "status"))), required = listOf("items")))
+    private val semanticSearch = ToolSpec("semantic_search",
+        "Kodu ANLAMINA göre arar (ör. 'ödeme akışı nerede', 'skor nasıl kaydediliyor'). Dosya adını bilmediğinde github_search_code " +
+            "yerine kullan. İlk çağrıda repo dizinlenir (sonra yalnızca değişen dosyalar). En ilgili kod parçalarını satır aralığıyla döndürür.",
+        obj("repo" to str(repoDesc), "query" to str("Ne aradığın, doğal dilde"), "ref" to str("Branch (boşsa varsayılan)"),
+            required = listOf("query")))
+
+    val specs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
+        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool) + extraSpecs(true)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
-    val readOnlySpecs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors, githubApi, submitPlan, loadSkill)
+    val readOnlySpecs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors,
+        githubApi, submitPlan, loadSkill) + extraSpecs(false)
+
+    /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
+    private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
+        if (settings.docsLookup) add(lookupDocs)
+        if (settings.semanticSearch && semantic != null && settings.geminiKey.isNotBlank()) add(semanticSearch)
+        if (writer && settings.todoList) add(updateTodos)
+    }
+
+    private val docs = DocsLookup(web) { settings.context7Key }
+    /** Set by the Agent when it has app storage. */
+    var semantic: com.suarez.coder.context.SemanticIndex? = null
+
+    /** Runs before a commit with (path, before, after); throws ToolException to block it (self-review). */
+    var preCommit: (suspend (repo: String, branch: String, changes: List<Triple<String, String?, String?>>) -> Unit)? = null
+    /** Runs before the first write to a branch (checkpoint). */
+    var beforeWrite: (suspend (repo: String, branch: String) -> Unit)? = null
 
     /** Set by the Agent when it has app storage (not for evolution agents). */
     var skills: com.suarez.coder.skills.SkillRepository? = null
@@ -194,7 +230,8 @@ class ToolRegistry(private val settings: Settings) {
 
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
-            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill")
+            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill",
+            "lookup_docs", "semantic_search", "update_todos")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -273,11 +310,13 @@ class ToolRegistry(private val settings: Settings) {
                     GitHub.FileChange(f.getString("path"), if (f.isNull("content")) null else f.optString("content"), f.optBoolean("delete"))
                 }
                 val repo = repo(); val branch = req("branch"); val base = s("base_branch")
+                val befores = files.associate { f -> f.path to runCatching { readForEdit(repo, branch, base, f.path) }.getOrNull() }
                 val problems = files.filter { !it.delete && it.content != null }.mapNotNull { f ->
-                    val before = runCatching { readForEdit(repo, branch, base, f.path) }.getOrNull()
-                    CodeValidator.validate(f.path, before, f.content!!)?.let { "${f.path}: $it" }
+                    CodeValidator.validate(f.path, befores[f.path], f.content!!)?.let { "${f.path}: $it" }
                 }
                 if (problems.isNotEmpty()) throw ToolException("Yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n"))
+                preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
+                beforeWrite?.invoke(repo, branch)
                 github.commitFiles(repo, branch, req("message"), files, base) + staleNote(files.map { it.path })
             }
             "github_create_branch" -> github.createBranch(repo(), req("branch"), s("from"))
@@ -289,6 +328,9 @@ class ToolRegistry(private val settings: Settings) {
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
+            "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
+            "update_todos" -> com.suarez.coder.agent.Todos.ack(com.suarez.coder.agent.Todos.parse(a))
+            "semantic_search" -> (semantic ?: throw ToolException("Anlamsal arama bu oturumda kullanılamıyor.")).search(repo(), s("ref"), req("query"))
             "run_cloud_tool" -> {
                 val runner = cloud ?: throw ToolException("Bulut araçları bu oturumda kullanılamıyor.")
                 val r = repo()
@@ -348,6 +390,8 @@ class ToolRegistry(private val settings: Settings) {
             throw ToolException("Diff uygulandı ama yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n") +
                 "\nDüzeltilmiş blokları tekrar gönder.")
         }
+        preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
+        beforeWrite?.invoke(repo, branch)
         return github.commitFiles(repo, branch, message, changes, base) + "\n" + summary + staleNote(changes.map { it.path })
     }
 
@@ -357,6 +401,8 @@ class ToolRegistry(private val settings: Settings) {
     }
 
     suspend fun readFilesText(repo: String, paths: List<String>, ref: String?): String = readMany(repo, paths, ref)
+
+    suspend fun fetchUrl(url: String): String = web.fetch(url, 0, 12_000)
 
     private suspend fun readMany(repo: String, paths: List<String>, ref: String?): String {
         val sb = StringBuilder()

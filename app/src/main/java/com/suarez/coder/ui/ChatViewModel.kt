@@ -73,7 +73,9 @@ sealed class DownloadState {
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val settings = Settings(app)
-    val agent = Agent(settings, app.filesDir)
+    /** Agent of the chat on screen. A chat that keeps running in the background keeps its own agent. */
+    var agent = Agent(settings, app.filesDir)
+        private set
     private val sessionStore = SessionStore(File(app.filesDir, "chats"), legacyChat = File(app.filesDir, "chat.json"))
     private val ledger = Ledger(File(app.filesDir, "ledger.jsonl"))
     private val loggedKeys = HashSet<String>()
@@ -98,8 +100,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var canRate by mutableStateOf(false)
         private set
     val manager = com.suarez.coder.evolution.SelfManager(settings, evoStore)
-    /** Branch head when the current run started (lets a good run become an exam question). */
-    private var runBase: Pair<String, String>? = null
 
     /** Orchestrator plan of the chat on screen (shown as a card), or null. */
     var activePlan by mutableStateOf<OrchestratorPlan?>(null)
@@ -107,8 +107,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Set by "Duraklat": the run stops after the current subtask. */
     var pauseRequested by mutableStateOf(false)
         private set
-    /** Session the running job belongs to (the user may switch chats while it finishes). */
-    private var jobSession = ""
 
     /** Id of the chat on screen. */
     var currentSessionId by mutableStateOf("")
@@ -144,7 +142,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var settingsVersion by mutableStateOf(0)
         private set
 
-    private var job: Job? = null
+    /** A run and the chat it belongs to; it keeps going when the user switches chats (background task). */
+    private class Run(val sid: String, val agent: Agent, val work: MutableList<ChatMessage>) {
+        var job: Job? = null
+        var base: Pair<String, String>? = null
+    }
+    private val runs = HashMap<String, Run>()
+    /** Chats whose run continues in the background. */
+    var backgroundRuns by mutableStateOf<Set<String>>(emptySet())
+        private set
+    private val job: Job? get() = runs[currentSessionId]?.job
+    private val MAX_RUNS = 3
+    private fun refreshBackground() { backgroundRuns = runs.keys.filter { it != currentSessionId }.toSet() }
     private var previewJob: Job? = null
 
     /** Set when the first CI wait starts and notifications are not allowed yet; the UI asks once. */
@@ -162,9 +171,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sessions = sessionStore.list()
         profiles = settings.profiles()
         activePlan = planStore.recover(currentSessionId)
-        agent.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
-        agent.modelPicker = { route -> manager.pick(route) }
-        agent.policyText = { manager.policyText() }
+        wire(agent)
         if (settings.evoEnabled) com.suarez.coder.evolution.WeeklyWorker.schedule(app, settings.evoWifiOnly)
         viewModelScope.launch(Dispatchers.IO) {
             // New crashes and, after a self-update, a crash spike (rolled back at level 3).
@@ -173,21 +180,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val msg = runCatching { cycle.rollbackIfNeeded() }.getOrNull()
             withContext(Dispatchers.Main) { crashNotice = msg }
         }
-        agent.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
         refreshEvolution()
-        agent.orchestratorHooks = object : OrchestratorHooks {
+        viewModelScope.launch(Dispatchers.IO) { initLedger() }
+        // Keep the model lists fresh in the background (once a day), so nobody has to press "Modelleri getir".
+        if (System.currentTimeMillis() - settings.catalogAt > 24 * 3_600_000L) refreshCatalog(quiet = true)
+    }
+
+    /** Connects an agent to the app: memory, learned choices, plans, CI notifications, similar tasks. */
+    private fun wire(a: Agent): Agent {
+        a.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
+        a.modelPicker = { route -> manager.pick(route) }
+        a.policyText = { manager.policyText() }
+        a.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
+        a.similarFor = { repo, request ->
+            com.suarez.coder.agent.SimilarTasks.hint(com.suarez.coder.agent.SimilarTasks.pick(runCatching { evoStore.traces() }.getOrDefault(emptyList()), request, repo))
+        }
+        a.orchestratorHooks = object : OrchestratorHooks {
             override fun save(plan: OrchestratorPlan) {
-                val session = jobSession.ifBlank { currentSessionId }
+                val session = runs.values.firstOrNull { it.agent === a }?.sid ?: currentSessionId
                 planStore.save(session, plan)
                 if (session == currentSessionId) activePlan = plan
             }
             override fun pauseRequested() = pauseRequested
             override fun clearPause() { pauseRequested = false }
         }
-        viewModelScope.launch(Dispatchers.IO) { initLedger() }
-        // Keep the model lists fresh in the background (once a day), so nobody has to press "Modelleri getir".
-        if (System.currentTimeMillis() - settings.catalogAt > 24 * 3_600_000L) refreshCatalog(quiet = true)
-        agent.tools.ciListener = object : ToolRegistry.CiListener {
+        a.tools.ciListener = object : ToolRegistry.CiListener {
             override fun started(repo: String, label: String) {
                 val ctx = getApplication<Application>()
                 if (!CiWatchService.canNotify(ctx) && !askedNotificationPermission) {
@@ -201,6 +218,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 CiWatchService.finish(getApplication(), repo, success, summary, apkUrl)
             }
         }
+        return a
+    }
+
+    /** The chat on screen loses its agent to a background run: it gets a fresh one. */
+    private fun releaseForegroundAgent() {
+        if (runs.values.any { it.agent === agent }) agent = wire(Agent(settings, getApplication<Application>().filesDir))
+        else agent.resetSession()
     }
 
     fun refreshSettings() { settingsVersion++; profiles = settings.profiles() }
@@ -420,21 +444,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun start(override: Route?) = launchRun { work, agentUi -> agent.run(work, agentUi, override) }
 
     private fun launchRun(block: suspend (MutableList<ChatMessage>, AgentUi) -> Unit) {
+        if (runs.size >= MAX_RUNS) {
+            messages += ChatMessage.Notice("Aynı anda en fazla $MAX_RUNS görev çalışabilir; arka plandakilerden biri bitince tekrar gönder.", isError = true)
+            save()
+            return
+        }
         running = true
-        jobSession = currentSessionId
         canRate = false
         lastRating = 0
-        runBase = null
-        val baseRepo = agent.tools.normalizeRepo(repoNow())
+        val sid = currentSessionId
+        val a = agent
+        val run = Run(sid, a, messages.toMutableList())
+        runs[sid] = run
+        val baseRepo = a.tools.normalizeRepo(repoNow())
         if (baseRepo.isNotBlank() && settings.githubToken.isNotBlank()) viewModelScope.launch(Dispatchers.IO) {
             val branch = settings.contextRef.ifBlank { settings.defaultBranch }.ifBlank { null }
-            runCatching { agent.tools.github.headSha(baseRepo, branch) }.getOrNull()?.let { runBase = it to (branch ?: "") }
+            runCatching { a.tools.github.headSha(baseRepo, branch) }.getOrNull()?.let { run.base = it to (branch ?: "") }
         }
-        job = viewModelScope.launch {
-            val work = messages.toMutableList()
+        run.job = viewModelScope.launch {
+            val work = run.work
             val runStart = work.size
-            val agentUi = object : AgentUi by ui {
-                override fun update() { sync(work); save() }
+            val agentUi = object : AgentUi {
+                override fun update() { if (sid == currentSessionId) { sync(work); save() } else saveSession(sid, work) }
+                override fun status(text: String?) { if (sid == currentSessionId) ui.status(text) }
+                override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) =
+                    ui.confirm(if (sid == currentSessionId) title else "[Arka plan] $title", body, okText, cancelText)
             }
             try {
                 block(work, agentUi)
@@ -445,15 +479,109 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 work += ChatMessage.Notice("Hata: ${e.message ?: e.toString()}", isError = true)
             } finally {
-                sync(work)
-                pending = null
-                status = null
-                running = false
-                save()
-                recordTrace(work, runStart)
+                runs.remove(sid)
+                if (sid == currentSessionId) {
+                    sync(work)
+                    pending = null
+                    status = null
+                    running = false
+                    save()
+                } else {
+                    saveSession(sid, work)
+                    notifyBackgroundDone(work)
+                }
+                refreshBackground()
+                recordTrace(work, runStart, sid, a, run.base)
             }
         }
     }
+
+    private fun saveSession(sid: String, work: List<ChatMessage>) {
+        val snapshot = work.toList()
+        val repo = repoNow()
+        val cost = agent.sessionCost(snapshot)
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { sessionStore.save(sid, snapshot, repo, cost) }
+            val list = sessionStore.list()
+            withContext(Dispatchers.Main) { sessions = list }
+        }
+    }
+
+    private fun notifyBackgroundDone(work: List<ChatMessage>) {
+        val ctx = getApplication<Application>()
+        val request = (work.lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
+        val answer = (work.lastOrNull { it is ChatMessage.Assistant && it.text.isNotBlank() } as? ChatMessage.Assistant)?.text
+            ?: (work.lastOrNull { it is ChatMessage.Notice } as? ChatMessage.Notice)?.text ?: ""
+        com.suarez.coder.ci.TaskNotifier.done(ctx, "Arka plan görevi bitti", com.suarez.coder.docs.DocumentReader.collapse(request).take(80), answer.take(400))
+    }
+
+    /** Puts the input box text through a cheap model that turns it into a precise request (shown for editing, not sent). */
+    var enhancing by mutableStateOf(false)
+        private set
+
+    fun enhancePrompt(text: String, onResult: (String) -> Unit) {
+        if (text.isBlank() || enhancing) return
+        enhancing = true
+        viewModelScope.launch {
+            val a = agent
+            val tmp = ArrayList<ChatMessage>()
+            val system = "Rewrite the user's request to a coding agent as a precise task, in the user's language, as plain text (no " +
+                "markdown headings). Keep their intent and every detail they gave; do not invent features. Structure: one goal sentence; " +
+                "then short lines for: where (files/screens, only if known or obvious), behavior, acceptance criteria, out of scope. " +
+                "Keep @mentions and /commands unchanged. At most 12 lines. Output only the rewritten request."
+            val recent = messages.takeLast(6).joinToString("\n") { m -> when (m) { is ChatMessage.User -> "User: " + m.text.take(300); is ChatMessage.Assistant -> "Assistant: " + m.text.take(300); else -> "" } }.trim()
+            val r = runCatching {
+                a.callModel(tmp, listOf(ChatMessage.User(text.take(4_000) + (if (recent.isNotBlank()) "\n\nRecent chat:\n$recent" else ""))),
+                    a.routerRef() ?: a.editorRef(), "agent", system, emptyList(), ui, useCache = false, maxOut = 700, thinking = "low")
+            }
+            enhancing = false
+            r.onSuccess { reply ->
+                messages += tmp.filterIsInstance<ChatMessage.UsageRecord>()
+                save()
+                reply.text.trim().takeIf { it.isNotBlank() }?.let(onResult)
+            }.onFailure { e -> if (e !is CancellationException) docStatus = "İstek iyileştirilemedi: ${e.message?.take(120)}" }
+        }
+    }
+
+    /** Rewinds a branch to the checkpoint saved before the agent's first write (asks first; force update). */
+    fun rewind(p: com.suarez.coder.agent.Checkpoints.Point) {
+        if (running) return
+        viewModelScope.launch {
+            val what = if (p.sha == null) "${p.branch} dalı bu görevde oluşturuldu; SİLİNECEK." else
+                "${p.branch} dalı ${p.sha.take(7)} commit'ine zorla geri alınacak. Sonraki commit'ler daldan çıkar (GitHub'da sha ile hâlâ bulunabilir)."
+            val warn = if (p.branch == settings.defaultBranch || p.branch == "main" || p.branch == "master") "\n\nDİKKAT: bu varsayılan dal olabilir." else ""
+            if (!ui.confirm("Kontrol noktasına dön", "${p.repo}\n$what$warn", "Geri dön", "Vazgeç")) return@launch
+            val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.resetBranch(p.repo, p.branch, p.sha) } }
+            messages += ChatMessage.Notice(r.fold({ "Geri alındı: ${p.branch}" + (p.sha?.let { " → ${it.take(7)}" } ?: " silindi") },
+                { "Geri alınamadı: ${it.message?.take(200)}" }), isError = r.isFailure)
+            agent.invalidateSnapshot(); agent.context.invalidate()
+            save()
+        }
+    }
+
+    /** Repo paths for @-suggestions, loaded once per repo when the user types "@". */
+    var repoPaths by mutableStateOf<List<String>>(emptyList())
+        private set
+    private var pathsRepo = ""
+
+    fun loadRepoPaths() {
+        val repo = agent.tools.activeRepo()
+        if (repo.isBlank() || repo == pathsRepo || settings.githubToken.isBlank()) return
+        pathsRepo = repo
+        viewModelScope.launch {
+            repoPaths = runCatching { withContext(Dispatchers.IO) { agent.tools.filteredTree(repo, settings.contextRef.ifBlank { null }).map { it.path } } }.getOrDefault(emptyList())
+        }
+    }
+
+    // ---- Custom modes ----
+
+    fun customModes() = com.suarez.coder.agent.CustomMode.list(settings.customModes)
+    fun saveModes(list: List<com.suarez.coder.agent.CustomMode>) {
+        settings.customModes = com.suarez.coder.agent.CustomMode.toJson(list)
+        if (list.none { it.name == settings.activeMode }) settings.activeMode = ""
+        refreshSettings()
+    }
+    fun setActiveMode(name: String) { settings.activeMode = name; refreshSettings() }
 
     // ---- Skills & cloud tools ----
 
@@ -777,13 +905,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Self-evolution ----
 
     /** Saves a trace of the finished run (never for evolution runs) and queues the background evolution worker. */
-    private fun recordTrace(work: List<ChatMessage>, runStart: Int) {
+    private fun recordTrace(work: List<ChatMessage>, runStart: Int, sid: String, a: Agent, base: Pair<String, String>?) {
         val run = work.drop(runStart)
         val request = (work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
-        val trace = SessionTraceRecorder.record(run, request, currentSessionId, agent.tools.normalizeRepo(repoNow()),
-            agent.isEvolutionSession, agent::costOf)?.copy(arm = agent.lastArm, route = agent.lastRoute,
-            baseSha = runBase?.first, branch = runBase?.second?.ifBlank { null }) ?: return
-        canRate = true
+        val trace = SessionTraceRecorder.record(run, request, sid, a.tools.normalizeRepo(repoNow()),
+            a.isEvolutionSession, a::costOf)?.copy(arm = a.lastArm, route = a.lastRoute,
+            baseSha = base?.first, branch = base?.second?.ifBlank { null }) ?: return
+        if (sid == currentSessionId) canRate = true
         viewModelScope.launch(Dispatchers.IO) {
             evoStore.addTrace(trace)
             manager.learn(trace)
@@ -989,11 +1117,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Starts a fresh chat; the current one stays in the history. */
     fun newChat() {
-        stop()
         save()
+        releaseForegroundAgent()
+        running = false; status = null
         currentSessionId = sessionStore.newId()
         messages.clear()
-        agent.resetSession()
+        refreshBackground()
         preview = null
         activePlan = null
         pauseRequested = false
@@ -1001,12 +1130,21 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openSession(id: String) {
         if (id == currentSessionId) return
-        stop()
         save()
+        releaseForegroundAgent()
         currentSessionId = id
         messages.clear()
-        messages.addAll(sessionStore.load(id))
-        agent.resetSession()
+        val live = runs[id]
+        if (live != null) {
+            // Back to a chat that is still running: show its live messages and give it back its agent.
+            agent = live.agent
+            messages.addAll(live.work)
+            running = true
+        } else {
+            messages.addAll(sessionStore.load(id))
+            running = false; status = null
+        }
+        refreshBackground()
         preview = null
         activePlan = planStore.recover(id)
         pauseRequested = false
@@ -1018,7 +1156,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             planStore.delete(id)
             withContext(Dispatchers.Main) {
                 sessions = sessionStore.list()
-                if (id == currentSessionId) { currentSessionId = sessionStore.newId(); messages.clear(); agent.resetSession(); activePlan = null }
+                runs[id]?.job?.cancel()
+                if (id == currentSessionId) { currentSessionId = sessionStore.newId(); messages.clear(); releaseForegroundAgent(); running = false; activePlan = null }
             }
         }
     }

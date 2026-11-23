@@ -98,6 +98,7 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             val (changes, summary) = editor.changesFor(paths, originals, state)
             if (changes.isNotEmpty()) {
                 try {
+                    agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
                     val res = agent.tools.github.commitFiles(plan.repo, plan.branch, plan.commitMessage, changes, plan.base)
                     agent.tools.onRepoChanged()
                     history += ChatMessage.Notice("✅ Tek commit: ${changes.size} dosya", "$res\n$summary")

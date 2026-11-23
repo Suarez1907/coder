@@ -47,6 +47,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -204,8 +205,12 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 ApkActions(vm, m.text)
                             }
                             is ChatMessage.Notice -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                NoticeItem(m.text, m.detail, m.isError)
-                                m.detail?.let { CloudResultCards(vm, it) }
+                                val cp = com.suarez.coder.agent.Checkpoints.find(m.detail)
+                                if (cp != null) CheckpointItem(vm, m.text, cp)
+                                else {
+                                    NoticeItem(m.text, m.detail, m.isError)
+                                    m.detail?.let { CloudResultCards(vm, it) }
+                                }
                             }
                             is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi", m.text, false)
                             is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
@@ -222,6 +227,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 Text(it, style = Mono.tiny, color = coder.muted, maxLines = 2,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
             }
+            TodoCard(vm)
             ControlBar(vm) { showSheet = true }
             val context = LocalContext.current
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(ImagePrep.MAX_IMAGES)) { uris ->
@@ -241,7 +247,15 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 input = if (text.startsWith("/")) text.substringBefore(' ') + " " else text
                 vm.onInputChanged(input)
             }
+            val atWord = Regex("@([^\\s@]*)$").find(input) != null
+            LaunchedEffect(atWord) { if (atWord) vm.loadRepoPaths() }
+            if (atWord) MentionSuggestions(com.suarez.coder.agent.Mentions.suggestions(input, vm.repoPaths)) { token ->
+                input = input.replace(Regex("@([^\\s@]*)$"), token) + if (token.endsWith("://")) "" else " "
+                vm.onInputChanged(input)
+            }
             InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty() || vm.docs.any { it.text != null },
+                enhancing = vm.enhancing,
+                onEnhance = { vm.enhancePrompt(input) { better -> input = better; vm.onInputChanged(better) } },
                 onDoc = {
                     if (vm.docs.size >= com.suarez.coder.docs.DocumentReader.MAX_DOCS) Toast.makeText(context, "En fazla ${com.suarez.coder.docs.DocumentReader.MAX_DOCS} belge", Toast.LENGTH_SHORT).show()
                     else docPicker.launch(arrayOf("*/*"))
@@ -401,6 +415,8 @@ private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
             if (s.economyMode) Text(" · Flex", style = Mono.small, color = coder.cost)
             val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
             if (orch != com.suarez.coder.orchestrator.OrchestratorMode.OFF) Text(" · Ork: ${orch.short}", style = Mono.small, color = coder.architect)
+            vm.agent.activeMode()?.let { Text(" · Mod: ${it.name}", style = Mono.small, color = coder.editor) }
+            if (vm.backgroundRuns.isNotEmpty()) Text(" · Arka plan: ${vm.backgroundRuns.size}", style = Mono.small, color = coder.muted)
         }
         Icon(Icons.Default.KeyboardArrowUp, "Kontroller", tint = coder.muted, modifier = Modifier.size(18.dp))
     }
@@ -417,6 +433,8 @@ private fun InputRow(
     onPick: () -> Unit,
     onMic: () -> Unit,
     onDoc: () -> Unit = {},
+    enhancing: Boolean = false,
+    onEnhance: () -> Unit = {},
 ) {
     Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp, top = 2.dp), verticalAlignment = Alignment.Bottom) {
         OutlinedTextField(
@@ -431,7 +449,15 @@ private fun InputRow(
                     IconButton(onClick = onDoc, enabled = !running) { Icon(Icons.Outlined.Add, "Belge ekle", tint = coder.muted) }
                 }
             },
-            trailingIcon = { IconButton(onClick = onMic, enabled = !running) { Text("🎙", fontSize = 18.sp) } },
+            trailingIcon = {
+                Row {
+                    if (text.isNotBlank()) IconButton(onClick = onEnhance, enabled = !running && !enhancing) {
+                        if (enhancing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Outlined.Edit, "İsteği iyileştir", tint = coder.muted)
+                    }
+                    IconButton(onClick = onMic, enabled = !running) { Text("🎙", fontSize = 18.sp) }
+                }
+            },
             shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 unfocusedBorderColor = coder.border,
@@ -516,6 +542,54 @@ private fun AttachmentRow(paths: List<String>, onRemove: (String) -> Unit) {
     }
 }
 
+/** "Buraya geri dön": the branch head saved before the agent's first write in that run. */
+@Composable
+private fun CheckpointItem(vm: ChatViewModel, text: String, p: com.suarez.coder.agent.Checkpoints.Point) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(text, style = Mono.tiny, color = coder.muted, modifier = Modifier.weight(1f), maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+        TextButton(onClick = { vm.rewind(p) }, enabled = !vm.running) { Text("Buraya geri dön", style = Mono.tiny) }
+    }
+}
+
+/** The agent's task list (update_todos) for the current request. */
+@Composable
+private fun TodoCard(vm: ChatViewModel) {
+    val items = remember(vm.messages.size) { com.suarez.coder.agent.Todos.latest(vm.messages) }
+    if (items.isEmpty()) return
+    val done = items.count { it.status == com.suarez.coder.agent.Todos.Status.DONE }
+    if (done == items.size && !vm.running) return
+    var open by remember { mutableStateOf(true) }
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
+            .border(1.dp, coder.border, RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
+            .clickable { open = !open }.padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Text("Görevler $done/${items.size}", style = Mono.small, color = coder.muted)
+        if (open) items.forEach { i ->
+            val (mark, color) = when (i.status) {
+                com.suarez.coder.agent.Todos.Status.DONE -> "[x]" to coder.muted
+                com.suarez.coder.agent.Todos.Status.IN_PROGRESS -> "[>]" to MaterialTheme.colorScheme.onSurface
+                com.suarez.coder.agent.Todos.Status.PENDING -> "[ ]" to coder.muted
+            }
+            Text("$mark ${i.text}", style = Mono.small, color = color, maxLines = 2)
+        }
+    }
+}
+
+@Composable
+private fun MentionSuggestions(items: List<String>, onPick: (String) -> Unit) {
+    if (items.isEmpty()) return
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        items.forEach { t ->
+            Text(t, style = Mono.small, maxLines = 1,
+                modifier = Modifier.border(1.dp, coder.border, RoundedCornerShape(8.dp)).clickable { onPick(t) }.padding(horizontal = 8.dp, vertical = 5.dp))
+        }
+    }
+}
+
 /** Documents waiting to be sent: name, state, and remove. */
 @Composable
 private fun DocumentRow(vm: ChatViewModel) {
@@ -597,6 +671,19 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Çalışma ayarları", style = MaterialTheme.typography.titleMedium)
+        val customList = vm.customModes()
+        if (customList.isNotEmpty()) {
+            Text("Mod", style = MaterialTheme.typography.labelLarge, color = coder.muted)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                (listOf("" to "Otomatik") + customList.map { it.name to it.name }).forEach { (key, label) ->
+                    val on = s.activeMode == key
+                    OutlinedButton(onClick = { vm.setActiveMode(key) },
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (on) MaterialTheme.colorScheme.onSurface else coder.border)) {
+                        Text(label, style = Mono.small, color = if (on) MaterialTheme.colorScheme.onSurface else coder.muted)
+                    }
+                }
+            }
+        }
         SheetSwitch("Mimar Modu", "Planı güçlü model, kodu ucuz model yazar", s.architectMode) { vm.setArchitectMode(it) }
         SheetSwitch("Akıllı Yönlendirme", "Yerel kural → Decision 1 → ucuz model", s.smartRouting) { vm.setSmartRouting(it) }
         SheetSwitch("Ekonomi (Flex %50)", "Yarı fiyat; yanıtlar dakikalar sürebilir", s.economyMode) { vm.setEconomy(it) }
