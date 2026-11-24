@@ -111,11 +111,17 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                 plan = save(plan.copy(staged = emptyMap()), ui)
             }
 
+            // Pipelining: the evaluator does not need CI's result, so it runs while CI does.
+            val evalEarly = if (settings.pipelining && settings.evaluatorEnabled && changes.isNotEmpty() && plan.tasks.any { it.requiresCi }) {
+                val p0 = plan
+                kotlinx.coroutines.CoroutineScope(kotlin.coroutines.coroutineContext).async { evaluateSafely(history, ui, p0) }
+            } else null
             if (plan.tasks.any { it.requiresCi } && changes.isNotEmpty()) {
                 val (failed, report) = waitCi(plan)
                 history += ChatMessage.Notice(if (failed) "❌ CI başarısız" else "🟢 CI geçti", report, isError = failed)
                 ui.update()
                 if (failed) {
+                    evalEarly?.cancel()
                     if (plan.reviewRound >= maxRounds) {
                         return save(plan.copy(state = PlanState.PAUSED, note = "CI başarısız ve inceleme turu sınırı doldu."), ui)
                     }
@@ -126,17 +132,8 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             // Evaluator: the running app against the contract (web: Playwright in GitHub Actions). Failures go back to
             // the reviewer as evidence and become fix tickets, within the same round limit.
             if (settings.evaluatorEnabled && changes.isNotEmpty()) {
-                val from = history.size
-                val ev = try {
-                    agent.budgetDeferred = true
-                    runCatching { Evaluator(agent).evaluate(history, ui, plan) }.getOrElse { e ->
-                        if (e is CancellationException) throw e
-                        Evaluator.Result(emptyList(), emptyList(), "Değerlendirme hatası: ${e.message?.take(200)}")
-                    }
-                } finally {
-                    agent.budgetDeferred = false
-                }
-                plan = save(plan.addCost("Değerlendirici", costSince(history, from)), ui)
+                val (ev, evCost) = evalEarly?.await() ?: evaluateSafely(history, ui, plan)
+                plan = save(plan.addCost("Değerlendirici", evCost), ui)
                 if (ev != null) {
                     history += ChatMessage.Notice(
                         "🧪 Değerlendirici: " + (if (ev.criteria.isEmpty()) "ölçülemedi" else ev.summary) +
@@ -158,6 +155,22 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                 plan.roleCosts.entries.joinToString("\n") { "${it.key}: ${agent.money(it.value)}" }, model = "coder")
             return save(plan.copy(state = PlanState.DONE, note = null), ui)
         }
+    }
+
+    /** The evaluator with its cost (from the usage records it added); errors become an unmeasured result. */
+    private suspend fun evaluateSafely(history: MutableList<ChatMessage>, ui: AgentUi, plan: OrchestratorPlan): Pair<Evaluator.Result?, Double> {
+        val mark = history.size
+        val ev = try {
+            agent.budgetDeferred = true
+            runCatching { Evaluator(agent).evaluate(history, ui, plan) }.getOrElse { e ->
+                if (e is CancellationException) throw e
+                Evaluator.Result(emptyList(), emptyList(), "Değerlendirme hatası: ${e.message?.take(200)}")
+            }
+        } finally {
+            agent.budgetDeferred = false
+        }
+        val cost = history.drop(mark).filterIsInstance<ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
+        return ev to cost
     }
 
     /** The second editor for "two candidates": a pool model or the escalation model, never the same as the first. */

@@ -46,8 +46,15 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
         return out
     }
 
-    // ---- Actions: CI result for a commit's files (conclusion, log) ----
+    // ---- Actions: CI result for a commit's files (conclusion, log); [ciRerun] answers a re-run (flaky tests) ----
     var ci: ((Map<String, String>) -> Pair<String, String>)? = null
+    var ciRerun: ((Map<String, String>) -> Pair<String, String>)? = null
+    var reruns = 0
+    /** Request counters: GitHub calls by kind (graphql, contents, notModified...). */
+    val counts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private fun count(k: String) { counts.merge(k, 1, Int::plus) }
+    /** ETag support: conditional GETs get 304 when the body is unchanged. */
+    var etags = true
     private val runs = HashMap<Long, Pair<String, Pair<String, String>>>() // id -> (sha, (conclusion, log))
     val pulls = CopyOnWriteArrayList<JSONObject>()
     var merges = 0
@@ -90,6 +97,7 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
             return (script.poll() ?: fallback)(req)
         }
         if (path == "/user") return json(JSONObject().put("login", "me"))
+        if (path == "/graphql") { count("graphql"); return graphql(JSONObject(body).getString("query")) }
         val prefix = "/repos/$repo"
         if (!path.startsWith(prefix)) return notFound()
         val rest = path.removePrefix(prefix)
@@ -100,9 +108,10 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
         return when {
             p.isEmpty() || p == "/" -> json(JSONObject().put("default_branch", defaultBranch).put("private", private).put("pushed_at", "2026-11-20T00:00:00Z"))
             p.startsWith("/contents/") -> {
+                count("contents")
                 val file = URLDecoder.decode(p.removePrefix("/contents/"), "UTF-8")
                 val text = filesAt(param("ref") ?: defaultBranch)?.get(file) ?: return notFound()
-                MockResponse().setBody(text)
+                conditional(r, MockResponse().setBody(text), text)
             }
             p.startsWith("/git/ref/heads/") -> {
                 val b = URLDecoder.decode(p.removePrefix("/git/ref/heads/"), "UTF-8")
@@ -149,8 +158,10 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
                 json(JSONObject().put("sha", s), 201)
             }
             p.startsWith("/git/trees/") -> {
+                count("tree")
                 val files = filesAt(URLDecoder.decode(p.removePrefix("/git/trees/"), "UTF-8")) ?: return notFound()
-                json(JSONObject().put("tree", JSONArray().also { a -> files.forEach { (k, v) -> a.put(JSONObject().put("path", k).put("type", "blob").put("size", v.length).put("sha", "b" + v.hashCode())) } }))
+                val o = JSONObject().put("tree", JSONArray().also { a -> files.forEach { (k, v) -> a.put(JSONObject().put("path", k).put("type", "blob").put("size", v.length).put("sha", "b" + v.hashCode())) } })
+                conditional(r, json(o), o.toString())
             }
             p.startsWith("/commits/") -> {
                 val ref = URLDecoder.decode(p.removePrefix("/commits/"), "UTF-8")
@@ -175,6 +186,13 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
                 }
                 json(JSONObject().put("workflow_runs", a))
             }
+            p.matches(Regex("/actions/runs/\\d+/rerun-failed-jobs")) && m == "POST" -> {
+                val id = p.split('/')[3].toLong()
+                val (sha, _) = runs[id] ?: return notFound()
+                reruns++
+                runs[id] = sha to (ciRerun ?: ci!!)(trees.getValue(commits.getValue(sha).tree))
+                json(JSONObject(), 201)
+            }
             p.matches(Regex("/actions/runs/\\d+/jobs")) -> {
                 val id = p.split('/')[3].toLong()
                 val c = runs[id]?.second?.first ?: return notFound()
@@ -189,6 +207,25 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
             p.matches(Regex("/pulls/\\d+/merge")) -> { merges++; json(JSONObject().put("merged", true).put("sha", sha())) }
             else -> notFound()
         }
+    }
+
+    private fun conditional(r: RecordedRequest, resp: MockResponse, body: String): MockResponse {
+        if (!etags) return resp
+        val tag = "\"" + body.hashCode().toString(16) + "\""
+        if (r.getHeader("If-None-Match") == tag) { count("notModified"); return MockResponse().setResponseCode(304) }
+        return resp.setHeader("ETag", tag)
+    }
+
+    /** The subset of GraphQL the app uses: blobs by "ref:path" expressions, with aliases. */
+    private fun graphql(query: String): MockResponse {
+        val repoObj = JSONObject()
+        Regex("(f\\d+): object\\(expression: \"((?:[^\"\\\\]|\\\\.)*)\"\\)").findAll(query).forEach { m ->
+            val expr = m.groupValues[2].replace("\\\"", "\"").replace("\\\\", "\\")
+            val ref = expr.substringBefore(':').let { if (it == "HEAD") defaultBranch else it }
+            val text = filesAt(ref)?.get(expr.substringAfter(':'))
+            repoObj.put(m.groupValues[1], if (text == null) JSONObject.NULL else JSONObject().put("text", text).put("isBinary", false).put("isTruncated", false))
+        }
+        return json(JSONObject().put("data", JSONObject().put("repository", repoObj)))
     }
 
     fun shutdown() = server.shutdown()

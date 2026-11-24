@@ -197,6 +197,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         a.similarFor = { repo, request ->
             com.suarez.coder.agent.SimilarTasks.hint(com.suarez.coder.agent.SimilarTasks.pick(runCatching { evoStore.traces() }.getOrDefault(emptyList()), request, repo))
         }
+        a.onSpan = { span ->
+            val sid = runs.values.firstOrNull { it.agent === a }?.sid ?: currentSessionId
+            spanStore.add(sid, span)
+            if (sid == currentSessionId) viewModelScope.launch(Dispatchers.Main) { timeline = timeline + span }
+        }
         a.orchestratorHooks = object : OrchestratorHooks {
             override fun save(plan: OrchestratorPlan) {
                 val session = runs.values.firstOrNull { it.agent === a }?.sid ?: currentSessionId
@@ -463,6 +468,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val branch = settings.contextRef.ifBlank { settings.defaultBranch }.ifBlank { null }
             runCatching { a.tools.github.headSha(baseRepo, branch) }.getOrNull()?.let { run.base = it to (branch ?: "") }
         }
+        val runT0 = System.currentTimeMillis()
         run.job = viewModelScope.launch {
             val work = run.work
             val runStart = work.size
@@ -482,6 +488,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 work += ChatMessage.Notice("Hata: ${e.message ?: e.toString()}", isError = true)
             } finally {
                 runs.remove(sid)
+                (work.drop(runStart).firstOrNull { it is ChatMessage.User } as? ChatMessage.User ?: work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)
+                    ?.let { u -> a.onSpan?.invoke(com.suarez.coder.agent.Span(com.suarez.coder.agent.Span.RUN, u.text.lineSequence().first().take(60), runT0, System.currentTimeMillis())) }
                 if (sid == currentSessionId) {
                     sync(work)
                     pending = null
@@ -1149,6 +1157,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Starts a fresh chat; the current one stays in the history. */
     fun newChat() {
+        timeline = emptyList()
         save(now = true)
         releaseForegroundAgent()
         running = false; status = null
@@ -1162,6 +1171,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openSession(id: String) {
         if (id == currentSessionId) return
+        viewModelScope.launch(Dispatchers.IO) { val t = spanStore.load(id); withContext(Dispatchers.Main) { if (currentSessionId == id) timeline = t } }
         save(now = true)
         releaseForegroundAgent()
         currentSessionId = id
@@ -1332,6 +1342,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         agent.invalidateSnapshot()
         refreshSettings()
     }
+
+    // ---- Timeline: where a task's time and money went ----
+
+    private val spanStore = com.suarez.coder.agent.SpanStore(File(app.filesDir, "chats/spans"))
+    var timeline by mutableStateOf<List<com.suarez.coder.agent.Span>>(emptyList())
+        private set
+
+    // Kotlin runs initializers in source order: after the timeline state.
+    init { viewModelScope.launch(Dispatchers.IO) { val t = spanStore.load(currentSessionId); withContext(Dispatchers.Main) { timeline = t } } }
 
     // ---- Saving (SessionSaver) ----
 

@@ -82,10 +82,15 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 java.io.File(filesDir, "cloud"),
                 ciErrors = { repo, id -> tools.ciErrors(repo, id) },
             )
+            tools.flaky = com.suarez.coder.ci.Flaky.Store(java.io.File(filesDir, "flaky.json"))
             tools.semantic = com.suarez.coder.context.SemanticIndex(tools.github, { r, ref -> tools.filteredTree(r, ref) },
                 java.io.File(filesDir, "semantic"), { settings.geminiKey })
         }
-        tools.preCommit = { repo, branch, changes -> guards.selfReview(repo, branch, changes); guards.quickCheck(repo, branch, changes) }
+        tools.preCommit = { repo, branch, changes ->
+            guards.supplyChain(repo, branch, changes) // no model call: cheapest first
+            guards.selfReview(repo, branch, changes)
+            guards.quickCheck(repo, branch, changes)
+        }
         tools.beforeWrite = { repo, branch -> guards.checkpoint(repo, branch) }
     }
 
@@ -619,9 +624,14 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         val tried = HashSet<String>()
         while (true) {
             tried += cur.key
+            val t0 = System.currentTimeMillis()
+            val mark = history.size
+            fun spent() = history.drop(mark).filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
             try {
                 return callModelOn(history, messages, cur, role, system, toolSpecs, ui, useCache, maxOut, thinking, stable, jsonMode)
+                    .also { span(Span.MODEL, "${cur.model} ($role)", t0, spent()) }
             } catch (e: com.suarez.coder.llm.LlmException) {
+                span(Span.MODEL, "${cur.model} ($role)", t0, spent(), ok = false)
                 // Provider failover: an overloaded or failing model hands the same call to the next model in the user's chain.
                 val next = if (settings.failover && isTransient(e) && !isEvolutionSession && modelOverride == null && role !in setOf("router", "decision"))
                     (escalationChain() + listOfNotNull(escalationRef())).firstOrNull { it.key !in tried && settings.keyFor(it.provider).isNotBlank() }
@@ -632,6 +642,13 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 cur = next
             }
         }
+    }
+
+    /** Set by the app: every timed step of a run (model calls, tools, CI waits, cloud runs) for the timeline. */
+    var onSpan: ((Span) -> Unit)? = null
+
+    internal fun span(kind: String, name: String, start: Long, cost: Double = 0.0, ok: Boolean = true) {
+        runCatching { onSpan?.invoke(Span(kind, name, start, System.currentTimeMillis(), cost, ok)) }
     }
 
     /** The output cap for a role: learned from real answers (adaptive budget) or the configured value. */
@@ -785,6 +802,13 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         liveHistory = history
         liveUi = ui
         if (settings.quickCheck && settings.quickCheckWarm && !unattended && !isEvolutionSession) guards.prewarmQuickCheck(tools.activeRepo())
+        // Overlap: the tree, the repo map and the dependency versions load while routing decides (all cached afterwards).
+        val warm = if (settings.pipelining && !isEvolutionSession) kotlinx.coroutines.CoroutineScope(kotlin.coroutines.coroutineContext).launch {
+            val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return@launch
+            runCatching { tools.filteredTree(repo, context.ref) }
+            if (settings.docsLookup) runCatching { requestContext.dependencies() }
+            if (settings.repoMapForArchitect && (settings.architectMode || settings.smartRouting)) runCatching { repoMaps.get(repo, context.ref) }
+        } else null
         guards.startRun()
         try {
             val requestIndex = history.indexOfLast { it is ChatMessage.User }
@@ -901,6 +925,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
             }
         } finally {
+            warm?.cancel()
             liveHistory = null
             liveUi = null
             usageSummary(history, start)?.let { history += it }
@@ -1266,6 +1291,14 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
 
     /** Returns the result and whether the user rejected it. */
     private suspend fun executeTool(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi, role: String? = null): Pair<ChatMessage.ToolResult, Boolean> {
+        val t0 = System.currentTimeMillis()
+        return executeToolTimed(call, readOnly, allowOps, ui, role).also { (r, _) ->
+            val name = if (call.name == "run_cloud_tool") "run_cloud_tool:" + call.args.optString("tool") else call.name
+            span(Span.kindOfTool(call.name), name, t0, ok = !r.isError)
+        }
+    }
+
+    private suspend fun executeToolTimed(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi, role: String?): Pair<ChatMessage.ToolResult, Boolean> {
         ui.status(if (call.name == "ci_wait") "GitHub Actions derlemesi bekleniyor" else "Araç çalışıyor: ${call.name}")
         return try {
             val method = call.args.optString("method").ifBlank { null }

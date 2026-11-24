@@ -5,6 +5,7 @@ import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
 import com.suarez.coder.tools.ToolRegistry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -13,6 +14,52 @@ internal class CommitGuards(private val agent: Agent) {
     private val settings get() = agent.settings
     private val tools get() = agent.tools
     private val context get() = agent.context
+
+    /**
+     * Before anything else: secrets in the added lines and dependencies the change adds (does the package exist, does
+     * it imitate a famous one, known vulnerabilities, very new and unused). Certain problems need the user's yes.
+     */
+    suspend fun supplyChain(repo: String, branch: String, changes: List<Triple<String, String?, String?>>) {
+        if (!settings.supplyChainCheck) return
+        val own = listOf(settings.githubToken, settings.geminiKey, settings.deepseekKey, settings.openrouterKey, settings.context7Key)
+        val findings = changes.flatMap { (p, b, a) -> if (a == null) emptyList() else com.suarez.coder.security.Secrets.scan(p, b, a, own) }
+        if (findings.isNotEmpty()) {
+            val text = findings.joinToString("\n") { "${it.path}:${it.line} - ${it.kind}" }
+            val ok = !agent.unattended && !agent.isEvolutionSession && agent.liveUi?.confirm("Sır gibi görünen değer",
+                "Commit edilecek değişiklikte gizli anahtar veya token olabilir:\n$text\n\nRepo herkese açıksa bu anahtar çalınabilir. Yine de commit edilsin mi?",
+                "Yine de commit et", "Durdur") == true
+            if (!ok) {
+                agent.liveHistory?.add(ChatMessage.Notice("Güvenlik: değişiklikte sır bulundu, commit durdu", text, isError = true))
+                throw com.suarez.coder.tools.ToolException("Güvenlik: değişiklikte gizli anahtar/token var, commit YAPILMADI:\n$text\n" +
+                    "Değeri koddan çıkar; ortam değişkeni, GitHub secret veya git'e girmeyen yerel bir yapılandırma dosyası kullan.")
+            }
+        }
+        val deps = changes.flatMap { (p, b, a) -> if (a == null) emptyList() else com.suarez.coder.security.Deps.added(p, b, a) }.distinct().take(12)
+        if (deps.isEmpty()) return
+        // A private npm registry (.npmrc) makes "not on npmjs.org" meaningless.
+        val privateNpm = deps.any { it.eco == "npm" } &&
+            runCatching { tools.github.readFileRaw(repo, ".npmrc", branch) ?: tools.github.readFileRaw(repo, ".npmrc", null) }.getOrNull()?.contains("registry=") == true
+        agent.liveUi?.status("Yeni bağımlılıklar denetleniyor (${deps.size})")
+        val checker = com.suarez.coder.security.RegistryChecker()
+        val verdicts = try {
+            kotlinx.coroutines.coroutineScope { deps.filterNot { privateNpm && it.eco == "npm" }.map { d -> async { checker.check(d) } }.map { it.await() } }
+        } finally { agent.liveUi?.status(null) }
+        val o = com.suarez.coder.security.SupplyChainPolicy.evaluate(verdicts)
+        if (o.warn.isNotEmpty()) {
+            tools.commitNotes += o.warn.map { "Bağımlılık uyarısı: $it" }
+            agent.liveHistory?.add(ChatMessage.Notice("Bağımlılık uyarısı (${o.warn.size})", o.warn.joinToString("\n")))
+        }
+        if (o.block.isEmpty()) return
+        val text = o.block.joinToString("\n- ", prefix = "- ")
+        val ok = !agent.unattended && !agent.isEvolutionSession && agent.liveUi?.confirm("Şüpheli bağımlılık",
+            "$text\n\nModeller bazen var olmayan paket adları uydurur; saldırganlar bu adlarla zararlı paket yayınlar. Yine de eklensin mi?",
+            "Yine de ekle", "Durdur") == true
+        if (!ok) {
+            agent.liveHistory?.add(ChatMessage.Notice("Bağımlılık denetimi commit'i durdurdu", text, isError = true))
+            throw com.suarez.coder.tools.ToolException("Bağımlılık denetimi commit'i durdurdu:\n$text\n" +
+                "Doğru paket adını ve sürümünü doğrula (lookup_docs / web_search), sonra değişikliği düzeltip tekrar gönder.")
+        }
+    }
 
     /** A new run: every change may be reviewed again, every branch gets a fresh checkpoint. */
     fun startRun() { reviewedOnce.clear(); runCheckpoints.clear() }
@@ -83,8 +130,10 @@ internal class CommitGuards(private val agent: Agent) {
             try { runner.install(repo, t, null, force = false, upgrade = true, skipCi = true) } catch (e: CancellationException) { throw e } catch (e: Exception) { return }
         }
         agent.liveUi?.status("Hızlı ön kontrol: derleme denetleniyor (GitHub Actions)")
+        val t0 = System.currentTimeMillis()
         val r = try {
             QuickCheck(tools.github, runner) { rp, id -> tools.ciErrors(rp, id) }.check(repo, branch, code)
+                .also { agent.span(Span.CLOUD, "hızlı ön kontrol", t0, ok = it.ok) }
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
             QuickCheck.Result(true, "Hızlı ön kontrol çalıştırılamadı (${e.message?.take(120)}); commit'e devam edildi.")
         } finally { agent.liveUi?.status(null) }

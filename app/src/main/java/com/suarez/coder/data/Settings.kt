@@ -365,6 +365,21 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** Overlap waits: tree/repo map load during routing, the next subtask is edited while CI runs, the evaluator runs with CI. */
+    var pipelining: Boolean
+        get() = bool("pipelining", true)
+        set(v) = putBool("pipelining", v)
+
+    /** Secrets and new dependencies (existence, look-alike names, known vulnerabilities) are checked before each commit. */
+    var supplyChainCheck: Boolean
+        get() = bool("supply_chain", true)
+        set(v) = putBool("supply_chain", v)
+
+    /** A red CI that looks transient (network, runner, a test known to flip) is re-run once before the agent "fixes" anything. */
+    var flakyRetry: Boolean
+        get() = bool("flaky_retry", true)
+        set(v) = putBool("flaky_retry", v)
+
     /** Run the fixed evaluation set once after each app update (inside the weekly exam budget). */
     var evalOnUpdate: Boolean
         get() = bool("eval_on_update", true)

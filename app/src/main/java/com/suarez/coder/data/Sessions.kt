@@ -16,9 +16,21 @@ data class SessionMeta(
     val costUsd: Double,
 )
 
-/** Chats kept on the device: one JSON file per session plus a small index for the list. */
+/**
+ * Chats kept on the device: one append-only log per session (`<id>.jsonl`, one message per line) plus a small index.
+ * A save that only adds messages appends them (cost independent of the chat's length); anything else (compaction,
+ * a message inserted in the middle) rewrites the log atomically. Older `<id>.json` files are still read.
+ */
 class SessionStore(private val dir: File, private val legacyChat: File? = null) {
     private val indexFile = File(dir, "index.json")
+
+    // Declared before init: migrateLegacy() saves.
+    /** What each log holds right now (same message objects), to tell an append from a rewrite. */
+    private val written = HashMap<String, List<ChatMessage>>()
+
+    /** Bytes written by the last [save] (for tests and the performance view). */
+    @Volatile var lastWriteBytes = 0L
+        private set
 
     init {
         dir.mkdirs()
@@ -30,15 +42,43 @@ class SessionStore(private val dir: File, private val legacyChat: File? = null) 
     @Synchronized
     fun list(): List<SessionMeta> = readIndex().sortedByDescending { it.updatedAt }
 
+    private fun log(id: String) = File(dir, "$id.jsonl")
+    private fun legacy(id: String) = File(dir, "$id.json")
+
     @Synchronized
-    fun load(id: String): List<ChatMessage> =
-        runCatching { MessageJson.fromJson(File(dir, "$id.json").readText()) }.getOrDefault(emptyList())
+    fun load(id: String): List<ChatMessage> {
+        val f = log(id)
+        val msgs = if (f.exists()) readLog(f) else runCatching { MessageJson.fromJson(legacy(id).readText()) }.getOrDefault(emptyList())
+        if (f.exists()) written[id] = msgs
+        return msgs
+    }
+
+    /** One message per line; a torn last line (the app died mid-write) is skipped. */
+    private fun readLog(f: File): List<ChatMessage> = f.readLines().mapNotNull { line ->
+        if (line.isBlank()) null else runCatching { MessageJson.decode(JSONObject(line)) }.getOrNull()
+    }
 
     /** Saves messages and refreshes the index entry. Empty chats are not listed. */
     @Synchronized
     fun save(id: String, messages: List<ChatMessage>, repo: String, costUsd: Double) {
         if (messages.none { it is ChatMessage.User }) return
-        File(dir, "$id.json").writeText(MessageJson.toJson(messages))
+        val f = log(id)
+        val before = written[id]
+        val appendOnly = before != null && f.exists() && before.size <= messages.size && before.indices.all { before[it] === messages[it] }
+        lastWriteBytes = if (appendOnly) {
+            val tail = messages.subList(before!!.size, messages.size)
+            val text = tail.joinToString("") { MessageJson.encode(it).toString() + "\n" }
+            if (text.isNotEmpty()) f.appendText(text)
+            text.length.toLong()
+        } else {
+            val tmp = File(dir, "$id.jsonl.tmp")
+            val text = messages.joinToString("") { MessageJson.encode(it).toString() + "\n" }
+            tmp.writeText(text)
+            if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+            legacy(id).delete()
+            text.length.toLong()
+        }
+        written[id] = messages.toList()
         val now = System.currentTimeMillis()
         val list = readIndex()
         val old = list.firstOrNull { it.id == id }
@@ -50,7 +90,7 @@ class SessionStore(private val dir: File, private val legacyChat: File? = null) 
     @Synchronized
     fun delete(id: String) {
         val images = load(id).filterIsInstance<ChatMessage.User>().flatMap { it.images }
-        File(dir, "$id.json").delete()
+        log(id).delete(); legacy(id).delete(); written.remove(id)
         writeIndex(readIndex().filter { it.id != id })
         images.forEach { runCatching { File(it).delete() } }
     }
@@ -62,7 +102,7 @@ class SessionStore(private val dir: File, private val legacyChat: File? = null) 
         if (q.isEmpty()) return list()
         return list().filter { m ->
             m.title.lowercase().contains(q) || m.repo.lowercase().contains(q) ||
-                runCatching { File(dir, "${m.id}.json").readText().lowercase().contains(q) }.getOrDefault(false)
+                runCatching { (log(m.id).takeIf { it.exists() } ?: legacy(m.id)).readText().lowercase().contains(q) }.getOrDefault(false)
         }
     }
 

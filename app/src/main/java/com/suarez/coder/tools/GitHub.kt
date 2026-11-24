@@ -57,6 +57,30 @@ class GitHub(private val token: () -> String) {
         const val BRANCH_TTL = 600_000L
     }
 
+    /**
+     * Conditional requests: GET responses are kept with their ETag; asking again with If-None-Match returns 304 when
+     * nothing changed, which GitHub does not count against the rate limit and which carries no body.
+     */
+    object ETags {
+        private class Entry(val etag: String, val body: String, val type: String?)
+        private val map = LinkedHashMap<String, Entry>(64, 0.75f, true)
+        private var total = 0L
+        const val MAX_CHARS = 8_000_000L
+        var revalidated = 0L; private set
+        var stored = 0L; private set
+
+        @Synchronized fun etag(key: String): String? = map[key]?.etag
+        @Synchronized fun hit(key: String): Http.Result? = map[key]?.let { revalidated++; Http.Result(200, it.body, it.type, etag = it.etag) }
+        @Synchronized fun put(key: String, etag: String, body: String, type: String?) {
+            if (body.length > ReadCache.MAX_ITEM_CHARS) return
+            map.remove(key)?.let { total -= it.body.length }
+            map[key] = Entry(etag, body, type); total += body.length; stored++
+            val it = map.entries.iterator()
+            while (total > MAX_CHARS && it.hasNext()) { val e = it.next(); total -= e.value.body.length; it.remove() }
+        }
+        @Synchronized fun clear() { map.clear(); total = 0 }
+    }
+
     private suspend fun <T> cached(key: String, ttl: Long, size: (T) -> Int, load: suspend () -> T): T {
         val (hit, v) = ReadCache.get(key, ttl)
         @Suppress("UNCHECKED_CAST")
@@ -129,14 +153,66 @@ class GitHub(private val token: () -> String) {
             method in setOf("POST", "PUT", "PATCH") -> "{}".toRequestBody(Http.JSON)
             else -> null
         }
-        val req = Request.Builder().url(url)
+        val b = Request.Builder().url(url)
             .header("Authorization", "Bearer $t")
             .header("Accept", accept)
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "Coder-Android")
             .method(method, reqBody)
-            .build()
-        return Http.execute(req)
+        val key = "$accept|$url"
+        if (method == "GET") ETags.etag(key)?.let { b.header("If-None-Match", it) }
+        val r = Http.execute(b.build())
+        if (method == "GET") {
+            if (r.code == 304) ETags.hit(key)?.let { return it }
+            if (r.code == 200 && !r.etag.isNullOrBlank()) ETags.put(key, r.etag, r.body, r.contentType)
+        }
+        return r
+    }
+
+    /**
+     * Many files in one GraphQL request (instead of one REST call each); results land in the read cache, so the
+     * following [readFileRaw] calls are free. Files GraphQL cannot give as text (binary, truncated) and any GraphQL
+     * failure fall back to REST.
+     */
+    suspend fun readFilesBatch(repo: String, ref: String?, paths: List<String>): Map<String, String?> {
+        val r = ref?.takeIf { it.isNotBlank() }
+        val want = paths.map { it.trim('/') }.filter { it.isNotBlank() }.distinct()
+            .filter { !ReadCache.get(ReadCache.key(repo, "file", r, it), ReadCache.FILE_TTL).first }
+        val out = LinkedHashMap<String, String?>()
+        val (owner, name) = repo.split('/').let { (it.getOrNull(0) ?: "") to (it.getOrNull(1) ?: "") }
+        if (want.size > 1 && owner.isNotBlank() && name.isNotBlank()) {
+            for (chunk in want.chunked(GRAPHQL_BATCH)) {
+                val res = runCatching { graphqlFiles(owner, name, r ?: "HEAD", chunk) }.getOrNull() ?: break
+                for ((p, text) in res) {
+                    out[p] = text
+                    ReadCache.put(ReadCache.key(repo, "file", r, p), text, text?.length ?: 8)
+                }
+            }
+        }
+        for (p in paths.map { it.trim('/') }.distinct()) if (p !in out) out[p] = readFileRaw(repo, p, r)
+        return out
+    }
+
+    /** path -> text (null: missing); paths that need REST (binary/truncated) are left out. */
+    private suspend fun graphqlFiles(owner: String, name: String, ref: String, paths: List<String>): Map<String, String?> {
+        fun q(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        val fields = paths.mapIndexed { i, p -> "f$i: object(expression: ${q("$ref:$p")}) { ... on Blob { text isBinary isTruncated } }" }
+        val query = "query { repository(owner: ${q(owner)}, name: ${q(name)}) { ${fields.joinToString(" ")} } }"
+        val r = call("POST", "/graphql", JSONObject().put("query", query))
+        if (r.code !in 200..299) throw ToolException("GraphQL ${r.code}")
+        val root = JSONObject(r.body)
+        if (root.has("errors") && root.optJSONObject("data")?.optJSONObject("repository") == null) throw ToolException("GraphQL hatası")
+        val repoObj = root.getJSONObject("data").getJSONObject("repository")
+        val out = LinkedHashMap<String, String?>()
+        paths.forEachIndexed { i, p ->
+            val o = repoObj.optJSONObject("f$i")
+            when {
+                o == null -> out[p] = null // no such file at that ref
+                o.optBoolean("isBinary") || o.optBoolean("isTruncated") || o.isNull("text") -> Unit // REST fallback
+                else -> out[p] = o.getString("text")
+            }
+        }
+        return out
     }
 
     private suspend fun json(method: String, path: String, body: Any? = null): JSONObject {
@@ -212,6 +288,7 @@ class GitHub(private val token: () -> String) {
     companion object {
         /** API root; end-to-end tests point it at a fake GitHub. */
         @Volatile var API = "https://api.github.com"
+        const val GRAPHQL_BATCH = 40
 
         /**
          * A contents request for a folder returns a JSON array of entries. Files may also start with '['
@@ -480,6 +557,12 @@ class GitHub(private val token: () -> String) {
     }
 
     data class Job(val id: Long, val name: String, val conclusion: String?)
+
+    /** Re-runs only the failed jobs of a run (same commit): the flaky-failure check. */
+    suspend fun rerunFailedJobs(repo: String, runId: Long): Boolean {
+        checkWrite(repo, null)
+        return call("POST", "/repos/$repo/actions/runs/$runId/rerun-failed-jobs").code in 200..299
+    }
 
     suspend fun jobs(repo: String, runId: Long): List<Job> {
         val arr = json("GET", "/repos/$repo/actions/runs/$runId/jobs?per_page=50").optJSONArray("jobs") ?: return emptyList()

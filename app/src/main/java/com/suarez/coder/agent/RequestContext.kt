@@ -47,7 +47,8 @@ internal class RequestContext(private val agent: Agent) {
     internal suspend fun dependencies(): List<String> {
         val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return emptyList()
         depCache[repo]?.let { return it }
-        val files = DepVersions.FILES.mapNotNull { p -> runCatching { tools.github.readFileRaw(repo, p, context.ref?.ifBlank { null }) }.getOrNull()?.let { p to it } }.toMap()
+        val files = runCatching { tools.github.readFilesBatch(repo, context.ref?.ifBlank { null }, DepVersions.FILES) }.getOrDefault(emptyMap())
+            .mapNotNull { (p, t) -> t?.let { p to it } }.toMap()
         return DepVersions.extract(files).also { depCache[repo] = it }
     }
 }

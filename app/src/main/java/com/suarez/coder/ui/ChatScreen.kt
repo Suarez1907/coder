@@ -86,6 +86,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -159,8 +160,9 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val listState = rememberLazyListState()
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion // recompose when settings change
 
-    val items = buildItems(vm.messages)
-    val lastRoute = vm.messages.lastOrNull { it is ChatMessage.RouteInfo }
+    // Rebuilt only when the messages change (not on every keystroke or status update).
+    val items by remember { derivedStateOf { buildItems(vm.messages) } }
+    val lastRoute by remember { derivedStateOf { vm.messages.lastOrNull { it is ChatMessage.RouteInfo } } }
     val lastToolsKey = items.lastOrNull { it is DItem.Tools }?.key
 
     LaunchedEffect(vm.messages.size, vm.running) {
@@ -190,7 +192,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (items.isEmpty()) item { EmptyState() }
-                items(items, key = { it.key }) { item ->
+                items(items, key = { it.key }, contentType = { if (it is DItem.Tools) "tools" else (it as DItem.Msg).m::class.simpleName }) { item ->
                     when (item) {
                         is DItem.Tools -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
@@ -679,6 +681,9 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Çalışma ayarları", style = MaterialTheme.typography.titleMedium)
+        var showTimeline by remember { mutableStateOf(false) }
+        if (vm.timeline.isNotEmpty()) TextButton(onClick = { showTimeline = true }) { Text("Son görevin zaman çizelgesi") }
+        if (showTimeline) TimelineDialog(vm.timeline) { showTimeline = false }
         val customList = vm.customModes()
         if (customList.isNotEmpty()) {
             Text("Mod", style = MaterialTheme.typography.labelLarge, color = coder.muted)

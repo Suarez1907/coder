@@ -189,6 +189,11 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Runs before a commit with (path, before, after); throws ToolException to block it (self-review). */
     var preCommit: (suspend (repo: String, branch: String, changes: List<Triple<String, String?, String?>>) -> Unit)? = null
+    /** Warnings from the commit checks, appended to the commit result so the model sees them. */
+    val commitNotes = ArrayList<String>()
+
+    private fun notes(): String = if (commitNotes.isEmpty()) "" else "\n" + commitNotes.joinToString("\n").also { commitNotes.clear() }
+
     /** Runs before the first write to a branch (checkpoint). */
     var beforeWrite: (suspend (repo: String, branch: String) -> Unit)? = null
 
@@ -325,9 +330,10 @@ class ToolRegistry(private val settings: Settings) {
                     CodeValidator.validate(f.path, befores[f.path], f.content!!)?.let { "${f.path}: $it" }
                 }
                 if (problems.isNotEmpty()) throw ToolException("Yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n"))
+                commitNotes.clear()
                 preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
                 beforeWrite?.invoke(repo, branch)
-                github.commitFiles(repo, branch, req("message"), files, base) + staleNote(files.map { it.path })
+                github.commitFiles(repo, branch, req("message"), files, base) + staleNote(files.map { it.path }) + notes()
             }
             "github_create_branch" -> github.createBranch(repo(), req("branch"), s("from"))
             "github_create_pull_request" -> github.createPullRequest(repo(), req("title"), req("head"), s("base"), s("body"))
@@ -401,9 +407,10 @@ class ToolRegistry(private val settings: Settings) {
             throw ToolException("Diff uygulandı ama yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n") +
                 "\nDüzeltilmiş blokları tekrar gönder.")
         }
+        commitNotes.clear()
         preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
         beforeWrite?.invoke(repo, branch)
-        return github.commitFiles(repo, branch, message, changes, base) + "\n" + summary + staleNote(changes.map { it.path })
+        return github.commitFiles(repo, branch, message, changes, base) + "\n" + summary + staleNote(changes.map { it.path }) + notes()
     }
 
     private fun staleNote(paths: List<String>): String {
@@ -452,6 +459,7 @@ class ToolRegistry(private val settings: Settings) {
     }
 
     private suspend fun readMany(repo: String, paths: List<String>, ref: String?): String {
+        runCatching { github.readFilesBatch(repo, ref, paths.filter { !FileFilter.isBinaryOrLock(it) }) }
         val sb = StringBuilder()
         val limit = 120_000
         for (p in paths) {
@@ -476,6 +484,9 @@ class ToolRegistry(private val settings: Settings) {
     }
 
     /** Waits inside the app (no model steps) until every workflow run for the commit has finished. */
+    /** Set by the Agent: tests that flipped before (per repo). */
+    var flaky: com.suarez.coder.ci.Flaky.Store? = null
+
     private suspend fun ciWait(repo: String, ref: String?, timeoutMinutes: Int): String {
         val isSha = ref != null && Regex("^[0-9a-f]{40}$").matches(ref)
         val sha = if (isSha) ref!! else github.headSha(repo, ref)
@@ -506,10 +517,38 @@ class ToolRegistry(private val settings: Settings) {
                 summary = "Zaman aşımı ($timeoutMinutes dk): " + runs.joinToString { "${it.name}: ${it.status}" }
                 return "$summary. Daha sonra tekrar ci_wait çağır."
             }
-            val sb = StringBuilder("Commit ${sha.take(7)}:\n")
+            var failed = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" && it.conclusion != "cancelled" }
+            var rerunNote = ""
+            // A failure that looks transient (network, runner) or comes only from tests known to flip: re-run once, no model call.
+            if (failed.isNotEmpty() && settings.flakyRetry) {
+                val logs = failed.associate { it.id to runCatching { ciErrors(repo, it.id) }.getOrDefault("") }
+                val known = flaky?.known(repo).orEmpty()
+                val retry = failed.filter { r -> logs[r.id].orEmpty().let { com.suarez.coder.ci.Flaky.isTransient(it) || com.suarez.coder.ci.Flaky.onlyKnownFlaky(it, known) } }
+                if (retry.isNotEmpty() && retry.all { runCatching { github.rerunFailedJobs(repo, it.id) }.getOrDefault(false) }) {
+                    listener?.started(repo, "geçici hata: yeniden çalıştırılıyor")
+                    delay(CI_POLL_MS)
+                    while (System.currentTimeMillis() < deadline) {
+                        runs = github.runsForSha(repo, sha)
+                        if (runs.all { it.status == "completed" }) break
+                        delay(CI_POLL_MS)
+                    }
+                    val again = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" && it.conclusion != "cancelled" }
+                    val flipped = retry.filter { r -> again.none { it.id == r.id } }
+                    flipped.forEach { r -> flaky?.record(repo, com.suarez.coder.ci.Flaky.failedTests(logs[r.id].orEmpty())) }
+                    rerunNote = if (flipped.isNotEmpty()) "Not: ilk çalıştırma geçici bir hatayla düştü, yeniden çalıştırılınca geçti (kod hatası değil).\n"
+                        else "Not: geçici görünen hata nedeniyle bir kez yeniden çalıştırıldı, yine başarısız (gerçek hata olabilir).\n"
+                    failed = again
+                }
+            }
+            val sb = StringBuilder("Commit ${sha.take(7)}:\n").append(rerunNote)
             runs.forEach { sb.append("- ${it.name}: ${it.conclusion} (${it.url})\n") }
-            val failed = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" }
-            success = failed.isEmpty()
+            // Only cancelled runs (superseded by a newer commit) prove nothing.
+            success = failed.isEmpty() && runs.any { it.conclusion != "cancelled" }
+            if (failed.isEmpty() && !success) {
+                summary = "Tüm çalıştırmalar iptal edildi (yeni bir commit tarafından geçilmiş olabilir)."
+                sb.append("\n").append(summary).append(" Son commit için tekrar ci_wait çağır.\n")
+                return sb.toString()
+            }
             if (success) {
                 apk = runCatching { github.apkLinkFor(repo, sha, branch, runs.map { it.id }) }.getOrNull()
                 apk?.let { sb.append("\nAPK: ").append(it).append('\n') }
