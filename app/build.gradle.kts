@@ -36,6 +36,12 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("coder")
         }
+        // Release code, measurable: what the macrobenchmark installs (profileable, signed like release).
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("coder")
+            matchingFallbacks += listOf("release")
+        }
     }
 
     compileOptions {

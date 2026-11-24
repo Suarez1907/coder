@@ -123,6 +123,13 @@ class GitHub(private val token: () -> String) {
         if (r.code !in 200..299) throw ToolException("Geri alınamadı: HTTP ${r.code} ${r.body.take(300)}")
     }
 
+    /** Paths changed between two commits/branches (compare API), at most a few hundred. */
+    suspend fun changedSince(repo: String, base: String, head: String): List<String> {
+        val o = json("GET", "/repos/$repo/compare/${enc(base)}...${enc(head)}")
+        val a = o.optJSONArray("files") ?: return emptyList()
+        return (0 until a.length()).map { a.getJSONObject(it).optString("filename") }.filter { it.isNotBlank() }
+    }
+
     /** Files changed by the head commit of a branch with their patches (for @diff). */
     suspend fun lastCommitDiff(repo: String, branch: String?, maxChars: Int = 15_000): String {
         val ref = branch?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)

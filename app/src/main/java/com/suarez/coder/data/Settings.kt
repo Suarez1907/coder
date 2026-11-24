@@ -365,6 +365,23 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** Repo|tool pairs whose cloud workflow the user declined to install. */
+    var workflowDeclined: Set<String>
+        get() = str("workflow_declined").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("workflow_declined", v.joinToString("\n"))
+    /** Code index in GitHub Actions (ctags + usages) for precise references and reading single symbols. */
+    var codeIndex: Boolean
+        get() = bool("code_index", true)
+        set(v) = putBool("code_index", v)
+    /** Quick check also runs the tests that exercise the changed files. */
+    var targetedTests: Boolean
+        get() = bool("targeted_tests", true)
+        set(v) = putBool("targeted_tests", v)
+    /** Android evaluation drives the app with Maestro flows written from the acceptance criteria. */
+    var androidUiTests: Boolean
+        get() = bool("android_ui_tests", true)
+        set(v) = putBool("android_ui_tests", v)
+
     /** Self-improvement may rewrite evolvable prompt sections (each rewrite must win an exam). */
     var promptEvolution: Boolean
         get() = bool("prompt_evolution", true)

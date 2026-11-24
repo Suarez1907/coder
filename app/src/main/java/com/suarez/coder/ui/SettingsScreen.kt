@@ -51,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -64,8 +65,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suarez.coder.data.Provider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class Page(val title: String, val icon: String, val blurb: String) {
     HOME("Ayarlar", "", ""),
@@ -382,6 +385,53 @@ private fun ArchitectPage(vm: ChatViewModel) {
         SwitchSetting("Android ekran görüntüleri", "Tam modda emülatörle sınar", s.androidShots,
             "Değerlendirici açıkken Android projelerinde uygulama GitHub Actions emülatöründe açılır, ekran görüntüsü sohbete gelir, çökme " +
                 "olursa düzeltme turu açılır. .coder/screens.txt'deki her satır (adb shell komutu) için ek ekran. Bir çalıştırma 10-20 dk.") { s.androidShots = it }
+        SwitchSetting("Android arayüz testleri", "Kabul ölçütleri Maestro ile denenir", s.androidUiTests,
+            "Android ekran görüntüleri açıkken ucuz bir model kabul ölçütlerinden Maestro akışları yazar (dokun, yaz, kaydır, metni gör); akışlar " +
+                "aynı emülatör çalıştırmasında koşar ve her biri ayrı ölçüt olarak raporlanır. Geçmeyen akış düzeltme turu açar.") { s.androidUiTests = it }
+        SwitchSetting("Etkilenen testler", "Ön kontrolde değişen kodun testleri de koşar", s.targetedTests,
+            "Hızlı ön kontrol derlemeye ek olarak yalnızca değişen dosyalara ait testleri çalıştırır (adlandırma kuralı ve kod dizinindeki " +
+                "kullanımlar). Gradle, Jest/Vitest ve pytest desteklenir. Tüm test paketini beklemekten çok daha hızlıdır.") { s.targetedTests = it }
+        SwitchSetting("Kod dizini", "Bulutta tanım ve kullanım dizini", s.codeIndex,
+            "Repo günde en fazla bir kez GitHub Actions'ta universal-ctags ile dizinlenir (coder-index.yml, ilk kullanımda izin ister). " +
+                "Referans bulma dizini kullanır ve ajan bir dosyanın tamamı yerine tek bir fonksiyonu okuyabilir (read_symbol). Derleyici kadar " +
+                "kesin değildir: aynı adı taşıyan farklı semboller ayırt edilemeyebilir.") { s.codeIndex = it }
+        SwitchSetting("Kararsız CI'ı yeniden dene", "Geçici hatada önce bir kez daha çalıştırır", s.flakyRetry,
+            "Kırmızı CI ağ, runner veya daha önce kararsız olduğu bilinen bir testten kaynaklanıyor gibiyse yalnızca başarısız işler bir kez yeniden " +
+                "çalıştırılır; ajan gereksiz yere kodu \"düzeltmeye\" kalkmaz. Kararsız testler repo başına hatırlanır.") { s.flakyRetry = it }
+        SwitchSetting("Tedarik zinciri denetimi", "Sır ve yeni bağımlılık kontrolü", s.supplyChainCheck,
+            "Her commit'ten önce: diff'te API anahtarı veya özel anahtar var mı; yeni eklenen paket gerçekten var mı (uydurma paket adı), " +
+                "popüler bir paketin taklidi mi, bilinen güvenlik açığı var mı (OSV). Bulursa commit yapılmaz.") { s.supplyChainCheck = it }
+        SwitchSetting("Bekleme sürelerini örtüştür", "CI beklerken sonraki işe başlar", s.pipelining,
+            "Yönlendirme sürerken dosya ağacı ve repo haritası yüklenir; Hafif Sıralı modda bir alt görevin CI'ı beklenirken sıradaki alt görev " +
+                "düzenlenir; Tam modda Değerlendirici CI ile birlikte çalışır.") { s.pipelining = it }
+        if (s.workflowDeclined.isNotEmpty() || s.quickCheckDeclined.isNotEmpty()) {
+            Text("Kurulmasını reddettiğin bulut iş akışları: " + (s.workflowDeclined + s.quickCheckDeclined.map { "$it|quick" }).joinToString { it.replace("|", ": ") },
+                style = MaterialTheme.typography.bodySmall, color = coder.muted)
+            TextButton(onClick = { s.workflowDeclined = emptySet(); s.quickCheckDeclined = emptySet() }) { Text("Yeniden sorulsun") }
+        }
+    }
+
+    Group {
+        Title("Tahmin ve aday düzenlemeler", "Telefon, kendi commit'lerinin CI sonuçlarından hangi değişikliklerin kırmızı CI'a yol açtığını öğrenir " +
+            "(cihazda lojistik regresyon, veri dışarı gönderilmez). Riskli değişikliklerde Uygulayıcı birkaç aday üretir; yerel kontrol, öz-denetim ve " +
+            "adaylar arası oylamadan geçen en iyi aday commit edilir.")
+        SwitchSetting("Risk modeli", "Kırmızı CI olasılığını tahmin eder", s.riskModel,
+            "Commit'lerin CI sonucu (yeşil/kırmızı) ve değişikliğin özellikleri (dosya türleri, yapı dosyası, yeni dosya, boyut, zorluk) kaydedilir; " +
+                "en az ${com.suarez.coder.agent.RiskModel.MIN_SAMPLES} etiketli commit'ten sonra model eğitilir.") { s.riskModel = it }
+        var trig by remember { mutableStateOf(s.candidateTrigger) }
+        Label("Aday düzenlemeler", coder.muted)
+        Segmented(listOf("risk" to "Riskliyse", "always" to "Her zaman", "off" to "Kapalı"), trig) { trig = it; s.candidateTrigger = it }
+        NumberSetting("Aday sayısı (1-5)", s.candidates,
+            info = "Her aday ayrı bir Uygulayıcı çağrısıdır (farklı sıcaklıkla): 3 aday, o dosya grubu için yaklaşık 3 kat Uygulayıcı maliyeti.") { s.candidates = it }
+        TextSetting("Risk eşiği (0,05-0,95)", String.format(java.util.Locale.US, "%.2f", s.riskThreshold), keyboard = KeyboardType.Decimal,
+            info = "Tahmin edilen kırmızı CI olasılığı bu değeri aşınca adaylar üretilir.") { v -> v.replace(',', '.').toDoubleOrNull()?.let { s.riskThreshold = it } }
+        SwitchSetting("Uyarlanır ön kontrol", "Çok güvenli değişikliklerde atlanır", s.quickCheckAdaptive,
+            "Eğitilmiş risk modeli bir değişikliğe %12'nin altında başarısızlık olasılığı verirse hızlı ön kontrol atlanır; normal CI yine çalışır.") { s.quickCheckAdaptive = it }
+        SwitchSetting("Plan belirsizliği", "Plan net değilse önce sorar", s.planUncertainty,
+            "Ucuz bir model, Mimar'ın planını görmeden hangi dosyaların değişeceğini 3 kez bağımsız tahmin eder. Tahminler planla uyuşmazsa " +
+                "istek birden fazla şekilde anlaşılabilir: devam etmeden önce sorulur (gözetimsiz işlerde yalnızca not düşülür).") { s.planUncertainty = it }
+        val riskInfo by produceState<String?>(null) { value = withContext(Dispatchers.IO) { runCatching { vm.agent.foresight.status() }.getOrNull() } }
+        riskInfo?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = coder.muted) }
     }
 
     Group {

@@ -24,18 +24,20 @@ class QuickCheck(private val gh: GitHub, private val runner: CloudToolRunner, pr
         }
     }
 
-    suspend fun check(repo: String, branch: String, changes: List<Triple<String, String?, String?>>): Result {
+    suspend fun check(repo: String, branch: String, changes: List<Triple<String, String?, String?>>,
+                      inputs: JSONObject = JSONObject(), tests: List<String> = emptyList()): Result {
         val source = gh.branchSha(repo, branch)?.let { branch } ?: gh.defaultBranch(repo)
         val tmp = "coder-qc-${System.currentTimeMillis() % 10_000_000}"
         val t = CloudWorkflowTemplates.QUICK
         val files = changes.map { (p, _, after) -> GitHub.FileChange(p, after, after == null) } + GitHub.FileChange(t.path, t.yaml, false)
         try {
             gh.commitFiles(repo, tmp, "[skip ci] coder: hızlı ön kontrol", files.distinctBy { it.path }, source)
-            val run = runner.dispatchAndWait(repo, t, tmp, JSONObject(), MAX_WAIT_MS)
+            val run = runner.dispatchAndWait(repo, t, tmp, inputs, MAX_WAIT_MS)
                 ?: return Result(true, "Hızlı ön kontrol zamanında bitmedi; commit'e devam edildi.")
             if (run.conclusion == "success") return Result(true, "Hızlı ön kontrol geçti (${run.url}).")
             val errors = ciErrors(repo, run.id)
-            val mine = relevant(errors, changes.map { it.first })
+            // A failing selected test is relevant: it exercises the changed code.
+            val mine = relevant(errors, changes.map { it.first } + tests.map { it.substringAfterLast('/').substringBeforeLast('.') })
             if (mine.isEmpty()) return Result(true, "Hızlı ön kontrol başarısız ama hatalar değişen dosyalarda değil (repoda önceden var olabilir): ${run.url}\n" +
                 errors.lines().filter { it.isNotBlank() }.take(8).joinToString("\n"))
             return Result(false, "Hızlı ön kontrol (derleme/tür denetimi) değişen dosyalarda hata buldu, commit YAPILMADI:\n" +

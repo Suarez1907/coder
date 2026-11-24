@@ -135,11 +135,37 @@ class Evaluator(private val agent: Agent) {
         return result
     }
 
+    /** Writes one Maestro flow per acceptance criterion to the plan branch; returns their folder, or null. */
+    private suspend fun writeFlows(plan: OrchestratorPlan, ui: AgentUi): String? {
+        val criteria = contract(plan)
+        if (criteria.isEmpty()) return null
+        val gh = agent.tools.github
+        val dir = ".coder/eval/${plan.id}-flows"
+        if (gh.readFileRaw(plan.repo, "$dir/01.yaml", plan.branch) != null) return dir
+        val builds = listOf("app/build.gradle.kts", "app/build.gradle").mapNotNull { p -> gh.readFileRaw(plan.repo, p, plan.branch)?.let { p to it } }.toMap()
+        val appId = MaestroFlows.appId(builds) ?: return null
+        val files = plan.tasks.flatMap { it.ownedFiles }.filter { it.endsWith(".kt") || it.endsWith(".xml") }.distinct().take(6)
+            .mapNotNull { p -> gh.readFileRaw(plan.repo, p, plan.branch)?.let { "### $p\n${it.take(8_000)}" } }.joinToString("\n\n")
+        ui.status("Değerlendirici Android kabul akışlarını yazıyor")
+        val reply = agent.callModel(ArrayList(), listOf(ChatMessage.User("appId: $appId\n\nACCEPTANCE CRITERIA:\n" + criteria.joinToString("\n") { "- $it" } +
+            "\n\nUSER REQUEST:\n${plan.request.take(2_000)}\n\nRELEVANT FILES:\n$files")),
+            agent.escalationRef() ?: agent.editorRef(), "reviewer", MaestroFlows.SYSTEM, emptyList(), ui, useCache = false, maxOut = 4_000)
+        val flows = MaestroFlows.extract(reply.text, appId)
+        if (flows.isEmpty()) return null
+        gh.commitFiles(plan.repo, plan.branch, "coder: Android kabul akışları",
+            flows.mapIndexed { i, f -> GitHub.FileChange("$dir/${String.format(java.util.Locale.US, "%02d", i + 1)}.yaml", f.yaml, false) }, plan.base)
+        return dir
+    }
+
     /** Android: emulator in GitHub Actions; the app must start without a crash. Screens are compared with the last pass. */
     private suspend fun androidShots(ui: AgentUi, plan: OrchestratorPlan): Result {
         val runner = agent.tools.cloud ?: return Result(emptyList(), emptyList(), "Bulut araçları kullanılamıyor.")
-        ui.status("Android emülatöründe ekran görüntüleri alınıyor (GitHub Actions, 10-20 dk)")
-        val out = try { runner.run(plan.repo, "android", ".coder/screens.txt", "coder-out/android", plan.branch, null) } finally { ui.status(null) }
+        // Acceptance criteria become Maestro flows that really use the app (not only "it opened").
+        val flowsDir = if (agent.settings.androidUiTests) runCatching { writeFlows(plan, ui) }.getOrNull() else null
+        ui.status("Android emülatöründe " + (if (flowsDir != null) "kabul testleri ve " else "") + "ekran görüntüleri (GitHub Actions, 10-20 dk)")
+        val out = try {
+            runner.run(plan.repo, "android", ".coder/screens.txt", "coder-out/android", plan.branch, null, flowsDir?.let { mapOf("flows" to it) }.orEmpty())
+        } finally { ui.status(null) }
         val output = CloudToolRunner.outputs(out).firstOrNull()
         if (output == null) {
             val crashed = out.contains("UYGULAMA ÇÖKTÜ")
@@ -147,12 +173,14 @@ class Evaluator(private val agent: Agent) {
                 if (crashed) listOf(out.substringAfter("UYGULAMA ÇÖKTÜ").take(600)) else emptyList())
         }
         val crash = output.files.firstOrNull { it.name == "crash.txt" }?.readText()?.trim().orEmpty()
+        val cases = output.files.firstOrNull { it.name == "maestro-report.xml" }?.readText()?.let { MaestroFlows.junit(it) }.orEmpty()
         val shots = output.files.count { it.name.startsWith("shot_") }
         val visualDir = File(runner.outDir.parentFile, "visual").apply { mkdirs() }
         val baseline = File(visualDir, plan.repo.replace('/', '_') + "-android.png")
         val preview = output.preview
         val change = if (preview != null && baseline.isFile) VisualDiff.compare(baseline, preview) else null
-        val r = Result(listOf(Criterion("Uygulama emülatörde açılıyor ve çökmüyor", crash.isEmpty(), if (crash.isEmpty()) "açıldı, $shots ek ekran" else crash.take(600))),
+        val r = Result(listOf(Criterion("Uygulama emülatörde açılıyor ve çökmüyor", crash.isEmpty(), if (crash.isEmpty()) "açıldı, $shots ek ekran" else crash.take(600))) +
+            cases.map { Criterion(it.name, it.pass, if (it.pass) "Maestro akışı geçti" else it.message) },
             if (crash.isEmpty()) emptyList() else listOf(crash.take(600)), outputMarker = CloudToolRunner.marker(output.tool, output.runId, output.dir), visualChange = change)
         if (r.passed && preview != null) runCatching { preview.copyTo(baseline, overwrite = true) }
         return r

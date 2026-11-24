@@ -1,5 +1,7 @@
 package com.suarez.coder.agent
 
+import kotlin.math.roundToInt
+
 import com.suarez.coder.llm.ChatMessage
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -20,6 +22,17 @@ internal class Foresight(private val agent: Agent) {
         val labelled = l.all().count { it.failed != null }
         if (labelled != trainedOn) { model = RiskModel.train(l.all()); trainedOn = labelled }
         return model
+    }
+
+    /** One line for the settings screen: how much the risk model has learned so far. */
+    fun status(): String {
+        val l = log ?: return "Risk modeli: kayıt yok."
+        val labelled = l.all().count { it.failed != null }
+        val m = model() ?: return "Risk modeli henüz eğitilmedi: $labelled/${RiskModel.MIN_SAMPLES} etiketli commit (her iki sonuçtan en az " +
+            "${RiskModel.MIN_PER_CLASS}). O zamana kadar değişikliğin boyutuna ve türüne göre temkinli bir tahmin kullanılır."
+        fun pct(v: Double) = (v * 100).roundToInt()
+        return "Risk modeli ${m.samples} commit'ten öğrendi: AUC ${String.format(java.util.Locale.US, "%.2f", m.auc)}, doğruluk %${pct(m.accuracy)}, " +
+            "kırmızı CI oranı %${pct(m.failRate)}. AUC 0,5 = yazı tura, 1 = kusursuz ayırt etme."
     }
 
     fun features(repo: String, paths: List<String>, newFiles: Int): DoubleArray =

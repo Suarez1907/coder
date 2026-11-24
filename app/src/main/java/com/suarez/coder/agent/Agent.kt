@@ -102,6 +102,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     internal var liveUi: AgentUi? = null
     internal val guards by lazy { CommitGuards(this) }
     internal val foresight by lazy { Foresight(this) }
+    internal val cloudSkills by lazy { CloudSkills(this) }
+    init { if (filesDir != null) tools.cloudOps = cloudSkills }
     /** Decision 1's difficulty for the current request (0..3), when routing produced one. */
     var lastComplexity: Double? = null
     internal fun filesDirOrNull() = filesDir

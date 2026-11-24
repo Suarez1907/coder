@@ -130,6 +130,16 @@ fun EvolutionPage(vm: ChatViewModel) {
             MonoSwitch("Kendi koduna PR aç (K3)", "Test önce, CI yeşilse PR; merge her zaman sizin onayınızla.", k3, enabled) { k3 = it; s.evoSelfPr = it }
             MonoSwitch("Sadece Wi-Fi'de çalıştır", null, wifi, enabled) { wifi = it; s.evoWifiOnly = it }
             HorizontalDivider(color = Mono2.line)
+            var ctx by remember { mutableStateOf(s.contextualRouting) }
+            var pe by remember { mutableStateOf(s.promptEvolution) }
+            var pm by remember { mutableStateOf(s.procedureMining) }
+            var eu by remember { mutableStateOf(s.evalOnUpdate) }
+            MonoSwitch("Bağlamsal model seçimi", "Görevin zorluğu, dosya sayısı ve diline göre model seçer; her karar olasılığıyla kaydedilir, " +
+                "yeni seçim kuralları geçmiş veride çevrimdışı ölçülür.", ctx, enabled) { ctx = it; s.contextualRouting = it }
+            MonoSwitch("İstem evrimi", "Son hatalardan istemin bir bölümünü yeniden yazar; yalnızca sınavı kazanırsa kullanılır.", pe, enabled) { pe = it; s.promptEvolution = it }
+            MonoSwitch("Prosedür hafızası", "Tekrarlanan başarılı adım dizileri beceri adayı olur; sınavdan geçerse etkinleşir.", pm, enabled) { pm = it; s.procedureMining = it }
+            MonoSwitch("Güncellemeden sonra ölçüm", "Uygulama güncellenince sabit değerlendirme seti bir kez çalışır (haftalık sınav bütçesinden).", eu, enabled) { eu = it; s.evalOnUpdate = it }
+            HorizontalDivider(color = Mono2.line)
             var model by remember { mutableStateOf(s.evoModel) }
             val known = remember { vm.agent.openRouterModels() }
             val valid = known.isEmpty() || model.trim().removePrefix("openrouter/") in known

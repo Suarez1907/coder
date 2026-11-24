@@ -80,6 +80,7 @@ internal class CommitGuards(private val agent: Agent) {
     fun startRun() { reviewedOnce.clear(); runCheckpoints.clear() }
 
     internal val reviewedOnce = HashSet<Int>()
+    private val quickBypass = HashSet<Int>()
 
     internal val runCheckpoints = HashSet<String>()
 
@@ -142,27 +143,36 @@ internal class CommitGuards(private val agent: Agent) {
             }
         }
         val t = com.suarez.coder.cloudtools.CloudWorkflowTemplates.QUICK
-        if (repo.lowercase() in settings.quickCheckDeclined) return
-        val installed = try { runner.installedOnDefault(repo, t) } catch (e: CancellationException) { throw e } catch (e: Exception) { return }
-        if (!installed) {
-            if (agent.unattended) return
-            val ok = agent.liveUi?.confirm("Hızlı ön kontrol kurulsun mu?",
-                "Commit'ten önce derleme/tür denetimi için $repo varsayılan dalına .github/workflows/${t.file} eklenecek ([skip ci] ile, CI tetiklemez). " +
-                    "Kontrol her kod commit'inden önce geçici bir dalda 1-5 dakika sürer.", "Kur", "Bu repoda kullanma") ?: return
-            if (!ok) { settings.quickCheckDeclined = settings.quickCheckDeclined + repo.lowercase(); return }
-            try { runner.install(repo, t, null, force = false, upgrade = true, skipCi = true) } catch (e: CancellationException) { throw e } catch (e: Exception) { return }
+        if (!agent.cloudSkills.ensureWorkflow(repo, t, "Commit'ten önce derleme/tür denetimi ve değişen dosyaların testleri geçici bir dalda 1-5 dakikada çalışır.")) return
+        // Same change sent again after a quick-check stop: the agent judged the failure pre-existing.
+        val key = code.joinToString("|") { "${it.first}:${it.third.hashCode()}" }.hashCode()
+        if (key in quickBypass) {
+            agent.liveHistory?.add(ChatMessage.Notice("Hızlı ön kontrol: aynı değişiklik tekrar gönderildi, bu kez atlandı (hata önceden var olabilir)"))
+            return
         }
-        agent.liveUi?.status("Hızlı ön kontrol: derleme denetleniyor (GitHub Actions)")
+        // The tests that exercise the changed files run too (by name, the code index, and the changed tests themselves).
+        val inputs = org.json.JSONObject()
+        var selected: List<String> = emptyList()
+        if (settings.targetedTests) runCatching {
+            val tree = tools.filteredTree(repo, tools.github.branchSha(repo, branch)?.let { branch }).map { it.path } + code.map { it.first }
+            selected = TestSelector.select(code.map { it.first }, tree, agent.cloudSkills.codeIndex(repo, false))
+            TestSelector.gradle(selected)?.let { (m, c) -> if (c.isNotEmpty()) inputs.put("test_module", m).put("test_classes", c.joinToString(" ")) }
+            TestSelector.files(selected).takeIf { it.isNotEmpty() }?.let { inputs.put("test_files", it.joinToString(" ")) }
+        }
+        agent.liveUi?.status("Hızlı ön kontrol: derleme" + (if (selected.isNotEmpty()) " ve ${selected.size} test" else "") + " (GitHub Actions)")
         val t0 = System.currentTimeMillis()
         val r = try {
-            QuickCheck(tools.github, runner) { rp, id -> tools.ciErrors(rp, id) }.check(repo, branch, code)
+            QuickCheck(tools.github, runner) { rp, id -> tools.ciErrors(rp, id) }.check(repo, branch, code, inputs, selected)
                 .also { agent.span(Span.CLOUD, "hızlı ön kontrol", t0, ok = it.ok) }
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
             QuickCheck.Result(true, "Hızlı ön kontrol çalıştırılamadı (${e.message?.take(120)}); commit'e devam edildi.")
         } finally { agent.liveUi?.status(null) }
         agent.liveHistory?.add(ChatMessage.Notice(if (r.ok) "Hızlı ön kontrol: geçti" else "Hızlı ön kontrol: hata, commit durdu", r.report, isError = !r.ok))
         agent.liveUi?.update()
-        if (!r.ok) throw com.suarez.coder.tools.ToolException(r.report + "\nHataları düzelt ve değişikliği tekrar gönder.")
+        if (!r.ok) {
+            quickBypass += key
+            throw com.suarez.coder.tools.ToolException(r.report + "\nHataları düzelt ve değişikliği tekrar gönder. Hata bu değişiklikten önce de varsa aynı değişikliği bir kez daha gönder.")
+        }
     }
 
     internal suspend fun checkpoint(repo: String, branch: String) {

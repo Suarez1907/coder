@@ -53,6 +53,8 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
     /** Request counters: GitHub calls by kind (graphql, contents, notModified...). */
     val counts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private fun count(k: String) { counts.merge(k, 1, Int::plus) }
+    /** Paths read one by one through the contents API. */
+    val contentReads = CopyOnWriteArrayList<String>()
     /** ETag support: conditional GETs get 304 when the body is unchanged. */
     var etags = true
     private val runs = HashMap<Long, Pair<String, Pair<String, String>>>() // id -> (sha, (conclusion, log))
@@ -110,6 +112,7 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
             p.startsWith("/contents/") -> {
                 count("contents")
                 val file = URLDecoder.decode(p.removePrefix("/contents/"), "UTF-8")
+                contentReads += file
                 val text = filesAt(param("ref") ?: defaultBranch)?.get(file) ?: return notFound()
                 conditional(r, MockResponse().setBody(text), text)
             }
@@ -175,6 +178,12 @@ class FakeWorld(val repo: String = "me/app", defaultBranch: String = "main", fil
                         .put("parents", JSONArray().also { a -> k.parent?.let { a.put(JSONObject().put("sha", it)) } })
                         .put("files", JSONArray().also { a -> changed.forEach { f -> a.put(JSONObject().put("filename", f).put("status", "modified").put("patch", "+${now[f]}")) } }))
                 }
+            }
+            p.startsWith("/compare/") -> {
+                val (b, h) = URLDecoder.decode(p.removePrefix("/compare/"), "UTF-8").split("...", limit = 2)
+                val before = filesAt(b) ?: return notFound(); val now = filesAt(h) ?: return notFound()
+                val changed = (now.keys + before.keys).filter { now[it] != before[it] }
+                json(JSONObject().put("files", JSONArray().also { a -> changed.forEach { a.put(JSONObject().put("filename", it)) } }))
             }
             p == "/actions/runs" -> {
                 val head = param("head_sha")

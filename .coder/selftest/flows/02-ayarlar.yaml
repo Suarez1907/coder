@@ -1,0 +1,13 @@
+# Ayarlar sayfaları açılır ve geri dönülür (adlandırılmış akış)
+appId: com.suarez.coder
+name: "Ayarlar sayfaları açılır"
+---
+- launchApp:
+    clearState: true
+- tapOn: "Mimar & Yönlendirme"
+- scrollUntilVisible:
+    element: "Tahmin ve aday düzenlemeler"
+- assertVisible: "Risk modeli"
+- back
+- assertVisible: "Ayarlar"
+- takeScreenshot: criterion_2

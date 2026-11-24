@@ -124,6 +124,19 @@ class CloudToolRunner(
         return run
     }
 
+    /** Downloads and unzips [t]'s artifact of a finished run; null when the run produced none. */
+    suspend fun downloadOutputs(repo: String, t: CloudWorkflowTemplates.CloudTool, run: GitHub.Run): File? {
+        val art = github.artifacts(repo, run.id).firstOrNull { it.second == t.artifact } ?: return null
+        val dir = File(outDir, "${repo.replace('/', '_')}-${run.id}")
+        val zip = File(outDir, "artifact-${run.id}.zip")
+        try {
+            outDir.mkdirs()
+            downloader.fetch("${GitHub.API}/repos/$repo/actions/artifacts/${art.first}/zip", "application/vnd.github+json", zip) {}
+            unzip(zip, dir)
+            return dir
+        } finally { zip.delete() }
+    }
+
     suspend fun run(repo: String, tool: String, scriptPath: String, outputDir: String?, branch: String?, blenderVersion: String?,
                     extraInputs: Map<String, String> = emptyMap()): String {
         val t = CloudWorkflowTemplates.forTool(tool) ?: throw ToolException("Bilinmeyen bulut aracı: $tool (blender, toolbox, manim veya video).")

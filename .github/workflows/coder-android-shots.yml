@@ -1,4 +1,4 @@
-# coder-cloud-tool: android v2 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
+# coder-cloud-tool: android v3 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
 name: Coder Android Screens
 
 on:
@@ -16,6 +16,10 @@ on:
         description: Emülatör API seviyesi
         required: false
         default: "34"
+      flows:
+        description: Maestro akış klasörü (kabul ölçütleri; boş = yok)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -32,6 +36,7 @@ jobs:
       SCRIPT: ${{ inputs.script_path }}
       CODER_OUTPUT_DIR: ${{ inputs.output_dir }}
       API_LEVEL: ${{ inputs.api_level }}
+      FLOWS: ${{ inputs.flows }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,6 +49,10 @@ jobs:
 
       - name: APK
         run: chmod +x gradlew && ./gradlew assembleDebug --console=plain
+
+      - name: Maestro
+        if: env.FLOWS != ''
+        run: curl -fsSL "https://get.maestro.mobile.dev" | bash
 
       - name: KVM
         run: |
@@ -75,6 +84,10 @@ jobs:
               adb exec-out screencap -p > "$OUT/shot_$i.png" < /dev/null
               i=$((i+1))
             done < "$SCRIPT"
+          fi
+          if [ -n "$FLOWS" ] && [ -d "$GITHUB_WORKSPACE/$FLOWS" ]; then
+            export PATH="$PATH:$HOME/.maestro/bin"
+            ( cd "$OUT" && maestro test "$GITHUB_WORKSPACE/$FLOWS" --format junit --output "$OUT/maestro-report.xml" ) > "$OUT/maestro.log" 2>&1 < /dev/null || echo "MAESTRO_FAILED" >> "$OUT/maestro.log"
           fi
           adb logcat -d -b crash > "$OUT/crash.txt" < /dev/null || true
           if [ -s "$OUT/crash.txt" ]; then echo "UYGULAMA ÇÖKTÜ:"; cat "$OUT/crash.txt"; exit 1; fi

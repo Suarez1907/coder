@@ -155,6 +155,26 @@ class ToolRegistry(private val settings: Settings) {
             "davranışı değiştirmeden ÖNCE çağır ve etkilenen her çağıranı da güncelle.",
         obj("repo" to str(repoDesc), "symbol" to str("Tam ad, ör. saveScore veya ScoreRepository"), "ref" to str("Branch (boşsa varsayılan)"),
             required = listOf("symbol")))
+    private val readSymbol = ToolSpec("read_symbol",
+        "Bir fonksiyonu/sınıfı/metodu tüm dosya yerine yalnızca kendi kodu (belge yorumu dahil, satır numaralı) olarak okur. Dosyanın " +
+            "tamamı gerekmiyorsa github_read_file yerine bunu kullan: çok daha az token. path verilmezse kod dizininden bulunur.",
+        obj("repo" to str(repoDesc), "symbol" to str("Ad, ör. saveScore"), "path" to str("Dosya (biliniyorsa)"), "ref" to str("Branch (boşsa varsayılan)"),
+            required = listOf("symbol")))
+    private val codemod = ToolSpec("codemod",
+        "Çok dosyalı MEKANİK değişiklikleri (yeniden adlandırma, API göçü, kalıp değişimi) tek yapısal kuralla yapar: ast-grep GitHub Actions'ta " +
+            "tüm repoya uygulanır, değişen dosyalar commit denetimlerinden geçip tek commit olur. Her dosyaya ayrı diff yazmaktan çok daha ucuz " +
+            "ve hatasız. Kalıpta \$A gibi meta değişkenler kullanılır, ör. pattern 'oldName(\$A)', rewrite 'newName(\$A)'.",
+        obj("repo" to str(repoDesc), "branch" to str("Hedef branch"), "base_branch" to str("Branch yoksa kaynağı"),
+            "lang" to str("kotlin, java, typescript, tsx, javascript, python, ..."), "pattern" to str("Aranan kod kalıbı"),
+            "rewrite" to str("Yerine yazılacak kalıp"), "rule" to str("pattern yerine ast-grep YAML kuralı (isteğe bağlı)"),
+            "paths" to str("Yalnızca bu klasör (isteğe bağlı)"), "message" to str("Commit mesajı"), required = listOf("branch")))
+    private val mutationTest = ToolSpec("mutation_test",
+        "Testlerin gerçekten koruduğunu ölçer: değişen koda bilerek küçük hatalar (mutant) sokar, ilgili testleri her birine karşı çalıştırır " +
+            "(GitHub Actions). Yakalanmayan mutantlar testlerdeki boşluklardır. Test yazdıktan sonra çağır; düşük skorda eksik testleri ekle.",
+        obj("repo" to str(repoDesc), "branch" to str("Kodun olduğu branch"), "path" to str("Mutasyona uğrayacak kaynak dosya"),
+            "start_line" to int("Aralık başı (isteğe bağlı)"), "end_line" to int("Aralık sonu"),
+            "tests" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Test dosyaları (boşsa otomatik seçilir)"),
+            required = listOf("branch", "path")))
     private val updateTodos = ToolSpec("update_todos",
         "Kullanıcının gördüğü görev listesini yazar/günceller. 3+ adımlı işlerde ilk iş olarak listeyi çıkar; her adımda tam listeyi " +
             "tekrar gönder, aynı anda yalnızca bir madde in_progress olsun, biten maddeyi hemen done yap.",
@@ -179,6 +199,8 @@ class ToolRegistry(private val settings: Settings) {
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
         if (settings.docsLookup) add(lookupDocs)
         add(findReferences)
+        add(readSymbol)
+        if (writer && cloudOps != null) { add(codemod); add(mutationTest) }
         if (settings.semanticSearch && semantic != null && settings.geminiKey.isNotBlank()) add(semanticSearch)
         if (writer && settings.todoList) add(updateTodos)
     }
@@ -237,7 +259,7 @@ class ToolRegistry(private val settings: Settings) {
 
         /** Tools that change files, run things or change the repository. */
         val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-            "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool")
+            "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool", "codemod", "mutation_test")
 
         /** Hard guard for planning roles: only read tools, and github_api only with GET. */
         fun architectDenied(name: String, method: String?): String? {
@@ -249,7 +271,7 @@ class ToolRegistry(private val settings: Settings) {
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "semantic_search", "update_todos", "find_references")
+            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -268,7 +290,7 @@ class ToolRegistry(private val settings: Settings) {
 
     fun needsApproval(call: ToolCall): Boolean = when (call.name) {
         "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool" -> true
+        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool", "codemod", "mutation_test" -> true
         "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
         else -> false
     }
@@ -351,6 +373,10 @@ class ToolRegistry(private val settings: Settings) {
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
             "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
             "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
+            "read_symbol" -> readSymbol(repo(), s("ref"), req("symbol").trim(), s("path"))
+            "codemod" -> (cloudOps ?: throw ToolException("Codemod bu oturumda kullanılamıyor.")).codemod(repo(), req("branch"), s("base_branch"), a)
+            "mutation_test" -> (cloudOps ?: throw ToolException("Mutasyon testi bu oturumda kullanılamıyor.")).mutation(repo(), req("branch"), req("path"),
+                i("start_line"), i("end_line"), Args.stringList(a, "tests"))
             "update_todos" -> com.suarez.coder.agent.Todos.ack(com.suarez.coder.agent.Todos.parse(a))
             "semantic_search" -> (semantic ?: throw ToolException("Anlamsal arama bu oturumda kullanılamıyor.")).search(repo(), s("ref"), req("query"))
             "run_cloud_tool" -> {
@@ -429,26 +455,66 @@ class ToolRegistry(private val settings: Settings) {
 
     suspend fun fetchUrl(url: String): String = web.fetch(url, 0, 12_000)
 
-    /** Definition and uses of a symbol: GitHub code search first (default branch index), else a bounded scan of the tree. */
+    /** Set by the Agent: cloud-backed code tools (index, codemod, mutation). */
+    var cloudOps: CloudOps? = null
+
+    /** Files to look in for [name] from the code index, plus files changed since it was built; null without an index. */
+    private suspend fun indexCandidates(repo: String, ref: String?, name: String): List<String>? {
+        val idx = runCatching { cloudOps?.codeIndex(repo, false) }.getOrNull() ?: return null
+        val changed = if (idx.sha.isBlank()) emptyList() else runCatching {
+            github.changedSince(repo, idx.sha, ref ?: github.defaultBranch(repo))
+        }.getOrDefault(emptyList())
+        return (idx.filesFor(name) + changed).toList()
+    }
+
+    /** One symbol's code: from the index's definition (or [path]), cut with brace/indent matching. */
+    private suspend fun readSymbol(repo: String, ref: String?, symbol: String, path: String?): String {
+        val name = symbol.substringAfterLast('.')
+        val idx = runCatching { cloudOps?.codeIndex(repo, false) }.getOrNull()
+        val defs = idx?.defs?.get(name).orEmpty().filter { path == null || it.path == path.trimStart('/') }
+        val cands: List<Pair<String, Int?>> = when {
+            defs.isNotEmpty() -> defs.map { it.path to it.line }
+            path != null -> listOf(path.trimStart('/') to null)
+            else -> (indexCandidates(repo, ref, name) ?: filteredTree(repo, ref).map { it.path }.filter { com.suarez.coder.context.SemanticIndex.indexable(GitHub.TreeEntry(it, 1)) }.take(REF_SCAN_FILES))
+                .map { it to null }
+        }
+        runCatching { github.readFilesBatch(repo, ref, cands.map { it.first }.distinct().take(GitHub.GRAPHQL_BATCH)) }
+        val out = StringBuilder()
+        var found = 0
+        for ((p, hint) in cands.distinctBy { it.first }) {
+            val text = github.readFileRaw(repo, p, ref) ?: continue
+            val r = com.suarez.coder.agent.SymbolExtractor.find(text, name, hint) ?: continue
+            val lines = text.lines()
+            out.append("### $p:${r.start}-${r.end} (dosya ${lines.size} satır)\n")
+            for (n in r.start..r.end) out.append(n).append(": ").append(lines[n - 1]).append('\n')
+            out.append('\n')
+            if (++found >= 3) break
+        }
+        return if (found == 0) "'$name' tanımı bulunamadı" + (if (idx == null) " (kod dizini henüz yok)" else "") + "; github_read_file ile dosyayı oku." else out.toString()
+    }
+
+    /** Definition and uses of a symbol: the code index when there is one, else GitHub code search, else a bounded scan. */
     private suspend fun findReferences(repo: String, ref: String?, symbol: String): String {
         if (!Regex("[\\w$.]{2,80}").matches(symbol)) throw ToolException("Geçersiz sembol: $symbol")
         val code = Regex("\\.(kt|kts|java|py|js|jsx|ts|tsx|mjs|go|rs|swift|dart|gd|cs|c|cc|cpp|h|hpp|rb|php|lua|vue|svelte|xml)$", RegexOption.IGNORE_CASE)
         val tree = filteredTree(repo, ref).filter { code.containsMatchIn(it.path) && it.size < 200_000 }
         val name = symbol.substringAfterLast('.')
         var source = "kod araması"
-        var paths: List<String> = runCatching {
+        val fromIndex = indexCandidates(repo, ref, name)?.filter { p -> tree.any { it.path == p } }
+        var paths: List<String> = if (fromIndex != null) { source = "kod dizini"; fromIndex } else runCatching {
             val body = github.raw("GET", "/search/code?q=${java.net.URLEncoder.encode("$name repo:$repo", "UTF-8")}&per_page=30", null)
             if (!body.startsWith("HTTP 200")) emptyList() else {
                 val items = JSONObject(body.substringAfter('\n')).optJSONArray("items") ?: JSONArray()
                 (0 until items.length()).map { items.getJSONObject(it).optString("path") }
             }
         }.getOrDefault(emptyList()).filter { p -> tree.any { it.path == p } }
-        if (paths.isEmpty() || ref != null) {
+        if (fromIndex == null && (paths.isEmpty() || ref != null)) {
             // The search index only covers the default branch: scan the tree (bounded).
             source = "dal taraması"
             paths = tree.sortedBy { it.size }.take(REF_SCAN_FILES).map { it.path }
         }
         val defs = ArrayList<String>(); val uses = ArrayList<String>()
+        runCatching { github.readFilesBatch(repo, ref, paths.take(GitHub.GRAPHQL_BATCH * 3)) }
         for (p in paths) {
             val text = github.readFileRaw(repo, p, ref) ?: continue
             for ((n, line) in com.suarez.coder.agent.References.lines(text, name)) {
