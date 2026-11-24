@@ -9,7 +9,8 @@ object LogFilter {
     private val errorRe = Regex(
         "(^e: |^w: .*\\berror\\b|\\berror\\b|\\berror\\[|##\\[error\\]|\\bFAILED\\b|\\bFAILURE\\b|What went wrong|" +
             "\\b\\w*(Error|Exception)\\b:|Exception in thread|Caused by:|Unresolved reference|cannot find symbol|Could not (find|resolve)|" +
-            "npm ERR!|Traceback|^\\s*File \".*\", line \\d+|^fatal:|\\btest failed\\b|Process completed with exit code [1-9]|exit code [1-9])",
+            "npm ERR!|Traceback|^\\s*File \".*\", line \\d+|^fatal:|\\btest failed\\b|Process completed with exit code [1-9]|exit code [1-9]|" +
+            "manifest unknown|manifest not found)",
         RegexOption.IGNORE_CASE,
     )
     /**
