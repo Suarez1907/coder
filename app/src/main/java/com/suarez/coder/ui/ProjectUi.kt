@@ -86,6 +86,13 @@ fun HistoryDrawer(vm: ChatViewModel, onOpen: (String) -> Unit, onNewChat: () -> 
             )
             Spacer(Modifier.height(8.dp))
             OutlinedButton(onClick = onNewChat, modifier = Modifier.fillMaxWidth()) { Text("+ Yeni sohbet") }
+            var showQueue by remember { mutableStateOf(false) }
+            TextButton(onClick = { showQueue = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("İş kuyruğu" + vm.queue.count { it.state == com.suarez.coder.agent.QueuedTask.State.QUEUED || it.state == com.suarez.coder.agent.QueuedTask.State.RUNNING }
+                    .takeIf { it > 0 }?.let { " ($it)" }.orEmpty())
+            }
+            LaunchedEffect(Unit) { vm.refreshQueue() }
+            if (showQueue) QueueDialog(vm, onDismiss = { showQueue = false }, onOpenSession = { showQueue = false; onOpen(it) })
             Spacer(Modifier.height(8.dp))
             LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (list.isEmpty()) item {

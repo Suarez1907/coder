@@ -23,6 +23,7 @@ class WeeklyCycle(
 ) {
     companion object {
         const val QUESTIONS = 3
+        const val REVIEW_MARK = "## PR incelemelerinden"
         const val MIN_QUESTIONS = 2
 
         fun weekStart(now: Long) = now - WeeklyReport.WEEK_MS
@@ -65,9 +66,59 @@ class WeeklyCycle(
                 out += "Proje sağlığı: ${results.size - bad.size}/${results.size} sorunsuz."
             }
         }
+        if (settings.learnFromReviews && settings.githubToken.isNotBlank()) {
+            onStatus("PR yorumlarından kurallar çıkarılıyor")
+            runCatching { learnFromReviews() }.getOrElse { "PR yorumları okunamadı: ${it.message?.take(100)}" }.takeIf { it.isNotBlank() }?.let {
+                out += it; store.addLog(EvoTier.MEMORY, it)
+            }
+        }
         queueDefaultExperiment()
         out += runExperiments()
         return out.filter { it.isNotBlank() }.joinToString(" ")
+    }
+
+    /**
+     * The user's own PR review comments (new since the last run) become short project rules in the repo's lessons,
+     * so the same correction never has to be written twice.
+     */
+    suspend fun learnFromReviews(): String {
+        val gh = agent.tools.github
+        val login = JSONObject(gh.raw("GET", "/user", null).substringAfter('\n')).optString("login").ifBlank { return "" }
+        val seenFile = File(store.dir, "reviews_seen.json")
+        val seen = runCatching { JSONObject(seenFile.readText()) }.getOrDefault(JSONObject())
+        val repos = (settings.profiles().map { it.repo } + settings.defaultRepo).map { agent.tools.normalizeRepo(it) }.filter { it.contains('/') }.distinct().take(8)
+        var learned = 0
+        for (repo in repos) {
+            val body = runCatching { gh.raw("GET", "/repos/$repo/pulls/comments?sort=created&direction=desc&per_page=50", null) }.getOrNull() ?: continue
+            if (!body.startsWith("HTTP 200")) continue
+            val a = runCatching { org.json.JSONArray(body.substringAfter('\n')) }.getOrNull() ?: continue
+            val last = seen.optLong(repo)
+            val mine = (0 until a.length()).map { a.getJSONObject(it) }
+                .filter { it.optJSONObject("user")?.optString("login") == login && it.optLong("id") > last }
+            if (mine.isEmpty()) continue
+            seen.put(repo, mine.maxOf { it.optLong("id") })
+            if (mine.size < 2) continue
+            val existing = store.lessons(repo)
+            val section = existing.substringAfter(REVIEW_MARK, "").trim()
+            val prompt = "EXISTING RULES:\n${section.ifBlank { "(none)" }}\n\nNEW REVIEW COMMENTS:\n" +
+                mine.take(30).joinToString("\n") { "- (${it.optString("path")}) ${it.optString("body").replace('\n', ' ').take(400)}" }
+            val tmp = ArrayList<com.suarez.coder.llm.ChatMessage>()
+            val reply = agent.callModel(tmp, listOf(com.suarez.coder.llm.ChatMessage.User(prompt)), agent.routerRef() ?: agent.editorRef(), "evolution",
+                com.suarez.coder.agent.ReviewLearner.SYSTEM, emptyList(), silentUi, useCache = false, maxOut = 800, thinking = "low")
+            val cost = tmp.filterIsInstance<com.suarez.coder.llm.ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
+            val rules = com.suarez.coder.agent.ReviewLearner.rules(reply.text)
+            if (rules.isEmpty()) continue
+            store.saveLessons(repo, (existing.substringBefore(REVIEW_MARK).trimEnd() + "\n\n" + REVIEW_MARK + "\n" + rules.joinToString("\n")).trim())
+            store.addLog(EvoTier.MEMORY, "$repo: PR yorumlarından ${rules.size} kural", cost)
+            learned += rules.size
+        }
+        seenFile.writeText(seen.toString())
+        return if (learned > 0) "PR yorumlarından $learned kural öğrenildi." else ""
+    }
+
+    private val silentUi = object : com.suarez.coder.agent.AgentUi {
+        override fun update() {}
+        override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) = false
     }
 
     /** Reports new crashes; a spike after a self-PR update is reverted (level 3) or flagged for the user. */

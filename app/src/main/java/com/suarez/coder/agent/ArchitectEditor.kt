@@ -45,10 +45,12 @@ class ArchitectEditor(private val agent: Agent) {
          * Attempts for one file group: all executor-class (editor, then the escalation model for the last two when one is
          * set). The architect is never part of it.
          */
-        fun executorLadder(max: Int, editor: ModelRef, escalation: ModelRef?, early: Boolean = false): List<Step> = (0 until max.coerceAtLeast(1)).map { i ->
-            val switchAt = if (early) 1 else max - 2
-            if (escalation != null && max >= 3 && i >= switchAt) Step(escalation, "escalation") else Step(editor, "editor")
-        }
+        fun executorLadder(max: Int, editor: ModelRef, escalation: ModelRef?, early: Boolean = false): List<Step> =
+            executorLadder(max, editor, listOfNotNull(escalation), early)
+
+        /** Same, climbing the user's ordered model chain. */
+        fun executorLadder(max: Int, editor: ModelRef, chain: List<ModelRef>, early: Boolean = false): List<Step> =
+            Escalation.ladder(max, editor, chain, early).map { Step(it.ref, it.role) }
 
         /** The failing files as they are now (re-read), so the next attempt fixes the root cause instead of guessing. */
         fun repairPrompt(feedback: String, paths: Set<String>, state: Map<String, String?>): String = buildString {
@@ -129,7 +131,7 @@ class ArchitectEditor(private val agent: Agent) {
             }
             is ArchOutcome.Submitted -> outcome0.call
         }
-        val parsed = parsePlan(plan.args, agent.settings.defaultRepo)
+        val parsed = agent.critiquePlan(history, ui, parsePlan(plan.args, agent.settings.defaultRepo))
 
         val outcome = try {
             implement(history, ui, parsed)
@@ -279,7 +281,7 @@ class ArchitectEditor(private val agent: Agent) {
     ): Outcome {
         val paths = group.map { it.path }.toSet()
         // Executor-only self-repair: never the architect. The last attempts may use the (executor-class) escalation model.
-        val ladder = executorLadder(agent.settings.maxExecutorRetries, agent.editorRef(), agent.escalationRef(),
+        val ladder = executorLadder(agent.settings.maxExecutorRetries, agent.editorRef(), agent.escalationChain(),
             early = agent.earlyEscalation(agent.editorRef().model))
         var pending = group
         var feedback: String? = null

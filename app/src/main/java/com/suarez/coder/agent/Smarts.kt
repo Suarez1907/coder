@@ -26,7 +26,7 @@ object Todos {
 
     /** The list from the last update_todos call after the last user message (an old task's list is not shown). */
     fun latest(history: List<ChatMessage>): List<Item> {
-        val from = history.indexOfLast { it is ChatMessage.User }.coerceAtLeast(0)
+        val from = history.indexOfLast { it is ChatMessage.User && !it.text.startsWith(Agent.AUTO_NUDGE) }.coerceAtLeast(0)
         for (i in history.indices.reversed()) {
             if (i < from) break
             val m = history[i] as? ChatMessage.Assistant ?: continue

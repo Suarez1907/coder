@@ -81,15 +81,47 @@ class CloudToolRunner(
     }
 
     /** Writes (or overwrites, when [force]) the workflow file on [branch]. */
-    suspend fun install(repo: String, tool: CloudWorkflowTemplates.CloudTool, branch: String?, force: Boolean, upgrade: Boolean = false): String {
+    suspend fun install(repo: String, tool: CloudWorkflowTemplates.CloudTool, branch: String?, force: Boolean, upgrade: Boolean = false,
+                        skipCi: Boolean = false): String {
         val b = branch?.takeIf { it.isNotBlank() } ?: github.defaultBranch(repo)
         val current = runCatching { github.readFileRaw(repo, tool.path, b) }.getOrNull()
         // An older copy of our own template is upgraded (new inputs); a hand-edited one is left alone.
         val outdated = upgrade && CloudWorkflowTemplates.state(tool, current) == CloudWorkflowTemplates.InstallState.OUTDATED
         if (current != null && !force && !outdated) return "${tool.file} zaten var ($b)."
         if (current?.trim() == tool.yaml.trim()) return "${tool.file} güncel ($b)."
-        github.commitFiles(repo, b, "Coder: ${tool.title} bulut aracı (${tool.file})", listOf(GitHub.FileChange(tool.path, tool.yaml, false)), null)
+        github.commitFiles(repo, b, (if (skipCi) "[skip ci] " else "") + "Coder: ${tool.title} bulut aracı (${tool.file})",
+            listOf(GitHub.FileChange(tool.path, tool.yaml, false)), null)
         return "${tool.file} ${if (current == null) "kuruldu" else "güncellendi"} ($b)."
+    }
+
+    /** Whether the workflow file is on the default branch (needed for workflow_dispatch). */
+    suspend fun installedOnDefault(repo: String, t: CloudWorkflowTemplates.CloudTool): Boolean =
+        CloudWorkflowTemplates.state(t, runCatching { github.readFileRaw(repo, t.path, github.defaultBranch(repo)) }.getOrNull()) in
+            setOf(CloudWorkflowTemplates.InstallState.CURRENT, CloudWorkflowTemplates.InstallState.CUSTOM)
+
+    /**
+     * Starts [t] on [ref] (the workflow must already be on the default branch and on [ref]) and waits. Returns the
+     * finished run, or null when it did not start or finish within [maxWaitMs].
+     */
+    suspend fun dispatchAndWait(repo: String, t: CloudWorkflowTemplates.CloudTool, ref: String, inputs: org.json.JSONObject, maxWaitMs: Long): GitHub.Run? {
+        val since = System.currentTimeMillis()
+        github.dispatchWorkflow(repo, t.file, ref, inputs)
+        var run: GitHub.Run? = null
+        for (i in 0 until 24) {
+            delay(5_000)
+            run = github.dispatchedRun(repo, t.file, ref, since)
+            if (run != null) break
+        }
+        run ?: return null
+        val deadline = since + maxWaitMs
+        while (run!!.status != "completed") {
+            if (System.currentTimeMillis() > deadline) return null
+            onStatus("${t.title} çalışıyor (${run.status})")
+            delay(minOf(pollMs, 10_000))
+            run = github.run(repo, run.id)
+        }
+        onStatus(null)
+        return run
     }
 
     suspend fun run(repo: String, tool: String, scriptPath: String, outputDir: String?, branch: String?, blenderVersion: String?,
@@ -99,7 +131,7 @@ class CloudToolRunner(
         val out = outputDir?.let { cleanPath(it) } ?: "coder-out"
         val base = github.defaultBranch(repo)
         val ref = branch?.takeIf { it.isNotBlank() } ?: base
-        if (runCatching { github.readFileRaw(repo, script, ref) }.getOrNull() == null) {
+        if (!t.scriptOptional && runCatching { github.readFileRaw(repo, script, ref) }.getOrNull() == null) {
             throw ToolException("$script, $ref dalında yok. Önce betiği commit et, sonra run_cloud_tool çağır.")
         }
         // workflow_dispatch needs the file on the default branch, and on the branch it runs from.

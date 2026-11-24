@@ -365,6 +365,74 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** The user's ordered list of stronger models ("provider/model" per line): repairs climb it one by one. */
+    var escalationChain: String
+        get() = str("escalation_chain")
+        set(v) = put("escalation_chain", v)
+
+    /** "Until green": a red CI keeps the agent fixing; the same error twice moves up the escalation chain. */
+    var untilGreen: Boolean
+        get() = bool("until_green", true)
+        set(v) = putBool("until_green", v)
+
+    /** Red CI rounds in one task before the user is asked whether to go on. */
+    var ciMaxRounds: Int
+        get() = prefs.getInt("ci_max_rounds", 4).coerceIn(1, 10)
+        set(v) = prefs.edit().putInt("ci_max_rounds", v.coerceIn(1, 10)).apply()
+
+    /** A cheap model checks the architect's plan for missing callers/registrations before code is written. */
+    var planCritic: Boolean
+        get() = bool("plan_critic", true)
+        set(v) = putBool("plan_critic", v)
+
+    /** Remember how CI errors were fixed and hint the fix when the same error comes back. */
+    var fixMemory: Boolean
+        get() = bool("fix_memory", true)
+        set(v) = putBool("fix_memory", v)
+
+    /** Compile/type-check on a throwaway [skip ci] branch before each code commit (GitHub Actions, 1-5 min). */
+    var quickCheck: Boolean
+        get() = bool("quick_check", false)
+        set(v) = putBool("quick_check", v)
+
+    /** Repos where the user declined installing the quick-check workflow. */
+    var quickCheckDeclined: Set<String>
+        get() = str("quick_check_declined").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("quick_check_declined", v.joinToString("\n"))
+
+    /** Full orchestrator on Android projects: emulator screenshots in GitHub Actions after CI passes. */
+    var androidShots: Boolean
+        get() = bool("android_shots", false)
+        set(v) = putBool("android_shots", v)
+
+    /** Run queued tasks unattended. */
+    var queueEnabled: Boolean
+        get() = bool("queue_enabled", true)
+        set(v) = putBool("queue_enabled", v)
+
+    var queueRequiresCharging: Boolean
+        get() = bool("queue_charging", true)
+        set(v) = putBool("queue_charging", v)
+
+    var queueRequiresWifi: Boolean
+        get() = bool("queue_wifi", true)
+        set(v) = putBool("queue_wifi", v)
+
+    /** Spending cap for one queued task. */
+    var queueTaskBudget: Double
+        get() = str("queue_task_budget", "0.5").toDoubleOrNull()?.coerceIn(0.05, 10.0) ?: 0.5
+        set(v) = put("queue_task_budget", v.coerceIn(0.05, 10.0).toString())
+
+    /** Issues labelled "coder" in the user's repos become queued tasks. */
+    var issueWatch: Boolean
+        get() = bool("issue_watch", false)
+        set(v) = putBool("issue_watch", v)
+
+    /** Weekly: the user's PR review comments become project rules (lessons). */
+    var learnFromReviews: Boolean
+        get() = bool("learn_reviews", true)
+        set(v) = putBool("learn_reviews", v)
+
     /** lookup_docs: current library documentation (Context7, then the web). */
     var docsLookup: Boolean
         get() = bool("docs_lookup", true)

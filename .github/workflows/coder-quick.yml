@@ -1,0 +1,90 @@
+# coder-cloud-tool: quick v2 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
+name: Coder Quick Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_path:
+        description: Özel kontrol betiği (varsa)
+        required: false
+        default: .coder/quick-check.sh
+      output_dir:
+        description: Çıktı klasörü
+        required: false
+        default: coder-out
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coder-quick-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SCRIPT: ${{ inputs.script_path }}
+      CODER_OUTPUT_DIR: ${{ inputs.output_dir }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Proje türü
+        id: kind
+        run: |
+          if [ -n "$SCRIPT" ] && [ -f "$SCRIPT" ]; then k=custom
+          elif [ -f gradlew ]; then k=gradle
+          elif [ -f package.json ]; then k=node
+          elif ls requirements*.txt pyproject.toml setup.py *.py > /dev/null 2>&1; then k=python
+          else k=none; fi
+          echo "kind=$k" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        if: steps.kind.outputs.kind == 'gradle'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.kind.outputs.kind == 'gradle'
+
+      - uses: actions/setup-node@v4
+        if: steps.kind.outputs.kind == 'node'
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        if: steps.kind.outputs.kind == 'python'
+        with:
+          python-version: "3.12"
+
+      - name: Kontrol
+        env:
+          KIND: ${{ steps.kind.outputs.kind }}
+        run: |
+          set -o pipefail
+          case "$KIND" in
+            custom) bash "$SCRIPT" ;;
+            gradle)
+              chmod +x gradlew
+              if ! ./gradlew compileDebugSources --console=plain 2>&1 | tee check.log; then
+                if grep -q "Task 'compileDebugSources' not found" check.log; then ./gradlew classes --console=plain; else exit 1; fi
+              fi ;;
+            node)
+              if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+              if [ -f tsconfig.json ]; then npx --no-install tsc --noEmit || npx -y -p typescript tsc --noEmit; else echo "tsconfig yok: yalnızca kurulum denetlendi"; fi ;;
+            python)
+              python -m compileall -q .
+              pip install -q ruff && ruff check --select E9,F63,F7,F82 --output-format concise . ;;
+            *) echo "Tanınan proje türü yok; kontrol atlandı" ;;
+          esac
+
+      - name: Günlüğü yükle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coder-quick-output
+          if-no-files-found: ignore
+          retention-days: 1
+          path: check.log

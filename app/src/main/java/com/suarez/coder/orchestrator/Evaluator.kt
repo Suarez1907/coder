@@ -95,7 +95,9 @@ class Evaluator(private val agent: Agent) {
     suspend fun evaluate(history: MutableList<ChatMessage>, ui: AgentUi, plan: OrchestratorPlan): Result? {
         val gh: GitHub = agent.tools.github
         val paths = gh.treeEntries(plan.repo, plan.branch)?.second?.map { it.path }.orEmpty()
-        if (detect(paths) != Kind.WEB) return null
+        val kind = detect(paths)
+        if (kind == Kind.ANDROID && agent.settings.androidShots) return androidShots(ui, plan)
+        if (kind != Kind.WEB) return null
         val dir = appDir(paths) ?: return Result(emptyList(), emptyList(), "Statik index.html bulunamadı; değerlendirici atlandı.")
         val script = ".coder/eval/${plan.id}.mjs"
         if (gh.readFileRaw(plan.repo, script, plan.branch) == null) {
@@ -131,5 +133,28 @@ class Evaluator(private val agent: Agent) {
         val result = r.copy(outputMarker = CloudToolRunner.marker(output.tool, output.runId, output.dir), visualChange = change)
         if (result.passed && preview != null) runCatching { preview.copyTo(baseline, overwrite = true) }
         return result
+    }
+
+    /** Android: emulator in GitHub Actions; the app must start without a crash. Screens are compared with the last pass. */
+    private suspend fun androidShots(ui: AgentUi, plan: OrchestratorPlan): Result {
+        val runner = agent.tools.cloud ?: return Result(emptyList(), emptyList(), "Bulut araçları kullanılamıyor.")
+        ui.status("Android emülatöründe ekran görüntüleri alınıyor (GitHub Actions, 10-20 dk)")
+        val out = try { runner.run(plan.repo, "android", ".coder/screens.txt", "coder-out/android", plan.branch, null) } finally { ui.status(null) }
+        val output = CloudToolRunner.outputs(out).firstOrNull()
+        if (output == null) {
+            val crashed = out.contains("UYGULAMA ÇÖKTÜ")
+            return Result(listOf(Criterion("Uygulama emülatörde açılıyor", false, out.substringAfter("BAŞARISIZ", out).take(1_500))),
+                if (crashed) listOf(out.substringAfter("UYGULAMA ÇÖKTÜ").take(600)) else emptyList())
+        }
+        val crash = output.files.firstOrNull { it.name == "crash.txt" }?.readText()?.trim().orEmpty()
+        val shots = output.files.count { it.name.startsWith("shot_") }
+        val visualDir = File(runner.outDir.parentFile, "visual").apply { mkdirs() }
+        val baseline = File(visualDir, plan.repo.replace('/', '_') + "-android.png")
+        val preview = output.preview
+        val change = if (preview != null && baseline.isFile) VisualDiff.compare(baseline, preview) else null
+        val r = Result(listOf(Criterion("Uygulama emülatörde açılıyor ve çökmüyor", crash.isEmpty(), if (crash.isEmpty()) "açıldı, $shots ek ekran" else crash.take(600))),
+            if (crash.isEmpty()) emptyList() else listOf(crash.take(600)), outputMarker = CloudToolRunner.marker(output.tool, output.runId, output.dir), visualChange = change)
+        if (r.passed && preview != null) runCatching { preview.copyTo(baseline, overwrite = true) }
+        return r
     }
 }

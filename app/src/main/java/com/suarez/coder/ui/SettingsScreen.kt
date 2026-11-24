@@ -353,6 +353,43 @@ private fun ArchitectPage(vm: ChatViewModel) {
                 "yaklaşık 0,15 $; orta boy bir repo birkaç sent.") { s.semanticSearch = it; vm.projectSettingsChanged() }
     }
 
+    Group { EscalationEditor(vm) }
+
+    Group {
+        Title("Doğrulama ve onarım", "Ajanın kodu kendisi çalıştıramamasını telafi eden kontroller.")
+        SwitchSetting("Yeşile kadar", "Kırmızı CI'da durmadan düzeltir", s.untilGreen,
+            "CI başarısızsa ajan düzeltmeye devam eder. Aynı hata ikinci kez gelirse yükseltme sıralamandaki bir sonraki modele geçer; " +
+                "sıranın sonunda sana sorar.") { s.untilGreen = it }
+        NumberSetting("Soru sormadan en fazla kırmızı CI turu", s.ciMaxRounds, info = "Bu sayıya ulaşınca devam edilsin mi diye sorar.") { s.ciMaxRounds = it }
+        SwitchSetting("Plan eleştirmeni", "Ucuz model Mimar planını kontrol eder", s.planCritic,
+            "Eksik çağıran, kayıt (manifest, navigasyon, DI), import veya test varsa not düşer; gereken dosyayı plana ekler.") { s.planCritic = it }
+        SwitchSetting("Hata → çözüm hafızası", "Aynı CI hatasında eski çözümü hatırlatır", s.fixMemory,
+            "Kırmızı CI'ı yeşile çeviren değişiklik kaydedilir; aynı hata tekrar gelince ajana \"geçen sefer şöyle düzeldi\" ipucu verilir.") { s.fixMemory = it }
+        SwitchSetting("Hızlı ön kontrol", "Her kod commit'inden önce derleme denetimi", s.quickCheck,
+            "Değişiklik [skip ci] ile geçici bir dala yazılır, GitHub Actions'ta yalnızca derleme/tür kontrolü çalışır (1-5 dk), dal silinir. " +
+                "Değişen dosyalarda hata varsa commit yapılmaz. İlk kullanımda repoya coder-quick.yml eklemek için izin ister. " +
+                "Kendi kontrolün için .coder/quick-check.sh yazabilirsin.") { s.quickCheck = it }
+        SwitchSetting("Android ekran görüntüleri", "Tam modda emülatörle sınar", s.androidShots,
+            "Değerlendirici açıkken Android projelerinde uygulama GitHub Actions emülatöründe açılır, ekran görüntüsü sohbete gelir, çökme " +
+                "olursa düzeltme turu açılır. .coder/screens.txt'deki her satır (adb shell komutu) için ek ekran. Bir çalıştırma 10-20 dk.") { s.androidShots = it }
+    }
+
+    Group {
+        Title("İş kuyruğu", "Sohbet çekmecesindeki \"İş kuyruğu\"na eklenen görevler gözetimsiz, sırayla çalışır. Her görev kendi " +
+            "coder/q-* dalında çalışır, PR açar ve asla merge etmez.")
+        SwitchSetting("Kuyruk açık", "Sıradaki görevler çalışsın", s.queueEnabled) { s.queueEnabled = it; vm.queueSettingsChanged() }
+        SwitchSetting("Yalnızca şarjdayken", "Pil için önerilir", s.queueRequiresCharging) { s.queueRequiresCharging = it }
+        SwitchSetting("Yalnızca Wi-Fi'da", "Mobil veriyi korur", s.queueRequiresWifi) { s.queueRequiresWifi = it }
+        TextSetting("Görev başı bütçe (USD)", String.format(java.util.Locale.US, "%.2f", s.queueTaskBudget), keyboard = KeyboardType.Decimal,
+            info = "Bir kuyruk görevi bu tutara ulaşınca durur.") { v -> v.replace(',', '.').toDoubleOrNull()?.let { s.queueTaskBudget = it } }
+        SwitchSetting("Issue takibi", "\"coder\" etiketli issue'lar kuyruğa girer", s.issueWatch,
+            "Repolarında coder etiketli açık issue'lar 6 saatte bir kontrol edilir ve kuyruğa eklenir; PR açıklamasına Closes #n yazılır.") {
+            s.issueWatch = it; vm.queueSettingsChanged()
+        }
+        SwitchSetting("PR yorumlarından öğren", "Haftalık: inceleme yorumların proje kuralı olur", s.learnFromReviews,
+            "PR'lara yazdığın inceleme yorumları ucuz bir modelle kısa kurallara çevrilir ve o reponun derslerine eklenir.") { s.learnFromReviews = it }
+    }
+
     Group { ModesEditor(vm) }
 
     Group {
@@ -519,6 +556,46 @@ private fun TemplatesPage(vm: ChatViewModel) {
 }
 
 // ---- Building blocks ----
+
+/** The user's order of stronger models: repairs and repeated errors climb it one by one. */
+@Composable
+private fun EscalationEditor(vm: ChatViewModel) {
+    val s = vm.settings
+    var chain by remember { mutableStateOf(com.suarez.coder.agent.Escalation.parse(s.escalationChain)) }
+    var picking by remember { mutableStateOf(false) }
+    fun save(list: List<String>) { chain = list; s.escalationChain = list.joinToString("\n"); vm.refreshSettings() }
+    Title("Yükseltme sıralaması", "Uygulayıcı takılınca (onarım denemeleri, üst üste hatalar, aynı CI hatasının tekrarı) sırayla bu " +
+        "modellere geçilir: önce 1, sonra 2... Mimar hiçbir zaman onarım yapmaz. Boşsa tek \"Yükseltme modeli\" (veya otomatik seçim) kullanılır.")
+    if (chain.isEmpty()) Label("Sıralama boş: otomatik yükseltme modeli kullanılıyor.", coder.muted)
+    chain.forEachIndexed { i, key ->
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("${i + 1}. $key", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = { save(chain.toMutableList().also { java.util.Collections.swap(it, i, i - 1) }) }, enabled = i > 0) { Text("Yukarı") }
+            TextButton(onClick = { save(chain.toMutableList().also { java.util.Collections.swap(it, i, i + 1) }) }, enabled = i < chain.size - 1) { Text("Aşağı") }
+            TextButton(onClick = { save(chain.filterIndexed { j, _ -> j != i }) }) { Text("Sil") }
+        }
+    }
+    TextButton(onClick = { picking = true }) { Text("Model ekle") }
+    if (picking) {
+        val options = vm.modelOptions().filter { it.key !in chain && vm.settings.keyFor(it.provider).isNotBlank() }
+        AlertDialog(
+            onDismissRequest = { picking = false },
+            title = { Text("Sıralamaya model ekle") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    if (options.isEmpty()) Text("Anahtarı girilmiş başka model yok. Model listesini güncelle.", color = coder.muted)
+                    options.forEach { m ->
+                        Column(Modifier.fillMaxWidth().clickable { save(chain + m.key); picking = false }.padding(vertical = 8.dp)) {
+                            Text(m.key, style = MaterialTheme.typography.bodyMedium)
+                            Text(vm.priceLabel(m), style = MaterialTheme.typography.bodySmall, color = coder.muted)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { picking = false }) { Text("Kapat") } },
+        )
+    }
+}
 
 /** User-defined modes: name, instructions, tool access, model. Chosen from the chat's control sheet. */
 @Composable

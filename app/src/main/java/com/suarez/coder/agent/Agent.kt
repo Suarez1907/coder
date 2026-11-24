@@ -62,7 +62,7 @@ sealed class ArchOutcome {
     data class Unusable(val why: String) : ArchOutcome()
 }
 
-class Agent(val settings: Settings, filesDir: java.io.File? = null) {
+class Agent(val settings: Settings, private val filesDir: java.io.File? = null) {
     val tools = ToolRegistry(settings)
     val context = ContextProvider(settings, tools.github)
     val repoMaps = com.suarez.coder.repomap.RepoMapService(tools.github, filesDir)
@@ -83,7 +83,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             tools.semantic = com.suarez.coder.context.SemanticIndex(tools.github, { r, ref -> tools.filteredTree(r, ref) },
                 java.io.File(filesDir, "semantic"), { settings.geminiKey })
         }
-        tools.preCommit = { repo, branch, changes -> selfReview(repo, branch, changes) }
+        tools.preCommit = { repo, branch, changes -> selfReview(repo, branch, changes); quickCheck(repo, branch, changes) }
         tools.beforeWrite = { repo, branch -> checkpoint(repo, branch) }
     }
 
@@ -97,6 +97,88 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     /** Set by the app: a hint from similar successful earlier tasks, or null. */
     var similarFor: ((repo: String, request: String) -> String?)? = null
     private val depCache = HashMap<String, List<String>>()
+    /** CI error → fix memory (shared file; null without app storage). */
+    val fixMemory: FixMemory? = filesDir?.let { FixMemory(java.io.File(it, "fixes.json")) }
+
+    /** The user's ordered stronger models (keys present); falls back to the single escalation model. */
+    fun escalationChain(): List<ModelRef> {
+        if (modelOverride != null) return emptyList()
+        val chain = Escalation.parse(settings.escalationChain).mapNotNull { ModelRef.parse(it) }
+            .filter { settings.keyFor(it.provider).isNotBlank() }.distinctBy { it.key }
+        return chain.ifEmpty { listOfNotNull(escalationRef()) }
+    }
+
+    /** Plan critic: a cheap model looks for missing callers/registrations; issues go to the executor, missing files join the plan. */
+    suspend fun critiquePlan(history: MutableList<ChatMessage>, ui: AgentUi, plan: ParsedPlan): ParsedPlan {
+        if (!settings.planCritic || isEvolutionSession || plan.files.isEmpty()) return plan
+        val map = snapshots["architect"]?.substringAfter("REPO MAP", "")?.take(40_000)
+        val planText = "Repo ${plan.repo}, branch ${plan.branch}\nCommit: ${plan.message}\nNotes: ${plan.notes}\n" +
+            plan.files.joinToString("\n") { "## ${it.path} [${it.action}]\n${it.instructions}" }
+        ui.status("Plan eleştirmeni planı inceliyor")
+        val reply = try {
+            callModel(history, listOf(ChatMessage.User("PLAN:\n$planText" + (map?.takeIf { it.isNotBlank() }?.let { "\n\nREPO MAP$it" } ?: ""))),
+                routerRef() ?: editorRef(), "critic", PlanCritic.SYSTEM, emptyList(), ui, useCache = false, maxOut = 700, thinking = "low")
+        } catch (e: CancellationException) { throw e } catch (e: Exception) { return plan } finally { ui.status(null) }
+        val v = PlanCritic.parse(reply.text) ?: return plan
+        if (v.ok) { history += ChatMessage.Notice("Plan eleştirmeni: eksik bulmadı"); ui.update(); return plan }
+        val known = plan.files.map { it.path }.toSet()
+        val tree = runCatching { tools.filteredTree(plan.repo, plan.branch.takeIf { it.isNotBlank() }) }.getOrDefault(emptyList()).map { it.path }.toSet()
+        val add = v.addFiles.filter { it.path !in known && (it.action == "create" || it.path in tree) }
+        history += ChatMessage.Notice("Plan eleştirmeni ${v.issues.size} not" + (if (add.isNotEmpty()) ", ${add.size} dosya ekledi" else ""),
+            (v.issues.map { "- $it" } + add.map { "+ ${it.path}: ${it.instructions}" }).joinToString("\n"))
+        ui.update()
+        val notes = (plan.notes + "\nReviewer concerns to address while implementing:\n" + v.issues.joinToString("\n") { "- $it" }).trim()
+        return plan.copy(notes = notes, files = plan.files + add)
+    }
+
+    /** "Until green" bookkeeping for one agent loop. */
+    private class CiState {
+        val seen = ArrayList<String>()
+        var failures = 0
+        var lastFailed = false
+        var pendingSig: String? = null
+        var pendingRepo = ""
+        val fixes = ArrayList<String>()
+        var nudges = 0
+    }
+
+    /** After a ci_wait: fix-memory hint, escalation on a repeated error, ask after too many rounds. Returns the model to use next, or null to stop. */
+    private suspend fun afterCi(call: com.suarez.coder.llm.ToolCall, result: ChatMessage.ToolResult, st: CiState, cur: ModelRef,
+                                history: MutableList<ChatMessage>, ui: AgentUi): Pair<ChatMessage.ToolResult, ModelRef?> {
+        val text = result.content
+        val repo = call.args.optString("repo").ifBlank { tools.activeRepo() }
+        if (com.suarez.coder.evolution.ExamRunner.ciMissing(text)) return result to cur
+        if (com.suarez.coder.evolution.ExamRunner.ciPassed(text)) {
+            st.lastFailed = false
+            val sig = st.pendingSig
+            if (sig != null && settings.fixMemory && st.fixes.isNotEmpty()) fixMemory?.record(FixMemory.Fix(st.pendingRepo, sig, st.fixes.joinToString("; ").take(800), System.currentTimeMillis()))
+            st.pendingSig = null; st.fixes.clear()
+            return result to cur
+        }
+        if (!text.contains("\nHatalar (")) return result to cur
+        val sig = com.suarez.coder.evolution.SessionTraceRecorder.signature(text)
+        st.failures++; st.lastFailed = true
+        val repeated = st.seen.any { ErrorSig.similar(it, sig) }
+        st.seen += sig
+        if (st.pendingSig == null) { st.pendingSig = sig; st.pendingRepo = repo }
+        var out = result
+        if (settings.fixMemory) fixMemory?.let { m -> m.hint(m.lookup(repo, sig))?.let { out = result.copy(content = text + "\n\n" + it) } }
+        var next: ModelRef? = cur
+        if (settings.untilGreen && repeated && !isEvolutionSession) {
+            val up = Escalation.next(escalationChain(), cur)
+            if (up != null) {
+                history += ChatMessage.Notice("Aynı CI hatası tekrarlandı: daha güçlü modele geçiliyor (${up.model})", sig)
+            } else if (!ui.confirm("Aynı CI hatası tekrarlıyor", "Yükseltme zincirinin sonundasın (${cur.model}).\n\n$sig\n\nDevam edilsin mi?", "Devam et", "Durdur")) {
+                next = null
+            }
+            if (up != null) next = up
+        }
+        if (next != null && st.failures >= settings.ciMaxRounds && !isEvolutionSession &&
+            !ui.confirm("${st.failures}. kırmızı CI turu", "CI hâlâ başarısız.\n\n$sig\n\nDüzeltmeye devam edilsin mi?", "Devam et", "Durdur")
+        ) next = null
+        ui.update()
+        return out to next
+    }
 
     private suspend fun selfReview(repo: String, branch: String, changes: List<Triple<String, String?, String?>>) {
         if (!settings.selfReview || isEvolutionSession) return
@@ -122,6 +204,43 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         history += ChatMessage.Notice("Öz-denetim commit'i durdurdu (${v.problems.size} sorun)", v.problems.joinToString("\n"))
         throw com.suarez.coder.tools.ToolException("Öz-denetim (commit YAPILMADI) şu sorunları buldu:\n- " + v.problems.joinToString("\n- ") +
             "\nDosyayı gerekirse yeniden oku, düzelt ve tekrar gönder. Bu bir yanlış alarmsa aynı değişikliği bir kez daha gönder; ikinci kez denetlenmez.")
+    }
+
+    /** Queue runs end with a pull request: merging and raw write calls are left to the user. */
+    fun unattendedDenied(name: String, method: String?): String? = when {
+        name == "github_merge_pull_request" -> "Kuyruk görevi merge yapamaz; PR açık bırakılır, kullanıcı birleştirir."
+        name == "github_api" && (method ?: "GET").uppercase() != "GET" -> "Kuyruk görevinde github_api yalnızca GET olabilir."
+        else -> null
+    }
+
+    /** Queue runs: nobody is watching, so nothing is installed or asked; confirmations are answered by the run's own rules. */
+    var unattended = false
+
+    private suspend fun quickCheck(repo: String, branch: String, changes: List<Triple<String, String?, String?>>) {
+        if (!settings.quickCheck || isEvolutionSession) return
+        val runner = tools.cloud ?: return
+        val code = changes.filter { (p, b, a) -> a != b && !Regex("\\.(md|txt|svg|png|jpg|csv)$", RegexOption.IGNORE_CASE).containsMatchIn(p) }
+        if (code.isEmpty()) return
+        val t = com.suarez.coder.cloudtools.CloudWorkflowTemplates.QUICK
+        if (repo.lowercase() in settings.quickCheckDeclined) return
+        val installed = try { runner.installedOnDefault(repo, t) } catch (e: CancellationException) { throw e } catch (e: Exception) { return }
+        if (!installed) {
+            if (unattended) return
+            val ok = liveUi?.confirm("Hızlı ön kontrol kurulsun mu?",
+                "Commit'ten önce derleme/tür denetimi için $repo varsayılan dalına .github/workflows/${t.file} eklenecek ([skip ci] ile, CI tetiklemez). " +
+                    "Kontrol her kod commit'inden önce geçici bir dalda 1-5 dakika sürer.", "Kur", "Bu repoda kullanma") ?: return
+            if (!ok) { settings.quickCheckDeclined = settings.quickCheckDeclined + repo.lowercase(); return }
+            try { runner.install(repo, t, null, force = false, upgrade = true, skipCi = true) } catch (e: CancellationException) { throw e } catch (e: Exception) { return }
+        }
+        liveUi?.status("Hızlı ön kontrol: derleme denetleniyor (GitHub Actions)")
+        val r = try {
+            QuickCheck(tools.github, runner) { rp, id -> tools.ciErrors(rp, id) }.check(repo, branch, code)
+        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            QuickCheck.Result(true, "Hızlı ön kontrol çalıştırılamadı (${e.message?.take(120)}); commit'e devam edildi.")
+        } finally { liveUi?.status(null) }
+        liveHistory?.add(ChatMessage.Notice(if (r.ok) "Hızlı ön kontrol: geçti" else "Hızlı ön kontrol: hata, commit durdu", r.report, isError = !r.ok))
+        liveUi?.update()
+        if (!r.ok) throw com.suarez.coder.tools.ToolException(r.report + "\nHataları düzelt ve değişikliği tekrar gönder.")
     }
 
     private suspend fun checkpoint(repo: String, branch: String) {
@@ -243,6 +362,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         /** The architect is called at most this many times per task: plan, or ask for ≤3 files and then plan. */
         const val MAX_ARCHITECT_CALLS = 2
         const val CLARIFY_MARK = "❓"
+        /** Prefix of messages the "until green" controller adds in the user's place. */
+        const val AUTO_NUDGE = "[Otomatik denetleyici] "
         /** Decision 1 difficulty (0 trivial … 3 very hard) below which the medium architect is used. */
         const val MEDIUM_COMPLEXITY = 1.5
         const val SNAPSHOT_MAX_COMMITS = 6
@@ -567,6 +688,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         if (settings.projectNotes) appendLine(notesRule)
         if (settings.todoList) appendLine("Task list: for work with 3 or more steps, call update_todos first with the steps, keep exactly one " +
             "item in_progress, and send the full updated list as you finish each step. Skip it for one-step work.")
+        appendLine("Impact: before changing a function/class signature, name or behavior, call find_references and update every caller in the same commit.")
         if (settings.docsLookup) appendLine("Library APIs: when you are not sure an API exists in the version the project uses (see DEPENDENCIES), " +
             "or a build error points at a library call, call lookup_docs before writing the code.")
         if (settings.semanticSearch && tools.semantic != null && settings.geminiKey.isNotBlank()) appendLine("Finding code: if you do not know which file holds something, use semantic_search (by meaning) before reading files one by one.")
@@ -1199,6 +1321,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     ): ToolCall? {
         var consecutiveFailures = 0
         var reads = 0
+        var cur = ref
+        val ci = CiState()
         for (step in 1..settings.maxSteps) {
             // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
             HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->
@@ -1210,10 +1334,20 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, ref, role, system, toolSpecs, ui, maxOut = maxOut, thinking = thinking, stable = stable)
+            val reply = callModel(history, prepared.messages, cur, role, system, toolSpecs, ui, maxOut = maxOut, thinking = thinking, stable = stable)
             history += reply
             ui.update()
-            if (reply.toolCalls.isEmpty()) return null
+            if (reply.toolCalls.isEmpty()) {
+                // Until green: the model may not stop on a red CI (twice at most, then the user decides).
+                if (settings.untilGreen && ci.lastFailed && !readOnly && !isEvolutionSession && ci.nudges < 2) {
+                    ci.nudges++
+                    history += ChatMessage.User(AUTO_NUDGE + "CI hâlâ kırmızı. Son hatayı düzelt, commit et ve ci_wait ile doğrula; " +
+                        "düzeltilemiyorsa nedenini kısaca açıkla.")
+                    ui.update()
+                    continue
+                }
+                return null
+            }
 
             var stopCall: ToolCall? = null
             val calls = reply.toolCalls
@@ -1227,10 +1361,34 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                     continue
                 }
                 if (call.name in setOf("github_read_file", "github_read_files")) reads += readCount
-                val (result, rejected) = executeTool(call, readOnly, allowOps, ui, role)
+                var (result, rejected) = executeTool(call, readOnly, allowOps, ui, role)
+                if (call.name == "ci_wait" && !result.isError) {
+                    val (r2, next) = afterCi(call, result, ci, cur, history, ui)
+                    result = r2
+                    if (next == null) {
+                        history += result
+                        calls.drop(i + 1).forEach { history += ChatMessage.ToolResult(it.id, it.name, "İptal edildi: kullanıcı durdurdu.", true) }
+                        history += ChatMessage.Notice("Kullanıcı kırmızı CI'dan sonra durdurdu.")
+                        return null
+                    }
+                    cur = next
+                }
+                if (ci.pendingSig != null && !result.isError && call.name in setOf("github_apply_diff", "github_write_files")) {
+                    ci.fixes += (call.args.optString("message").ifBlank { "değişiklik" }) + " [" +
+                        Regex("(?m)^([\\w./-]+\\.[\\w]+)\\s*$").findAll(call.args.optString("diff")).map { it.groupValues[1] }.distinct().take(4).joinToString() + "]"
+                }
                 history += result
                 ui.update()
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
+                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !isEvolutionSession) {
+                    // Climb the user's model chain before asking.
+                    Escalation.next(escalationChain(), cur)?.let { up ->
+                        history += ChatMessage.Notice("$MAX_CONSECUTIVE_FAILURES başarısız deneme: daha güçlü modele geçiliyor (${up.model})")
+                        cur = up
+                        consecutiveFailures = 0
+                        ui.update()
+                    }
+                }
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
                     val ok = ui.confirm(
                         "$MAX_CONSECUTIVE_FAILURES deneme üst üste başarısız",
@@ -1257,6 +1415,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         ui.status(if (call.name == "ci_wait") "GitHub Actions derlemesi bekleniyor" else "Araç çalışıyor: ${call.name}")
         return try {
             val method = call.args.optString("method").ifBlank { null }
+            if (unattended) unattendedDenied(call.name, method)?.let { return ChatMessage.ToolResult(call.id, call.name, it, true) to false }
             val denied = (if (role in ToolRegistry.ARCHITECT_ROLES) ToolRegistry.architectDenied(call.name, method) else null)
                 ?: ToolRegistry.accessError(call.name, method, readOnly, allowOps)
             if (denied == null && tools.needsApproval(call) && !settings.autoApprove &&

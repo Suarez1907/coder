@@ -1295,6 +1295,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val pendingSaves = LinkedHashMap<String, PendingSave>()
     private var saveJob: Job? = null
     private val saveLock = kotlinx.coroutines.sync.Mutex()
+    private var ledgerLen = -1L
 
     private fun save(now: Boolean = false) = saveSession(currentSessionId, messages, now)
 
@@ -1313,6 +1314,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun writePending(refreshList: Boolean = true) = saveLock.withLock {
         val batch = synchronized(pendingSaves) { LinkedHashMap(pendingSaves).also { pendingSaves.clear() } }
         if (batch.isEmpty()) return@withLock
+        // The queue worker appends to the ledger too: pick up its keys so nothing is counted twice.
+        val ledgerFile = File(getApplication<Application>().filesDir, "ledger.jsonl")
+        if (ledgerFile.length() != ledgerLen) { runCatching { synchronized(loggedKeys) { loggedKeys.addAll(ledger.keys()) } } }
         for ((id, p) in batch) {
             runCatching { sessionStore.save(id, p.messages, p.repo, p.cost) }
             // New cost records go to the permanent ledger exactly once.
@@ -1321,10 +1325,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             runCatching { ledger.append(fresh.map { entryFor(id, p.repo, it) }) }
         }
+        ledgerLen = ledgerFile.length()
         if (!refreshList) return@withLock
         val list = sessionStore.list()
         withContext(Dispatchers.Main) { sessions = list }
     }
+
+    // ---- Task queue (unattended runs) ----
+
+    private val queueStore = com.suarez.coder.queue.QueueWorker.store(app)
+    var queue by mutableStateOf<List<com.suarez.coder.agent.QueuedTask>>(emptyList())
+        private set
+
+    fun refreshQueue() {
+        viewModelScope.launch(Dispatchers.IO) { val l = queueStore.all(); withContext(Dispatchers.Main) { queue = l } }
+    }
+
+    fun enqueue(text: String, repo: String) {
+        val r = agent.tools.normalizeRepo(repo.ifBlank { agent.tools.activeRepo() })
+        if (text.isBlank() || !r.contains('/')) return
+        queueStore.add(com.suarez.coder.agent.QueuedTask("t${System.currentTimeMillis()}", r, text.trim()))
+        com.suarez.coder.queue.QueueWorker.schedule(getApplication())
+        refreshQueue()
+    }
+
+    fun runQueueNow() { com.suarez.coder.queue.QueueWorker.schedule(getApplication(), now = true) }
+    fun removeQueued(id: String) { queueStore.remove(id); refreshQueue() }
+    fun requeue(id: String) { queueStore.update(id) { it.copy(state = com.suarez.coder.agent.QueuedTask.State.QUEUED, note = "") }; com.suarez.coder.queue.QueueWorker.schedule(getApplication()); refreshQueue() }
+    fun queueSettingsChanged() { com.suarez.coder.queue.QueueWorker.schedulePeriodic(getApplication()) }
 
     /** Called when the app goes to the background: nothing typed or generated may wait in memory. */
     fun flushSaves() { viewModelScope.launch(Dispatchers.IO) { writePending() } }

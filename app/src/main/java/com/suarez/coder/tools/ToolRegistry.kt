@@ -130,11 +130,12 @@ class ToolRegistry(private val settings: Settings) {
     /** Runs a script in GitHub Actions (Blender headless or Python/FFmpeg); no local computer is involved. */
     private val runCloudTool = ToolSpec("run_cloud_tool",
         "Repodaki bir betiği GitHub Actions'ta çalıştırır: tool=blender (Blender --background --python), toolbox " +
-            "(Python 3.12 + FFmpeg), manim (toolbox + Manim/LaTeX; betik manim'i kendisi çağırır) veya video (Remotion: " +
-            "script_path giriş dosyası, ör. src/index.ts; video.mp4 + preview.png üretir). Workflow yoksa kurar, bitmesini bekler. " +
+            "(Python 3.12 + FFmpeg), manim (toolbox + Manim/LaTeX; betik manim'i kendisi çağırır), video (Remotion: " +
+            "script_path giriş dosyası, ör. src/index.ts; video.mp4 + preview.png üretir) veya android (debug APK'yı emülatörde açar, " +
+            "ilk ekranın ve .coder/screens.txt'deki her adb shell komutundan sonraki ekranın görüntüsünü alır, çökmede başarısız olur; 10-20 dk). Workflow yoksa kurar, bitmesini bekler. " +
             "Hata olursa traceback döner: betiği düzeltip tekrar çağır. Başarılıysa çıktılar (preview.png, .glb, .mp4) indirilir ve " +
             "sohbette gösterilir. Önce betiği commit et.",
-        obj("repo" to str(repoDesc), "tool" to str("blender, toolbox, manim veya video"), "script_path" to str("Betiğin (video: giriş dosyasının) repo içi yolu"),
+        obj("repo" to str(repoDesc), "tool" to str("blender, toolbox, manim, video veya android"), "script_path" to str("Betiğin (video: giriş dosyasının) repo içi yolu"),
             "output_dir" to str("Çıktı klasörü (varsayılan coder-out; betik CODER_OUTPUT_DIR ortam değişkenini kullanmalı)"),
             "branch" to str("Betiğin bulunduğu dal (boş = varsayılan dal)"),
             "blender_version" to str("Blender major.minor (varsayılan 4.2)"),
@@ -149,6 +150,11 @@ class ToolRegistry(private val settings: Settings) {
         obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
             "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
             "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
+    private val findReferences = ToolSpec("find_references",
+        "Bir sembolün (fonksiyon, sınıf, alan) TANIMINI ve onu KULLANAN tüm satırları dosya:satır olarak bulur. Bir imzayı, adı veya " +
+            "davranışı değiştirmeden ÖNCE çağır ve etkilenen her çağıranı da güncelle.",
+        obj("repo" to str(repoDesc), "symbol" to str("Tam ad, ör. saveScore veya ScoreRepository"), "ref" to str("Branch (boşsa varsayılan)"),
+            required = listOf("symbol")))
     private val updateTodos = ToolSpec("update_todos",
         "Kullanıcının gördüğü görev listesini yazar/günceller. 3+ adımlı işlerde ilk iş olarak listeyi çıkar; her adımda tam listeyi " +
             "tekrar gönder, aynı anda yalnızca bir madde in_progress olsun, biten maddeyi hemen done yap.",
@@ -172,6 +178,7 @@ class ToolRegistry(private val settings: Settings) {
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
         if (settings.docsLookup) add(lookupDocs)
+        add(findReferences)
         if (settings.semanticSearch && semantic != null && settings.geminiKey.isNotBlank()) add(semanticSearch)
         if (writer && settings.todoList) add(updateTodos)
     }
@@ -216,6 +223,7 @@ class ToolRegistry(private val settings: Settings) {
     companion object {
         /** Planning roles: read-only, whatever a caller passes (enforced in [execute], not only in the prompt). */
         val ARCHITECT_ROLES = setOf("architect", "planner")
+        const val REF_SCAN_FILES = 150
 
         /** Tools that change files, run things or change the repository. */
         val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
@@ -231,7 +239,7 @@ class ToolRegistry(private val settings: Settings) {
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "semantic_search", "update_todos")
+            "lookup_docs", "semantic_search", "update_todos", "find_references")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -329,6 +337,7 @@ class ToolRegistry(private val settings: Settings) {
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
             "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
+            "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
             "update_todos" -> com.suarez.coder.agent.Todos.ack(com.suarez.coder.agent.Todos.parse(a))
             "semantic_search" -> (semantic ?: throw ToolException("Anlamsal arama bu oturumda kullanılamıyor.")).search(repo(), s("ref"), req("query"))
             "run_cloud_tool" -> {
@@ -403,6 +412,42 @@ class ToolRegistry(private val settings: Settings) {
     suspend fun readFilesText(repo: String, paths: List<String>, ref: String?): String = readMany(repo, paths, ref)
 
     suspend fun fetchUrl(url: String): String = web.fetch(url, 0, 12_000)
+
+    /** Definition and uses of a symbol: GitHub code search first (default branch index), else a bounded scan of the tree. */
+    private suspend fun findReferences(repo: String, ref: String?, symbol: String): String {
+        if (!Regex("[\\w$.]{2,80}").matches(symbol)) throw ToolException("Geçersiz sembol: $symbol")
+        val code = Regex("\\.(kt|kts|java|py|js|jsx|ts|tsx|mjs|go|rs|swift|dart|gd|cs|c|cc|cpp|h|hpp|rb|php|lua|vue|svelte|xml)$", RegexOption.IGNORE_CASE)
+        val tree = filteredTree(repo, ref).filter { code.containsMatchIn(it.path) && it.size < 200_000 }
+        val name = symbol.substringAfterLast('.')
+        var source = "kod araması"
+        var paths: List<String> = runCatching {
+            val body = github.raw("GET", "/search/code?q=${java.net.URLEncoder.encode("$name repo:$repo", "UTF-8")}&per_page=30", null)
+            if (!body.startsWith("HTTP 200")) emptyList() else {
+                val items = JSONObject(body.substringAfter('\n')).optJSONArray("items") ?: JSONArray()
+                (0 until items.length()).map { items.getJSONObject(it).optString("path") }
+            }
+        }.getOrDefault(emptyList()).filter { p -> tree.any { it.path == p } }
+        if (paths.isEmpty() || ref != null) {
+            // The search index only covers the default branch: scan the tree (bounded).
+            source = "dal taraması"
+            paths = tree.sortedBy { it.size }.take(REF_SCAN_FILES).map { it.path }
+        }
+        val defs = ArrayList<String>(); val uses = ArrayList<String>()
+        for (p in paths) {
+            val text = github.readFileRaw(repo, p, ref) ?: continue
+            for ((n, line) in com.suarez.coder.agent.References.lines(text, name)) {
+                val row = "$p:$n  $line"
+                if (com.suarez.coder.agent.References.isDefinition(line, name)) defs += row else uses += row
+            }
+            if (defs.size + uses.size > 120) break
+        }
+        if (defs.isEmpty() && uses.isEmpty()) return "'$name' bulunamadı ($source, ${paths.size} dosya)."
+        val files = (defs + uses).map { it.substringBefore(':') }.distinct().size
+        return "'$name': ${defs.size} tanım, ${uses.size} kullanım, $files dosya ($source)\n" +
+            (if (defs.isNotEmpty()) "TANIM:\n" + defs.joinToString("\n") + "\n" else "") +
+            (if (uses.isNotEmpty()) "KULLANIM:\n" + uses.take(100).joinToString("\n") else "") +
+            (if (paths.size >= REF_SCAN_FILES && source == "dal taraması") "\n(İlk $REF_SCAN_FILES dosya tarandı.)" else "")
+    }
 
     private suspend fun readMany(repo: String, paths: List<String>, ref: String?): String {
         val sb = StringBuilder()
