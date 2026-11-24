@@ -91,6 +91,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     /** The conversation of the current run (hooks called from tools write their notices and costs here). */
     private var liveHistory: MutableList<ChatMessage>? = null
+    private var liveUi: AgentUi? = null
     private val reviewedOnce = HashSet<Int>()
     private val runCheckpoints = HashSet<String>()
     /** Set by the app: a hint from similar successful earlier tasks, or null. */
@@ -105,10 +106,17 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         if (!reviewedOnce.add(key)) return // the same change again after a warning: the model judged it a false alarm
         val history = liveHistory ?: ArrayList()
         val ref = routerRef() ?: editorRef()
-        val reply = runCatching {
+        liveUi?.status("Öz-denetim: değişiklik commit'ten önce kontrol ediliyor")
+        val reply = try {
             callModel(history, listOf(ChatMessage.User("Change to $repo ($branch):\n\n" + SelfReview.view(code))), ref, "review",
                 SelfReview.SYSTEM, emptyList(), NoUi, useCache = false, maxOut = 400, thinking = "low")
-        }.getOrNull() ?: return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return // the check is a helper: a failed call never blocks the commit
+        } finally {
+            liveUi?.status(null)
+        }
         val v = SelfReview.parse(reply.text) ?: return
         if (v.ok || v.problems.isEmpty()) return
         history += ChatMessage.Notice("Öz-denetim commit'i durdurdu (${v.problems.size} sorun)", v.problems.joinToString("\n"))
@@ -819,6 +827,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         architectThinkingOverride = null
         val start = history.size
         liveHistory = history
+        liveUi = ui
         runCheckpoints.clear()
         reviewedOnce.clear()
         try {
@@ -828,7 +837,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             if (request != null && requestIndex >= 0 && !isEvolutionSession) {
                 var at = requestIndex + 1
                 mentionContext(request.text)?.let { history.add(at++, it); ui.update() }
-                if (settings.similarTasks) similarFor?.invoke(tools.activeRepo(), request.text)?.let {
+                val repoNow = tools.activeRepo()
+                if (settings.similarTasks) similarFor?.let { f -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { f(repoNow, request.text) } }?.let {
                     history.add(at, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
                 }
             }
@@ -936,6 +946,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             }
         } finally {
             liveHistory = null
+            liveUi = null
             usageSummary(history, start)?.let { history += it }
             architectOverride = null
             architectThinkingOverride = null

@@ -11,6 +11,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.sqrt
+import kotlinx.coroutines.sync.withLock
 
 /**
  * semantic_search: finds code by meaning ("where is the payment flow"). Files are split into ~50-line chunks and
@@ -86,7 +87,12 @@ class SemanticIndex(
 
     private fun file(repo: String) = File(dir, repo.replace('/', '_') + ".json")
 
-    private fun load(repo: String): MutableMap<String, Pair<String, List<Chunk>>> {
+    /** Parsed indexes kept in memory: parsing a large index file on every search would dominate the search time. */
+    private val memo = HashMap<String, MutableMap<String, Pair<String, List<Chunk>>>>()
+
+    private fun load(repo: String): MutableMap<String, Pair<String, List<Chunk>>> = memo.getOrPut(repo) { loadFile(repo) }
+
+    private fun loadFile(repo: String): MutableMap<String, Pair<String, List<Chunk>>> {
         val out = HashMap<String, Pair<String, List<Chunk>>>()
         val o = runCatching { JSONObject(file(repo).readText()) }.getOrNull() ?: return out
         for (path in o.keys()) {
@@ -111,7 +117,12 @@ class SemanticIndex(
         file(repo).writeText(o.toString())
     }
 
-    suspend fun search(repo: String, ref: String?, query: String, k: Int = 8): String {
+    private val lock = kotlinx.coroutines.sync.Mutex()
+
+    /** Parallel workers of one agent share this index: one search (and index update) at a time. */
+    suspend fun search(repo: String, ref: String?, query: String, k: Int = 8): String = lock.withLock { searchLocked(repo, ref, query, k) }
+
+    private suspend fun searchLocked(repo: String, ref: String?, query: String, k: Int): String {
         if (embed == null && geminiKey().isBlank()) throw ToolException("Anlamsal arama için Gemini API anahtarı gerekli (gömme modeli). github_search_code kullan.")
         lastTokens = 0
         val entries = listFiles(repo, ref).filter(::indexable).take(MAX_FILES)

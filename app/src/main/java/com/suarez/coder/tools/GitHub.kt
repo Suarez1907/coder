@@ -13,6 +13,57 @@ class ToolException(message: String) : Exception(message)
 class GitHub(private val token: () -> String) {
     private val api = "https://api.github.com"
 
+    /**
+     * Short-lived read cache shared by every GitHub instance (foreground and background agents): file contents, trees
+     * and default branches are read many times per task. Any write through this class clears the repo's entries, so
+     * our own commits are always seen; external pushes show up after the TTL at the latest.
+     */
+    object ReadCache {
+        private class Entry(val at: Long, val value: Any?, val size: Int)
+        private val map = LinkedHashMap<String, Entry>(64, 0.75f, true)
+        private var total = 0L
+        const val MAX_CHARS = 6_000_000L
+        const val MAX_ITEM_CHARS = 400_000
+        var hits = 0L; private set
+        var misses = 0L; private set
+
+        @Synchronized fun get(key: String, ttlMs: Long, now: Long = System.currentTimeMillis()): Pair<Boolean, Any?> {
+            val e = map[key] ?: return (false to null).also { misses++ }
+            if (now - e.at > ttlMs) { map.remove(key); total -= e.size; misses++; return false to null }
+            hits++
+            return true to e.value
+        }
+
+        @Synchronized fun put(key: String, value: Any?, size: Int, now: Long = System.currentTimeMillis()) {
+            if (size > MAX_ITEM_CHARS) return
+            map.remove(key)?.let { total -= it.size }
+            map[key] = Entry(now, value, size); total += size
+            val it = map.entries.iterator()
+            while ((total > MAX_CHARS || map.size > 300) && it.hasNext()) { val e = it.next(); total -= e.value.size; it.remove() }
+        }
+
+        /** Drops a repo's entries (blank = everything). */
+        @Synchronized fun invalidate(repo: String) {
+            val prefix = repo.lowercase() + "|"
+            val it = map.entries.iterator()
+            while (it.hasNext()) { val e = it.next(); if (repo.isBlank() || e.key.startsWith(prefix)) { total -= e.value.size; it.remove() } }
+        }
+
+        @Synchronized fun clear() { map.clear(); total = 0 }
+        fun key(repo: String, vararg parts: String?) = repo.lowercase() + "|" + parts.joinToString("|") { it ?: "" }
+
+        const val FILE_TTL = 90_000L
+        const val TREE_TTL = 60_000L
+        const val BRANCH_TTL = 600_000L
+    }
+
+    private suspend fun <T> cached(key: String, ttl: Long, size: (T) -> Int, load: suspend () -> T): T {
+        val (hit, v) = ReadCache.get(key, ttl)
+        @Suppress("UNCHECKED_CAST")
+        if (hit) return v as T
+        return load().also { ReadCache.put(key, it, size(it)) }
+    }
+
     /** [base64]: content is base64-encoded binary (documents); it goes through a blob instead of inline text. */
     data class FileChange(val path: String, val content: String?, val delete: Boolean, val base64: Boolean = false)
 
@@ -97,7 +148,9 @@ class GitHub(private val token: () -> String) {
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
     private fun encPath(p: String) = p.trim('/').split('/').joinToString("/") { enc(it) }
 
-    suspend fun defaultBranch(repo: String): String = json("GET", "/repos/$repo").getString("default_branch")
+    suspend fun defaultBranch(repo: String): String = cached(ReadCache.key(repo, "default"), ReadCache.BRANCH_TTL, { 64 }) {
+        json("GET", "/repos/$repo").getString("default_branch")
+    }
 
     suspend fun listRepos(): String {
         val r = call("GET", "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member")
@@ -115,6 +168,12 @@ class GitHub(private val token: () -> String) {
     /** Returns (branch, blobs) or null if the repository is empty. */
     suspend fun treeEntries(repo: String, ref: String?): Pair<String, List<TreeEntry>>? {
         val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
+        return cached(ReadCache.key(repo, "tree", branch), ReadCache.TREE_TTL, { r -> (r?.second?.sumOf { it.path.length + 48 } ?: 16).coerceAtMost(ReadCache.MAX_ITEM_CHARS) }) {
+            loadTree(repo, branch)
+        }
+    }
+
+    private suspend fun loadTree(repo: String, branch: String): Pair<String, List<TreeEntry>>? {
         val r = call("GET", "/repos/$repo/git/trees/${enc(branch)}?recursive=1")
         if (r.code == 409) return null
         if (r.code !in 200..299) throw ToolException("GitHub -> ${r.code}: ${r.body.take(500)}")
@@ -136,7 +195,12 @@ class GitHub(private val token: () -> String) {
         return head + lines.take(limit).joinToString("\n") + (if (lines.size > limit) "\n... (${lines.size - limit} dosya daha)" else "")
     }
 
-    suspend fun readFileRaw(repo: String, path: String, ref: String?): String? {
+    suspend fun readFileRaw(repo: String, path: String, ref: String?): String? =
+        cached(ReadCache.key(repo, "file", ref?.takeIf { it.isNotBlank() }, path.trim('/')), ReadCache.FILE_TTL, { it?.length ?: 8 }) {
+            loadFileRaw(repo, path, ref)
+        }
+
+    private suspend fun loadFileRaw(repo: String, path: String, ref: String?): String? {
         val q = ref?.takeIf { it.isNotBlank() }?.let { "?ref=${enc(it)}" } ?: ""
         val r = call("GET", "/repos/$repo/contents/${encPath(path)}$q", accept = "application/vnd.github.raw+json")
         if (r.code == 404) return null
@@ -191,7 +255,10 @@ class GitHub(private val token: () -> String) {
      */
     var writeGuard: ((repo: String, branch: String?) -> String?)? = null
 
-    private fun checkWrite(repo: String, branch: String?) { writeGuard?.invoke(repo, branch)?.let { throw ToolException(it) } }
+    private fun checkWrite(repo: String, branch: String?) {
+        writeGuard?.invoke(repo, branch)?.let { throw ToolException(it) }
+        ReadCache.invalidate(repo)
+    }
 
     suspend fun commitFiles(repo: String, branch: String, message: String, files: List<FileChange>, baseBranch: String?): String {
         checkWrite(repo, branch)
@@ -226,6 +293,7 @@ class GitHub(private val token: () -> String) {
             JSONObject().put("message", message).put("tree", newTree).put("parents", JSONArray().put(headSha)))
         val commitSha = commit.getString("sha")
         json("PATCH", "/repos/$repo/git/refs/heads/${enc(branch)}", JSONObject().put("sha", commitSha))
+        ReadCache.invalidate(repo)
         return "Commit oluşturuldu: ${commitSha.take(7)} on $branch (${files.size} dosya)\nhttps://github.com/$repo/commit/$commitSha"
     }
 
@@ -238,6 +306,7 @@ class GitHub(private val token: () -> String) {
                 JSONObject().put("message", message).put("content", b64).put("branch", branch))
             out.append("+ ").append(f.path).append('\n')
         }
+        ReadCache.invalidate(repo)
         return out.toString()
     }
 
@@ -369,8 +438,11 @@ class GitHub(private val token: () -> String) {
         json("PATCH", "/repos/$repo/pulls/$number", JSONObject().put("state", "closed"))
     }
 
-    suspend fun deleteBranch(repo: String, branch: String): Boolean = writeGuard?.let { false } ?:
-        call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}").code in 200..299
+    suspend fun deleteBranch(repo: String, branch: String): Boolean {
+        if (writeGuard != null) return false
+        ReadCache.invalidate(repo)
+        return call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}").code in 200..299
+    }
 
     /** "path +add −del" lines of a pull request. */
     suspend fun pullRequestFiles(repo: String, number: Int): List<String> {

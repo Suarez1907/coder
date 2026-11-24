@@ -54,6 +54,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 class PendingConfirm(
@@ -485,25 +486,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     pending = null
                     status = null
                     running = false
-                    save()
+                    save(now = true)
                 } else {
-                    saveSession(sid, work)
+                    saveSession(sid, work, now = true)
                     notifyBackgroundDone(work)
                 }
                 refreshBackground()
                 recordTrace(work, runStart, sid, a, run.base)
             }
-        }
-    }
-
-    private fun saveSession(sid: String, work: List<ChatMessage>) {
-        val snapshot = work.toList()
-        val repo = repoNow()
-        val cost = agent.sessionCost(snapshot)
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { sessionStore.save(sid, snapshot, repo, cost) }
-            val list = sessionStore.list()
-            withContext(Dispatchers.Main) { sessions = list }
         }
     }
 
@@ -1117,7 +1107,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Starts a fresh chat; the current one stays in the history. */
     fun newChat() {
-        save()
+        save(now = true)
         releaseForegroundAgent()
         running = false; status = null
         currentSessionId = sessionStore.newId()
@@ -1130,7 +1120,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openSession(id: String) {
         if (id == currentSessionId) return
-        save()
+        save(now = true)
         releaseForegroundAgent()
         currentSessionId = id
         messages.clear()
@@ -1299,20 +1289,52 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         refreshSettings()
     }
 
-    private fun save() {
-        val snapshot = messages.toList()
-        val id = currentSessionId
-        val repo = repoNow()
-        val cost = agent.sessionCost(snapshot)
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { sessionStore.save(id, snapshot, repo, cost) }
+    // ---- Saving: coalesced, because a long chat is megabytes of JSON and the agent updates many times per step ----
+
+    private class PendingSave(val messages: List<ChatMessage>, val repo: String, val cost: Double)
+    private val pendingSaves = LinkedHashMap<String, PendingSave>()
+    private var saveJob: Job? = null
+    private val saveLock = kotlinx.coroutines.sync.Mutex()
+
+    private fun save(now: Boolean = false) = saveSession(currentSessionId, messages, now)
+
+    private fun saveSession(sid: String, work: List<ChatMessage>, now: Boolean = false) {
+        val snapshot = work.toList()
+        synchronized(pendingSaves) { pendingSaves[sid] = PendingSave(snapshot, repoNow(), agent.sessionCost(snapshot)) }
+        if (now) { saveJob?.cancel(); saveJob = viewModelScope.launch(Dispatchers.IO) { writePending() }; return }
+        if (saveJob?.isActive == true) return
+        saveJob = viewModelScope.launch(Dispatchers.IO) {
+            kotlinx.coroutines.delay(SAVE_DEBOUNCE_MS)
+            writePending()
+        }
+    }
+
+    /** Writes the latest snapshot of every chat with unsaved changes, and their new cost records to the ledger. */
+    private suspend fun writePending(refreshList: Boolean = true) = saveLock.withLock {
+        val batch = synchronized(pendingSaves) { LinkedHashMap(pendingSaves).also { pendingSaves.clear() } }
+        if (batch.isEmpty()) return@withLock
+        for ((id, p) in batch) {
+            runCatching { sessionStore.save(id, p.messages, p.repo, p.cost) }
             // New cost records go to the permanent ledger exactly once.
-            val fresh = snapshot.filterIsInstance<ChatMessage.UsageRecord>().filter { r ->
+            val fresh = p.messages.filterIsInstance<ChatMessage.UsageRecord>().filter { r ->
                 synchronized(loggedKeys) { loggedKeys.add(Ledger.key(id, r.at, r.role, r.model)) }
             }
-            runCatching { ledger.append(fresh.map { entryFor(id, repo, it) }) }
-            val list = sessionStore.list()
-            withContext(Dispatchers.Main) { sessions = list }
+            runCatching { ledger.append(fresh.map { entryFor(id, p.repo, it) }) }
         }
+        if (!refreshList) return@withLock
+        val list = sessionStore.list()
+        withContext(Dispatchers.Main) { sessions = list }
+    }
+
+    /** Called when the app goes to the background: nothing typed or generated may wait in memory. */
+    fun flushSaves() { viewModelScope.launch(Dispatchers.IO) { writePending() } }
+
+    override fun onCleared() {
+        kotlinx.coroutines.runBlocking(Dispatchers.IO) { runCatching { writePending(refreshList = false) } } // main is blocked: no hop back
+        super.onCleared()
+    }
+
+    private companion object {
+        const val SAVE_DEBOUNCE_MS = 1_200L
     }
 }
