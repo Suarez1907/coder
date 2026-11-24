@@ -191,7 +191,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Connects an agent to the app: memory, learned choices, plans, CI notifications, similar tasks. */
     private fun wire(a: Agent): Agent {
         a.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
-        a.modelPicker = { route -> manager.pick(route) }
+        a.modelPicker = { route, ctx -> manager.pick(route, ctx) }
+        a.promptOverrides = { if (settings.evoEnabled) evoStore.promptOverrides() else emptyMap() }
         a.policyText = { manager.policyText() }
         a.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
         a.similarFor = { repo, request ->
@@ -834,9 +835,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Off-policy comparison of model-choice rules on the logged decisions (empty until there are enough). */
+    var policyRows by mutableStateOf<List<String>>(emptyList())
+        private set
+
     fun refreshManager() {
         refreshReport()
         refreshEval()
+        viewModelScope.launch(Dispatchers.IO) { val r = runCatching { manager.policyReport() }.getOrDefault(emptyList()); withContext(Dispatchers.Main) { policyRows = r } }
         viewModelScope.launch(Dispatchers.IO) {
             val exps = evoStore.experiments().asReversed()
             val best = listOf("SIMPLE_EDIT", "COMPLEX_ARCHITECT", "QUESTION_ONLY").mapNotNull { r ->
@@ -949,7 +955,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val run = work.drop(runStart)
         val request = (work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
         val trace = SessionTraceRecorder.record(run, request, sid, a.tools.normalizeRepo(repoNow()),
-            a.isEvolutionSession, a::costOf)?.copy(arm = a.lastArm, route = a.lastRoute,
+            a.isEvolutionSession, a::costOf)?.copy(arm = a.lastArm, route = a.lastRoute, ctx = a.lastCtx?.toList(), prop = a.lastProp,
             baseSha = base?.first, branch = base?.second?.ifBlank { null }) ?: return
         if (sid == currentSessionId) canRate = true
         viewModelScope.launch(Dispatchers.IO) {

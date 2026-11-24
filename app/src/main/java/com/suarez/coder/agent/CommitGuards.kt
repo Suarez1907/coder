@@ -61,6 +61,21 @@ internal class CommitGuards(private val agent: Agent) {
         }
     }
 
+    /** The self-reviewer's yes/no for a change without blocking anything (null: could not ask). Judges candidates. */
+    suspend fun reviewVerdict(changes: List<Triple<String, String?, String?>>): Boolean? {
+        if (changes.isEmpty()) return true
+        val reply = runCatching {
+            agent.callModel(agent.liveHistory ?: ArrayList(), listOf(ChatMessage.User("Change:\n\n" + SelfReview.view(changes))),
+                agent.routerRef() ?: agent.editorRef(), "review", SelfReview.SYSTEM, emptyList(), Agent.NoUi, useCache = false, maxOut = 300, thinking = "low")
+        }.getOrNull() ?: return null
+        return SelfReview.parse(reply.text)?.let { it.ok || it.problems.isEmpty() }
+    }
+
+    companion object {
+        /** Below this predicted failure probability the quick check is skipped (trained model only). */
+        const val SAFE_RISK = 0.12
+    }
+
     /** A new run: every change may be reviewed again, every branch gets a fresh checkpoint. */
     fun startRun() { reviewedOnce.clear(); runCheckpoints.clear() }
 
@@ -118,6 +133,14 @@ internal class CommitGuards(private val agent: Agent) {
         val runner = tools.cloud ?: return
         val code = changes.filter { (p, b, a) -> a != b && !Regex("\\.(md|txt|svg|png|jpg|csv)$", RegexOption.IGNORE_CASE).containsMatchIn(p) }
         if (code.isEmpty()) return
+        // Adaptive: a change the trained risk model rates very safe skips the 1-5 minute check.
+        if (settings.quickCheckAdaptive) {
+            val (p, trained) = agent.foresight.risk(repo, code.map { it.first }, code.count { it.second == null })
+            if (trained && p < SAFE_RISK) {
+                agent.liveHistory?.add(ChatMessage.Notice("Hızlı ön kontrol atlandı: düşük risk (%${(p * 100).toInt()} başarısızlık tahmini)"))
+                return
+            }
+        }
         val t = com.suarez.coder.cloudtools.CloudWorkflowTemplates.QUICK
         if (repo.lowercase() in settings.quickCheckDeclined) return
         val installed = try { runner.installedOnDefault(repo, t) } catch (e: CancellationException) { throw e } catch (e: Exception) { return }

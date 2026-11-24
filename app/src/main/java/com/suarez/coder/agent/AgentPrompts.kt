@@ -33,18 +33,11 @@ internal class AgentPrompts(private val agent: Agent) {
         }
     }
 
-    internal val tokenRules = """
-        Token economy (important, the user pays per token):
-        - Read only what you need. Request every file you need in ONE github_read_files call instead of one call per file;
-          read line ranges of large files with github_read_file.
-        - Change existing files with github_apply_diff (SEARCH/REPLACE blocks), never by rewriting the whole file.
-          Keep each SEARCH small but unique. For a long region you may write its first lines, a line with only `...`, then its last lines.
-        - Use github_write_files only for new files, full rewrites of tiny files, or deletions.
-        - After pushing, call ci_wait once (it waits for the build and returns the errors); never poll with github_api.
-          Use ci_errors for an older run. Fix the reported errors, then ci_wait again.
-        - With web_fetch pass a short `query` so only the relevant parts of the page come back.
-        - Do not repeat file contents or diffs in your answer; summarize what changed with links.
-    """.trimIndent()
+    /** An evolved section (adopted after winning an exam), else the default. */
+    private fun section(id: String): String = agent.promptOverrides?.invoke()?.get(id)?.takeIf { PromptSections.problem(id, it) == null }
+        ?: PromptSections.default(id)
+
+    internal val tokenRules: String get() = section(PromptSections.TOKEN)
 
     internal val terseCode = "Terse mode: no greetings, explanations, summaries or commentary. Make code changes only through " +
         "github_apply_diff with SEARCH/REPLACE blocks. Final reply: at most 2 short lines (what changed + link)."
@@ -56,10 +49,7 @@ internal class AgentPrompts(private val agent: Agent) {
     fun agentSystem() = buildString {
         append(header()).append('\n').append(tokenRules).append('\n')
         if (settings.terseMode) appendLine(terseCode)
-        appendLine("Workflow: understand first, then change; group related edits in one commit; unless told otherwise use the branch the user names, or a new feature branch and offer a PR.")
-        appendLine("You own the implementation and every patch, syntax, build and logic error it causes; there is no one to hand it to. " +
-            "When a patch fails, first re-read the current text of that file (github_read_file, the relevant line range), find the root cause, " +
-            "then apply a corrected patch. Never retry the same SEARCH blindly.")
+        appendLine(section(PromptSections.WORKFLOW))
         if (settings.projectNotes) appendLine(notesRule)
         if (settings.todoList) appendLine("Task list: for work with 3 or more steps, call update_todos first with the steps, keep exactly one " +
             "item in_progress, and send the full updated list as you finish each step. Skip it for one-step work.")
@@ -112,17 +102,7 @@ internal class AgentPrompts(private val agent: Agent) {
         =======
         new lines
         >>>>>>> REPLACE
-        Rules:
-        - Put the file path alone on the line right above <<<<<<< SEARCH.
-        - SEARCH must copy existing lines character for character (indentation included) and must be unique in the file.
-        - Keep blocks small: only the lines that change plus 1-3 unchanged context lines. Use several blocks per file, in file order.
-        - To replace a long region you may abbreviate the middle of SEARCH: its first 2+ lines, a line with only `...`, its last 2+ lines.
-        - New file: leave SEARCH empty and put the whole file in REPLACE. To remove code, leave REPLACE empty.
-        - Write complete, working code; no placeholders. Only touch the files listed.
-        - Output nothing except the blocks: no explanations, no whole files.
-        - You own every error of your edits. After a failure you get the error and the CURRENT text of the file:
-          find the root cause and base new SEARCH blocks on that current text. Never repeat a failed SEARCH.
-    """.trimIndent() + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
+    """.trimIndent() + "\n" + section(PromptSections.EXECUTOR) + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
 
     fun questionSystem() = buildString {
         append(header()).append('\n').append(tokenRules).append('\n')

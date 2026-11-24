@@ -15,16 +15,61 @@ import java.util.Locale
  */
 class SelfManager(private val settings: Settings, val store: EvolutionStore) {
     val bandit = ModelBandit(File(store.dir, "bandit.json"))
+    val contextual = LinearThompson(File(store.dir, "cbandit.json"))
+    val decisions = OffPolicy.Store(File(store.dir, "cbandit_log.jsonl"))
 
-    /** role -> model for this route, or empty when the user has not given a pool of at least two usable models. */
-    fun pick(route: String): Map<String, ModelRef> {
-        if (!settings.learnedRouting) return emptyMap()
+    /** A choice: role -> model, and for a contextual choice the context and per-role propensities. */
+    data class Pick(val models: Map<String, ModelRef>, val ctx: DoubleArray? = null, val prop: String? = null)
+
+    private fun penalty(route: String, role: String, model: String): Double {
+        val ref = ModelBandit.refCost(route)
+        val arm = bandit.arms(route, role)[model] ?: ModelBandit.Arm()
+        val c = if (arm.n == 0) ref else arm.avgCost
+        return settings.costWeight * (c / (c + ref))
+    }
+
+    /**
+     * role -> model for this route, or null when the user has not given a pool of at least two usable models.
+     * With a task context, the contextual bandit chooses (and records how likely the choice was).
+     */
+    fun pick(route: String, ctx: DoubleArray? = null): Pick? {
+        if (!settings.learnedRouting) return null
         val pool = settings.modelPool.mapNotNull { ModelRef.parse(it) }.filter { settings.keyFor(it.provider).isNotBlank() }
-        if (pool.size < 2) return emptyMap()
-        return ModelBandit.rolesFor(route).associateWith { role ->
+        if (pool.size < 2) return null
+        if (settings.contextualRouting && ctx != null) {
+            val props = ArrayList<String>()
+            val models = ModelBandit.rolesFor(route).associateWith { role ->
+                val c = contextual.choose("$route|$role", pool.map { it.key }, ctx, penalty = { m -> penalty(route, role, m) })
+                props += "$role=${c.propensity}"
+                pool.first { it.key == c.model }
+            }
+            return Pick(models, ctx, props.joinToString(";"))
+        }
+        return Pick(ModelBandit.rolesFor(route).associateWith { role ->
             val chosen = bandit.choose(route, role, pool.map { it.key }, settings.costWeight)
             pool.first { it.key == chosen }
-        }
+        })
+    }
+
+    /** Estimated utility (success − cost penalty) of [model] in context [x]: the reward model for off-policy evaluation. */
+    fun estimate(route: String, role: String, model: String, x: DoubleArray) =
+        contextual.predict("$route|$role", model, x) - penalty(route, role, model)
+
+    /**
+     * Off-policy evaluation on the logged decisions: what the learned contextual rule and "always model X" would have
+     * scored on the same tasks (doubly robust, with 95% intervals), next to what really happened.
+     */
+    fun policyReport(minLogs: Int = 10): List<String> {
+        val logs = decisions.all()
+        if (logs.size < minLogs) return emptyList()
+        val models = logs.map { it.model }.distinct()
+        val rhat = { l: OffPolicy.Log, m: String -> estimate(l.route, l.role, m, l.x) }
+        val learned = { l: OffPolicy.Log -> models.maxBy { estimate(l.route, l.role, it, l.x) } }
+        val (m, lo, hi) = Stats.bootstrapMean(logs.map { it.reward })
+        val actual = "Gerçekte uygulanan: ${String.format(Locale.US, "%.2f", m)} (%95 ${String.format(Locale.US, "%.2f", lo)}–${String.format(Locale.US, "%.2f", hi)}), ${logs.size} karar"
+        val rows = listOf(OffPolicy.evaluate("Öğrenen bağlamsal seçim", logs, learned, rhat)) +
+            models.map { md -> OffPolicy.evaluate("Hep ${md.substringAfterLast('/')}", logs, { md }, rhat) }
+        return listOf(actual) + rows.sortedByDescending { it.dr }.map { OffPolicy.format(it) }
     }
 
     /** Counts a finished run for every model the manager chose for it. */
@@ -33,6 +78,14 @@ class SelfManager(private val settings: Settings, val store: EvolutionStore) {
         if (arms.isEmpty()) return
         val reward = Outcome.of(t)
         arms.forEach { (route, role, model) -> bandit.record(route, role, model, reward, t.totalCostUsd / arms.size) }
+        // Contextual: learn success in this context, and log the decision for off-policy evaluation.
+        val x = t.ctx?.toDoubleArray() ?: return
+        val props = t.prop.orEmpty().split(';').mapNotNull { p -> p.split('=').takeIf { it.size == 2 }?.let { it[0] to (it[1].toDoubleOrNull() ?: 1.0) } }.toMap()
+        arms.forEach { (route, role, model) ->
+            contextual.record("$route|$role|$model", x, reward)
+            val utility = reward - penalty(route, role, model)
+            decisions.add(OffPolicy.Log(route, role, model, x, props[role] ?: 1.0, utility, t.at))
+        }
     }
 
     /** The user's thumbs or a correction changed how good a run was. */

@@ -108,6 +108,19 @@ class EvolutionStore(val dir: File) {
         return true
     }
 
+    private val promptFile get() = File(dir, "prompt_overrides.json")
+
+    /** Prompt sections adopted after winning an exam (PromptSections id -> text). */
+    @Synchronized fun promptOverrides(): Map<String, String> = runCatching {
+        val o = JSONObject(promptFile.readText()); o.keys().asSequence().associateWith { o.getString(it) }
+    }.getOrDefault(emptyMap())
+
+    @Synchronized fun setPromptOverride(section: String, text: String?) {
+        val o = runCatching { JSONObject(promptFile.readText()) }.getOrDefault(JSONObject())
+        if (text == null) o.remove(section) else o.put(section, text)
+        write(promptFile, o.toString())
+    }
+
     @Synchronized fun policyRules(): List<String> = readArray(policyFile).let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } }
 
     @Synchronized fun setPolicyRules(rules: List<String>) =

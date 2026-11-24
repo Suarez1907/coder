@@ -35,6 +35,12 @@ data class SessionTrace(
     val branch: String? = null,
     /** Route the run took (SIMPLE_EDIT, COMPLEX_ARCHITECT, QUESTION_ONLY), when known. */
     val route: String? = null,
+    /** Task context of a contextual model choice (RouteContext features). */
+    val ctx: List<Double>? = null,
+    /** Propensities of that choice, "role=p;role=p" (off-policy evaluation). */
+    val prop: String? = null,
+    /** The run's tool steps, abstracted ("read:build.gradle.kts", "diff:*.kt", "ci"), for procedure mining. */
+    val steps: List<String> = emptyList(),
 ) {
     /** Problems that are worth learning from (a clean, cheap run teaches nothing). */
     val troubleScore get() = diffErrorCount + ciFailureCount * 2 + escalations.size + (if (stopped) 1 else 0) + (if (userCorrection) 2 else 0)
@@ -47,6 +53,7 @@ data class SessionTrace(
         .put("upgraded", upgradedToArchitect).put("stopped", stopped).put("correction", userCorrection).put("processed", processed).put("ciRuns", ciRuns)
         .put("rating", rating).put("arm", arm ?: JSONObject.NULL).put("base", baseSha ?: JSONObject.NULL)
         .put("branch", branch ?: JSONObject.NULL).put("route", route ?: JSONObject.NULL)
+        .put("ctx", ctx?.let { JSONArray(it) } ?: JSONObject.NULL).put("prop", prop ?: JSONObject.NULL).put("steps", JSONArray(steps))
 
     companion object {
         private fun list(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -57,6 +64,8 @@ data class SessionTrace(
             list(o.optJSONArray("ciSig")), list(o.optJSONArray("esc")), if (o.isNull("routing")) null else o.optString("routing"),
             o.optBoolean("upgraded"), o.optBoolean("stopped"), o.optBoolean("correction"), o.optBoolean("processed"), o.optInt("ciRuns"),
             o.optInt("rating"), o.optNullableString("arm"), o.optNullableString("base"), o.optNullableString("branch"), o.optNullableString("route"),
+            o.optJSONArray("ctx")?.let { a -> (0 until a.length()).map { a.getDouble(it) } },
+            o.optNullableString("prop"), list(o.optJSONArray("steps")),
         )
     }
 }

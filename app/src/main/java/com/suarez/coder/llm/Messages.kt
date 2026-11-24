@@ -89,6 +89,8 @@ data class CallOptions(
     val jsonMode: Boolean = false,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
     val cachedContent: String? = null,
+    /** Sampling temperature (several candidates of the same edit differ); null = the model's default. */
+    val temperature: Double? = null,
 )
 
 data class LlmResponse(

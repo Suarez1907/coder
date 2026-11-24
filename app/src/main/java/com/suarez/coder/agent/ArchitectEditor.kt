@@ -1,5 +1,7 @@
 package com.suarez.coder.agent
 
+import kotlinx.coroutines.async
+
 import com.suarez.coder.diff.SearchReplace
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
@@ -38,6 +40,8 @@ class ArchitectEditor(private val agent: Agent) {
         const val GROUP_CHARS = 100_000
         const val APPLIED_IN_RESULT_CHARS = 4_000
         const val MAX_EXECUTOR_RETRIES = 5
+        /** Plan agreement below this asks the user before editing. */
+        const val UNCERTAIN_BELOW = 0.34
         /** Above this size only the region around the failed SEARCH is re-sent after a failure. */
         const val REREAD_FULL_CHARS = 30_000
 
@@ -132,6 +136,31 @@ class ArchitectEditor(private val agent: Agent) {
             is ArchOutcome.Submitted -> outcome0.call
         }
         val parsed = agent.critiquePlan(history, ui, parsePlan(plan.args, agent.settings.defaultRepo))
+        // Plan uncertainty: when independent guesses of the files disagree with the plan, the request is probably ambiguous.
+        agent.foresight.planUncertainty(history, ui, parsed)?.let { (agreement, guesses) ->
+            val pct = (agreement * 100).toInt()
+            val planned = parsed.files.map { it.path }.toSet()
+            val missing = PlanUncertainty.missing(planned, guesses)
+            val detail = "Mimar: ${planned.joinToString()}\n" + guesses.mapIndexed { i, g -> "Bağımsız tahmin ${i + 1}: ${g.joinToString()}" }.joinToString("\n") +
+                (if (missing.isNotEmpty()) "\nTahminlerin çoğunun söylediği ama planda olmayan: ${missing.joinToString()}" else "")
+            if (agreement >= UNCERTAIN_BELOW) {
+                history += ChatMessage.Notice("Plan belirsizliği düşük (uyum %$pct)", detail)
+            } else {
+                history += ChatMessage.Notice("Plan belirsizliği YÜKSEK (uyum %$pct)", detail, isError = true)
+                ui.update()
+                val go = agent.unattended || ui.confirm("Plan belirsiz",
+                    "Bu isteğe dokunulacak dosyalar konusunda bağımsız tahminler Mimar'la uyuşmuyor (uyum %$pct):\n\n$detail\n\n" +
+                        "İstek birden fazla şekilde anlaşılabilir. Plana göre devam edilsin mi?", "Devam et", "Dur, netleştirelim")
+                if (!go) {
+                    history += ChatMessage.ToolResult(plan.id, plan.name, "Kullanıcı belirsiz planı durdurdu; netleştirme bekleniyor.", isError = true)
+                    history += ChatMessage.Assistant("${Agent.CLARIFY_MARK} Plan belirsiz (uyum %$pct). Hangi dosyalar/ekranlar değişmeli? " +
+                        "Mimar ${planned.joinToString()} dedi; bağımsız tahminler ${guesses.flatten().toSet().joinToString()} dedi.", model = "coder")
+                    ui.update()
+                    return
+                }
+            }
+            ui.update()
+        }
 
         val outcome = try {
             implement(history, ui, parsed)
@@ -199,12 +228,21 @@ class ArchitectEditor(private val agent: Agent) {
             )
             if (!ok) return Outcome(false, "Kullanıcı commit'i reddetti. Değişiklikler yazılmadı.")
         }
+        // The same checks as direct commits: secrets, dependencies, self-review, quick check.
+        agent.tools.commitNotes.clear()
+        try {
+            agent.tools.preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], if (it.delete) null else it.content) })
+        } catch (e: com.suarez.coder.tools.ToolException) {
+            return Outcome(false, "Commit denetimi değişikliği durdurdu, commit yapılmadı:\n${e.message}", repairable = true)
+        }
         agent.tools.beforeWrite?.invoke(repo, branch)
         val result = agent.tools.github.commitFiles(repo, branch, message, changes, base)
+        agent.tools.afterCommit?.invoke(repo, result, changes.map { it.path }, changes.count { !it.delete && originals[it.path] == null })
         agent.tools.onRepoChanged()
+        val notes = agent.tools.commitNotes.joinToString("\n").also { agent.tools.commitNotes.clear() }
         // Keep the applied blocks in the conversation so later turns know the new code without re-reading it.
         val applied = editorOutputs.toString().take(APPLIED_IN_RESULT_CHARS)
-        return Outcome(true, result + "\n" + summary + "\nUYGULANAN DEĞİŞİKLİKLER:\n" + applied)
+        return Outcome(true, result + "\n" + summary + (if (notes.isNotBlank()) "\n$notes" else "") + "\nUYGULANAN DEĞİŞİKLİKLER:\n" + applied)
     }
 
     /**
@@ -236,7 +274,7 @@ class ArchitectEditor(private val agent: Agent) {
             groups.last() += f; size += len
         }
         for (group in groups) {
-            val ok = editGroup(history, ui, planText, group, originals, state, outputs)
+            val ok = editGroup(history, ui, planText, group, originals, state, outputs, repo)
             if (!ok.ok) return ok
         }
         return Outcome(true, "")
@@ -270,6 +308,72 @@ class ArchitectEditor(private val agent: Agent) {
 
     data class Step(val ref: ModelRef, val role: String)
 
+    /** A reply applied to a copy of the files: what changed and what went wrong (nothing is written). */
+    private data class Applied(val state: Map<String, String?>, val problems: List<String>, val touched: Set<String>, val failed: Set<String>, val blocks: Int)
+
+    private fun applyReply(text: String, paths: Set<String>, pending: List<PlanFile>, originals: Map<String, String?>, start: Map<String, String?>): Applied {
+        val st = HashMap(start)
+        val parsed = SearchReplace.parse(text)
+        val problems = ArrayList<String>(parsed.errors)
+        val touched = HashSet<String>(); val failed = HashSet<String>()
+        for ((path, blocks) in parsed.blocks.groupBy { it.path.trim().removePrefix("./") }) {
+            if (path !in paths) { problems += "$path planda yok; atlandı."; continue }
+            val res = SearchReplace.applyToFile(st[path], blocks)
+            st[path] = if (res.applied.isEmpty() && st[path] == null) null else res.content
+            if (res.applied.isNotEmpty()) touched += path
+            if (res.failures.isNotEmpty()) { failed += path; problems += SearchReplace.describeFailures(res.failures) }
+        }
+        val untouched = pending.filter { it.path !in touched && it.path !in failed }.map { it.path }
+        if (untouched.isNotEmpty() && parsed.blocks.isEmpty()) problems += "Hiç geçerli SEARCH/REPLACE bloğu üretilmedi (biçim bozuk)."
+        else if (untouched.isNotEmpty()) problems += "Şu dosyalar için blok yok: ${untouched.joinToString()}"
+        validate(touched, originals, st).forEach { (p, why) -> problems += "Yerel kontrol, $p: $why"; failed += p }
+        return Applied(st, problems, touched, failed + untouched, parsed.blocks.size)
+    }
+
+    /**
+     * Several candidate edits of the first attempt at once (different temperatures); each is applied to a copy,
+     * checked locally and by the self-reviewer, and the best one (passing, reviewed, most agreed on, smallest) is kept.
+     */
+    private suspend fun bestCandidate(
+        history: MutableList<ChatMessage>, ui: AgentUi, convo: List<ChatMessage>, step: Step, n: Int, thinking: String?,
+        paths: Set<String>, pending: List<PlanFile>, originals: Map<String, String?>, state: Map<String, String?>,
+    ): ChatMessage.Assistant {
+        ui.status("$n aday düzenleme aynı anda üretiliyor")
+        val replies = try {
+            kotlinx.coroutines.coroutineScope {
+                (0 until n).map { i ->
+                    async {
+                        runCatching {
+                            agent.callModel(history, convo, step.ref, step.role, agent.editorSystem, emptyList(), ui, useCache = false,
+                                maxOut = agent.settings.maxOutEditor, thinking = thinking, temperature = Candidates.temperature(i))
+                        }.getOrNull()
+                    }
+                }.map { it.await() }
+            }
+        } finally { ui.status(null) }
+        val ok = replies.withIndex().filter { it.value != null }.map { it.index to it.value!! }
+        if (ok.isEmpty()) throw com.suarez.coder.llm.LlmException("Aday düzenlemelerin hiçbiri üretilemedi.")
+        val applied = ok.map { (i, r) -> i to applyReply(r.text, paths, pending, originals, state) }
+        val passing = applied.filter { it.second.problems.isEmpty() }
+        val votes = passing.groupingBy { Candidates.fingerprint(it.second.state.filterKeys { k -> k in paths }) }.eachCount()
+        // The self-reviewer only judges when there is a real choice between different passing edits.
+        val review = HashMap<Int, Boolean>()
+        if (votes.size > 1) for ((i, a) in passing) {
+            review[i] = agent.guards.reviewVerdict(a.touched.map { p -> Triple(p, originals[p], a.state[p]) }) ?: true
+        }
+        val scored = applied.map { (i, a) ->
+            Candidates.Scored(i, a.problems.isEmpty(), review[i],
+                votes[Candidates.fingerprint(a.state.filterKeys { k -> k in paths })] ?: 0,
+                a.touched.sumOf { p -> (a.state[p]?.length ?: 0) - (originals[p]?.length ?: 0) }.let { kotlin.math.abs(it) })
+        }
+        val best = Candidates.rank(scored).first()
+        history += ChatMessage.Notice("Çok aday: ${ok.size} aday, ${passing.size} yerel kontrolden geçti; #${best.index + 1} seçildi" +
+            (if (best.votes > 1) " (${best.votes} aday aynı sonuca vardı)" else ""),
+            scored.joinToString("\n") { s -> "#${s.index + 1}: " + (if (s.passes) "geçti" else "kaldı") + (s.reviewOk?.let { if (it) ", öz-denetim tamam" else ", öz-denetim itiraz etti" } ?: "") + ", oy ${s.votes}" })
+        ui.update()
+        return ok.first { it.first == best.index }.second
+    }
+
     private suspend fun editGroup(
         history: MutableList<ChatMessage>,
         ui: AgentUi,
@@ -278,6 +382,7 @@ class ArchitectEditor(private val agent: Agent) {
         originals: Map<String, String?>,
         state: MutableMap<String, String?>,
         outputs: StringBuilder,
+        repo: String = "",
     ): Outcome {
         val paths = group.map { it.path }.toSet()
         // Executor-only self-repair: never the architect. The last attempts may use the (executor-class) escalation model.
@@ -298,14 +403,17 @@ class ArchitectEditor(private val agent: Agent) {
             } else {
                 convo = arrayListOf(ChatMessage.User(buildPrompt(planText, pending, state, feedback)))
             }
-            val reply = agent.callModel(history, convo, step.ref, step.role, agent.editorSystem, emptyList(), ui,
-                useCache = false, maxOut = agent.settings.maxOutEditor,
-                thinking = when {
-                    step.role == "architect" -> agent.architectThinking()
-                    // Adaptive budget: the first try is cheap; repairs think at the configured level.
-                    agent.settings.adaptiveBudget && attempt == 0 && agent.settings.thinkingEditor in setOf("medium", "high", "xhigh") -> "low"
-                    else -> agent.settings.thinkingEditor
-                })
+            val thinking = when {
+                step.role == "architect" -> agent.architectThinking()
+                // Adaptive budget: the first try is cheap; repairs think at the configured level.
+                agent.settings.adaptiveBudget && attempt == 0 && agent.settings.thinkingEditor in setOf("medium", "high", "xhigh") -> "low"
+                else -> agent.settings.thinkingEditor
+            }
+            // Risky groups get several candidate edits on the first attempt (test-time scaling with cheap verifiers).
+            val nCand = if (attempt == 0) agent.foresight.candidates(repo, group.map { it.path }, group.count { originals[it.path] == null }) else 1
+            val reply = if (nCand > 1) bestCandidate(history, ui, convo, step, nCand, thinking, paths, pending, originals, state)
+            else agent.callModel(history, convo, step.ref, step.role, agent.editorSystem, emptyList(), ui,
+                useCache = false, maxOut = agent.settings.maxOutEditor, thinking = thinking)
             convo += reply
             outputs.append(reply.text).append("\n\n")
 

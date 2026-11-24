@@ -365,6 +365,45 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** Self-improvement may rewrite evolvable prompt sections (each rewrite must win an exam). */
+    var promptEvolution: Boolean
+        get() = bool("prompt_evolution", true)
+        set(v) = putBool("prompt_evolution", v)
+    /** Recurring successful procedures become skill candidates (tested by exams). */
+    var procedureMining: Boolean
+        get() = bool("procedure_mining", true)
+        set(v) = putBool("procedure_mining", v)
+
+    /** Choose models with the task context (contextual bandit) instead of per route only. */
+    var contextualRouting: Boolean
+        get() = bool("contextual_routing", true)
+        set(v) = putBool("contextual_routing", v)
+
+    /** Candidate edits per file group (1 = off) and when to make them: "risk" (predicted CI failure), "always", "off". */
+    var candidates: Int
+        get() = prefs.getInt("candidates", 3).coerceIn(1, 5)
+        set(v) = prefs.edit().putInt("candidates", v.coerceIn(1, 5)).apply()
+    var candidateTrigger: String
+        get() = str("candidate_trigger", "risk")
+        set(v) = put("candidate_trigger", v)
+
+    /** Learn the risk of a red CI from the user's own commits (logistic regression on the phone). */
+    var riskModel: Boolean
+        get() = bool("risk_model", true)
+        set(v) = putBool("risk_model", v)
+    /** Predicted failure probability from which candidates are made. */
+    var riskThreshold: Double
+        get() = str("risk_threshold", "0.35").toDoubleOrNull()?.coerceIn(0.05, 0.95) ?: 0.35
+        set(v) = put("risk_threshold", v.coerceIn(0.05, 0.95).toString())
+    /** Skip the quick check for changes the trained risk model rates very safe. */
+    var quickCheckAdaptive: Boolean
+        get() = bool("quick_check_adaptive", true)
+        set(v) = putBool("quick_check_adaptive", v)
+    /** Measure how sure a plan is (independent guesses of the files) and ask when it is unclear. */
+    var planUncertainty: Boolean
+        get() = bool("plan_uncertainty", true)
+        set(v) = putBool("plan_uncertainty", v)
+
     /** Overlap waits: tree/repo map load during routing, the next subtask is edited while CI runs, the evaluator runs with CI. */
     var pipelining: Boolean
         get() = bool("pipelining", true)

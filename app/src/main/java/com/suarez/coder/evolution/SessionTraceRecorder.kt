@@ -66,6 +66,7 @@ object SessionTraceRecorder {
             upgradedToArchitect = routes.any { it.text.contains("yükseltildi") || it.text.contains("geçersiz kıldı") },
             stopped = stopped,
             ciRuns = ci.size,
+            steps = ProcedureMiner.steps(run),
         )
     }
 

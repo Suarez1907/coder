@@ -134,6 +134,13 @@ fun ManagerSection(vm: ChatViewModel) {
         }
     }
 
+    if (vm.policyRows.isNotEmpty()) Card {
+        Heading("Model seçim kuralları (çevrimdışı değerlendirme)")
+        Text("Kayıtlı kararlar üzerinden, hiç çalıştırmadan: başka bir seçim kuralı aynı görevlerde ne skor alırdı (başarı − maliyet cezası; " +
+            "doubly robust tahmin, %95 aralık). Etkin örneklem küçükse aralık geniştir.", style = MaterialTheme.typography.bodySmall, color = dim)
+        vm.policyRows.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = ink) }
+    }
+
     if (vm.cacheRows.isNotEmpty()) Card {
         Heading("Önbellek isabeti (son 30 gün)")
         vm.cacheRows.take(8).forEach { c ->

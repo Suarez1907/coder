@@ -74,6 +74,7 @@ class OpenAiCompatClient(
             .put("model", model)
             .put("messages", buildMessages(system, history))
         options.maxOutputTokens?.let { body.put("max_tokens", it) }
+        options.temperature?.let { body.put("temperature", it) }
         if (openRouter) body.put("usage", JSONObject().put("include", true))
         if (json && options.jsonMode && tools.isEmpty()) body.put("response_format", JSONObject().put("type", "json_object"))
         if (reasoning) OpenRouterCatalog.effortFor(options.thinkingLevel, options.minimalThinking)?.let {
@@ -93,6 +94,11 @@ class OpenAiCompatClient(
             .post(body.toString().toRequestBody(Http.JSON))
             .build()
         var res = send(req)
+        if (res.code == 400 && body.has("temperature") && errorMessage(res.body).contains("temperature", ignoreCase = true)) {
+            // Reasoning models fix their own temperature.
+            body.remove("temperature")
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
         if (res.code == 400 && options.maxOutputTokens != null && errorMessage(res.body).contains("max_tokens", ignoreCase = true)) {
             // The model's own output limit is lower than the configured one: let the API use its maximum.
             body.remove("max_tokens")

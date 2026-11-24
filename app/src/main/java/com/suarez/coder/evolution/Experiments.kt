@@ -34,7 +34,7 @@ data class Experiment(
     val candidate: ExamScore? = null,
     val note: String? = null,
 ) {
-    enum class Kind(val label: String) { MODEL("Model"), RULE("Kural"), SKILL("Yetenek") }
+    enum class Kind(val label: String) { MODEL("Model"), RULE("Kural"), SKILL("Yetenek"), PROMPT("İstem") }
     enum class State(val label: String) { QUEUED("Sırada"), RUNNING("Sınavda"), PROPOSED("Onay bekliyor"), ADOPTED("Kabul edildi"), REJECTED("Reddedildi"), FAILED("Ölçülemedi") }
 
     /** Identity of the change itself (the same change is never tested twice). */
@@ -42,6 +42,7 @@ data class Experiment(
         Kind.MODEL -> payload.optString("role") + "=" + payload.optString("model")
         Kind.RULE -> payload.optString("text").lowercase().replace(Regex("\\s+"), " ").trim()
         Kind.SKILL -> payload.optString("name")
+        Kind.PROMPT -> payload.optString("section") + "#" + payload.optString("text").replace(Regex("\\s+"), " ").trim().hashCode().toString(16)
     }
 
     fun toJson(): JSONObject = JSONObject().put("id", id).put("kind", kind.name).put("title", title).put("payload", payload)
@@ -64,6 +65,10 @@ data class Experiment(
 
         fun rule(text: String, source: String) =
             Experiment(kind = Kind.RULE, title = "Kural: " + text.take(80), payload = JSONObject().put("text", text.trim()), source = source)
+
+        fun prompt(section: String, text: String, source: String) =
+            Experiment(kind = Kind.PROMPT, title = "İstem: ${com.suarez.coder.agent.PromptSections.label(section)} yeniden yazımı",
+                payload = JSONObject().put("section", section).put("text", text), source = source)
 
         fun skill(name: String, source: String) =
             Experiment(kind = Kind.SKILL, title = "Yetenek: /$name", payload = JSONObject().put("name", name), source = source)

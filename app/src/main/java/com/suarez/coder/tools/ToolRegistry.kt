@@ -189,6 +189,9 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Runs before a commit with (path, before, after); throws ToolException to block it (self-review). */
     var preCommit: (suspend (repo: String, branch: String, changes: List<Triple<String, String?, String?>>) -> Unit)? = null
+    /** Called after every commit with (repo, commit result text, changed paths, new files): the risk model's data. */
+    var afterCommit: ((repo: String, result: String, paths: List<String>, newFiles: Int) -> Unit)? = null
+
     /** Warnings from the commit checks, appended to the commit result so the model sees them. */
     val commitNotes = ArrayList<String>()
 
@@ -333,7 +336,9 @@ class ToolRegistry(private val settings: Settings) {
                 commitNotes.clear()
                 preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
                 beforeWrite?.invoke(repo, branch)
-                github.commitFiles(repo, branch, req("message"), files, base) + staleNote(files.map { it.path }) + notes()
+                github.commitFiles(repo, branch, req("message"), files, base).also { r ->
+                    afterCommit?.invoke(repo, r, files.map { it.path }, files.count { !it.delete && befores[it.path] == null })
+                } + staleNote(files.map { it.path }) + notes()
             }
             "github_create_branch" -> github.createBranch(repo(), req("branch"), s("from"))
             "github_create_pull_request" -> github.createPullRequest(repo(), req("title"), req("head"), s("base"), s("body"))
@@ -410,7 +415,9 @@ class ToolRegistry(private val settings: Settings) {
         commitNotes.clear()
         preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
         beforeWrite?.invoke(repo, branch)
-        return github.commitFiles(repo, branch, message, changes, base) + "\n" + summary + staleNote(changes.map { it.path }) + notes()
+        return github.commitFiles(repo, branch, message, changes, base).also { r ->
+            afterCommit?.invoke(repo, r, changes.map { it.path }, changes.count { originals[it.path] == null })
+        } + "\n" + summary + staleNote(changes.map { it.path }) + notes()
     }
 
     private fun staleNote(paths: List<String>): String {

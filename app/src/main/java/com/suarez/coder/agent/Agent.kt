@@ -92,6 +92,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             guards.quickCheck(repo, branch, changes)
         }
         tools.beforeWrite = { repo, branch -> guards.checkpoint(repo, branch) }
+        tools.afterCommit = { repo, result, paths, newFiles -> runCatching { foresight.recordCommit(repo, result, paths, newFiles) } }
     }
 
     // ---- Run-scoped helpers: self-review, checkpoints, @-mentions, similar tasks, custom modes ----
@@ -100,6 +101,11 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     internal var liveHistory: MutableList<ChatMessage>? = null
     internal var liveUi: AgentUi? = null
     internal val guards by lazy { CommitGuards(this) }
+    internal val foresight by lazy { Foresight(this) }
+    /** Decision 1's difficulty for the current request (0..3), when routing produced one. */
+    var lastComplexity: Double? = null
+    internal fun filesDirOrNull() = filesDir
+    internal fun architectSnapshot(): String? = snapshots["architect"]
     internal val safety by lazy { SafetyPolicy(this) }
     private val ciController by lazy { CiController(this) }
     private val requestContext by lazy { RequestContext(this) }
@@ -429,7 +435,21 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     /** Per-role models for the current run (learned choice) or for a whole exam run (the variant under test). */
     var roleOverrides: Map<String, ModelRef> = emptyMap()
     /** Picks models for a route ("role" -> model); null/empty = keep the user's models. */
-    var modelPicker: ((route: String) -> Map<String, ModelRef>)? = null
+    /** Set by the app: prompt sections adopted by self-improvement (PromptSections ids). */
+    var promptOverrides: (() -> Map<String, String>)? = null
+    var modelPicker: ((route: String, ctx: DoubleArray?) -> com.suarez.coder.evolution.SelfManager.Pick?)? = null
+    /** Context and propensities of the last learned model choice (recorded in the run's trace). */
+    var lastCtx: DoubleArray? = null
+    var lastProp: String? = null
+    private val langCache = HashMap<String, DoubleArray>()
+
+    /** The task context for a contextual model choice: difficulty, files involved, the repo's languages. */
+    private suspend fun routeContext(files: Int): DoubleArray? {
+        val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return null
+        val langs = langCache[repo] ?: runCatching { tools.filteredTree(repo, context.ref).map { it.path } }.getOrNull()
+            ?.let { com.suarez.coder.evolution.RouteContext.langShares(it) }?.also { langCache[repo] = it } ?: return null
+        return com.suarez.coder.evolution.RouteContext.features(lastComplexity, files, langs)
+    }
     /** What the last run used, for its trace. */
     var lastArm: String? = null
     var lastRoute: String? = null
@@ -619,6 +639,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         thinking: String? = null,
         stable: String? = null,
         jsonMode: Boolean = false,
+        temperature: Double? = null,
     ): ChatMessage.Assistant {
         var cur = ref
         val tried = HashSet<String>()
@@ -628,7 +649,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             val mark = history.size
             fun spent() = history.drop(mark).filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
             try {
-                return callModelOn(history, messages, cur, role, system, toolSpecs, ui, useCache, maxOut, thinking, stable, jsonMode)
+                return callModelOn(history, messages, cur, role, system, toolSpecs, ui, useCache, maxOut, thinking, stable, jsonMode, temperature)
                     .also { span(Span.MODEL, "${cur.model} ($role)", t0, spent()) }
             } catch (e: com.suarez.coder.llm.LlmException) {
                 span(Span.MODEL, "${cur.model} ($role)", t0, spent(), ok = false)
@@ -672,6 +693,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         thinking: String?,
         stable: String?,
         jsonMode: Boolean,
+        temperature: Double? = null,
     ): ChatMessage.Assistant {
         val maxOut = learnedMaxOut(role, maxOutConfigured)
         beforeCall?.invoke()
@@ -688,6 +710,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             minimalThinking = thinking == "minimal",
             serviceTier = if (flex) "flex" else null,
             jsonMode = jsonMode,
+            temperature = temperature,
         )
         var send = full
         if (useCache && client is GeminiClient) {
@@ -801,11 +824,13 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         val start = history.size
         liveHistory = history
         liveUi = ui
+        lastComplexity = null
         if (settings.quickCheck && settings.quickCheckWarm && !unattended && !isEvolutionSession) guards.prewarmQuickCheck(tools.activeRepo())
         // Overlap: the tree, the repo map and the dependency versions load while routing decides (all cached afterwards).
         val warm = if (settings.pipelining && !isEvolutionSession) kotlinx.coroutines.CoroutineScope(kotlin.coroutines.coroutineContext).launch {
             val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return@launch
             runCatching { tools.filteredTree(repo, context.ref) }
+            if (settings.riskModel) runCatching { foresight.labelPending() }
             if (settings.docsLookup) runCatching { requestContext.dependencies() }
             if (settings.repoMapForArchitect && (settings.architectMode || settings.smartRouting)) runCatching { repoMaps.get(repo, context.ref) }
         } else null
@@ -851,6 +876,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                                 history += ChatMessage.Notice("↪️ Yedek karar sağlayıcısı kullanıldı", s.joinToString("\n"))
                             }
                             route = d.route
+                            lastComplexity = d.complexity
                             // A vague change request: ask 1-3 cheap questions instead of planning the wrong thing.
                             if (needsClarification(d, history)) {
                                 history += routeInfo(d)
@@ -903,7 +929,11 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             }
             // Learned model choice for this run (the user's pool; otherwise their fixed models).
             lastRoute = (route ?: if (settings.architectMode) Route.COMPLEX_ARCHITECT else Route.SIMPLE_EDIT).name
-            modelPicker?.invoke(lastRoute!!)?.takeIf { it.isNotEmpty() }?.let { picks ->
+            lastCtx = null; lastProp = null
+            val ctx = if (modelPicker != null && settings.contextualRouting) routeContext(maxOf(autoPaths.size, settings.contextFiles.size)) else null
+            modelPicker?.invoke(lastRoute!!, ctx)?.takeIf { it.models.isNotEmpty() }?.let { pick ->
+                val picks = pick.models
+                lastCtx = pick.ctx; lastProp = pick.prop
                 roleOverrides = picks
                 lastArm = picks.entries.joinToString(";") { "${lastRoute}|${it.key}|${it.value.key}" }
                 history += ChatMessage.Notice("🎯 Yönetici seçimi: " + picks.entries.joinToString(", ") { "${roleLabel(it.key)} ${it.value.model}" },

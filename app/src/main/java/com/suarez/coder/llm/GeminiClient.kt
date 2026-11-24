@@ -168,6 +168,7 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
             gen.put("thinkingConfig", it)
         }
         options.maxOutputTokens?.let { gen.put("maxOutputTokens", it) }
+        options.temperature?.let { gen.put("temperature", it) }
         if (gen.length() > 0) body.put("generationConfig", gen)
         options.serviceTier?.let { body.put("serviceTier", it) }
         return body

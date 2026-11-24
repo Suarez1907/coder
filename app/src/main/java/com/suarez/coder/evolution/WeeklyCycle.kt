@@ -80,6 +80,13 @@ class WeeklyCycle(
                 if (left() > 0.05) out += runCatching { suite.run(left) }.getOrElse { "Değerlendirme hatası: ${it.message?.take(100)}" }
             }
         }
+        // Self-improvement proposals (each must win an exam before it is used).
+        if (settings.githubToken.isNotBlank() && store.experiments().none { it.state == Experiment.State.QUEUED }) {
+            if (settings.procedureMining) runCatching { mineProcedure() }.getOrNull()?.let { out += it; store.addLog(EvoTier.MEMORY, it) }
+        }
+        if (settings.promptEvolution && store.experiments().none { it.state == Experiment.State.QUEUED }) {
+            runCatching { evolvePrompt() }.getOrNull()?.let { out += it; store.addLog(EvoTier.POLICY, it) }
+        }
         queueDefaultExperiment()
         out += runExperiments()
         return out.filter { it.isNotBlank() }.joinToString(" ")
@@ -156,6 +163,43 @@ class WeeklyCycle(
         return actions.revert(m, "güncellemeden sonra çökme artışı")
     }
 
+    /** Reflective prompt evolution: one section rewritten from recent failures, queued as an exam experiment. */
+    suspend fun evolvePrompt(): String? {
+        val since = System.currentTimeMillis() - 30L * 86_400_000L
+        val traces = store.traces().filter { it.at >= since }
+        val section = PromptEvolver.target(traces) ?: return null
+        val last = store.seenRepos().any { it == "prompt:$section:" + (System.currentTimeMillis() / (7 * 86_400_000L)) }
+        if (last) return null // one rewrite per section per week
+        val current = store.promptOverrides()[section] ?: com.suarez.coder.agent.PromptSections.default(section)
+        val tmp = ArrayList<com.suarez.coder.llm.ChatMessage>()
+        val reply = agent.callModel(tmp, listOf(com.suarez.coder.llm.ChatMessage.User(PromptEvolver.prompt(section, current, PromptEvolver.failures(traces, section)))),
+            agent.escalationRef() ?: agent.editorRef(), "evolution", PromptEvolver.SYSTEM, emptyList(), silentUi, useCache = false, maxOut = 1_500, thinking = "medium")
+        val cost = tmp.filterIsInstance<com.suarez.coder.llm.ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
+        store.markSeen(listOf("prompt:$section:" + (System.currentTimeMillis() / (7 * 86_400_000L))))
+        val text = PromptEvolver.clean(section, reply.text, current) ?: return "İstem evrimi: önerilen metin kuralları korumadı, atlandı.".also { store.addLog(EvoTier.POLICY, it, cost) }
+        store.addLog(EvoTier.POLICY, "İstem evrimi önerisi hazırlandı: ${com.suarez.coder.agent.PromptSections.label(section)}", cost)
+        return if (store.queue(Experiment.prompt(section, text, "istem evrimi"))) "İstem evrimi: ${com.suarez.coder.agent.PromptSections.label(section)} için yeni metin sınava alındı." else null
+    }
+
+    /** Procedure memory: a recurring successful procedure becomes a (disabled) skill, queued for an exam. */
+    suspend fun mineProcedure(): String? {
+        val seen = store.seenRepos()
+        val cluster = ProcedureMiner.clusters(store.traces()).firstOrNull { "proc:${it.key}" !in seen } ?: return null
+        store.markSeen(listOf("proc:${cluster.key}"))
+        val tmp = ArrayList<com.suarez.coder.llm.ChatMessage>()
+        val reply = agent.callModel(tmp, listOf(com.suarez.coder.llm.ChatMessage.User(ProcedureMiner.prompt(cluster))),
+            agent.routerRef() ?: agent.editorRef(), "evolution", ProcedureMiner.SYSTEM, emptyList(), silentUi, useCache = false, maxOut = 1_500, thinking = "low")
+        val cost = tmp.filterIsInstance<com.suarez.coder.llm.ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
+        val md = reply.text.trim().removePrefix("```markdown").removePrefix("```md").removePrefix("```").removeSuffix("```").trim()
+        val skill = com.suarez.coder.skills.SkillParser.parse(md, "proc-" + cluster.key, source = com.suarez.coder.skills.Skill.Source.GLOBAL)
+            ?.takeIf { it.name.startsWith("proc-") } ?: return null.also { store.addLog(EvoTier.MEMORY, "Prosedür yeteneği yazılamadı.", cost) }
+        if (com.suarez.coder.skills.SkillSafety.scan(skill).isNotEmpty()) { store.addLog(EvoTier.MEMORY, "Prosedür yeteneği güvenlik taramasından geçmedi: /${skill.name}", cost); return null }
+        skills.saveGlobal(skill)
+        skills.setEnabled(skill.name, false) // only an exam win turns it on
+        store.addLog(EvoTier.MEMORY, "Prosedür yeteneği önerildi: /${skill.name} (${cluster.traces.size} başarılı görevden)", cost)
+        return if (store.queue(Experiment.skill(skill.name, "prosedür madenciliği"))) "Prosedür yeteneği /${skill.name} sınava alındı." else null
+    }
+
     private fun queueDefaultExperiment() {
         if (store.experiments().any { it.state == Experiment.State.QUEUED }) return
         val pool = settings.modelPool
@@ -182,8 +226,10 @@ class WeeklyCycle(
             Experiment.Kind.MODEL -> base.copy(roles = ModelRef.parse(exp.payload.optString("model"))?.let { mapOf(exp.payload.optString("role") to it) }.orEmpty(), tag = "model")
             Experiment.Kind.RULE -> base.copy(rules = rules + exp.payload.optString("text"), tag = "kural")
             Experiment.Kind.SKILL -> base.copy(skills = setOf(exp.payload.optString("name")), tag = "yetenek")
+            Experiment.Kind.PROMPT -> base.copy(prompts = mapOf(exp.payload.optString("section") to exp.payload.optString("text")), tag = "istem")
         }
-        val hash = configHash(settings, rules, enabledSkills())
+        // Adopted prompt sections are part of the configuration a cached baseline belongs to.
+        val hash = configHash(settings, rules + store.promptOverrides().entries.map { "${it.key}=${it.value.hashCode()}" }, enabledSkills())
         var b = ExamScore.EMPTY; var c = ExamScore.EMPTY
         try {
             for (case in cases) {
@@ -242,6 +288,13 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
                 skills.setEnabled(name, true)
                 store.addLog(EvoTier.MEMORY, "Sınavı kazandı, açıldı: /$name", undo = JSONObject().put("kind", "SKILL").put("name", name).toString())
             }
+            Experiment.Kind.PROMPT -> {
+                val section = e.payload.optString("section")
+                val old = store.promptOverrides()[section]
+                store.setPromptOverride(section, e.payload.optString("text"))
+                store.addLog(EvoTier.POLICY, "Sınavı kazandı, uygulandı: ${e.title}",
+                    undo = JSONObject().put("kind", "PROMPT").put("section", section).put("old", old ?: JSONObject.NULL).toString())
+            }
         }
     }
 
@@ -252,6 +305,7 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
             "MODEL" -> if (o.optString("role") == "architect") settings.architectModel = o.optString("old") else settings.editorModel = o.optString("old")
             "RULE" -> store.setPolicyRules(store.policyRules() - o.optString("text"))
             "SKILL" -> skills.setEnabled(o.optString("name"), false)
+            "PROMPT" -> store.setPromptOverride(o.optString("section"), if (o.isNull("old")) null else o.optString("old"))
             else -> return false
         }
         return true

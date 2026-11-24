@@ -23,7 +23,9 @@ class ExamRunner(
     private val onStatus: (String) -> Unit = {},
 ) {
     /** The configuration under test; empty fields mean "as the user has it now". */
-    data class Variant(val roles: Map<String, ModelRef> = emptyMap(), val rules: List<String>, val skills: Set<String> = emptySet(), val tag: String)
+    data class Variant(val roles: Map<String, ModelRef> = emptyMap(), val rules: List<String>, val skills: Set<String> = emptySet(), val tag: String,
+                       /** Prompt sections to try on top of the adopted ones (PROMPT experiments). */
+                       val prompts: Map<String, String> = emptyMap())
 
     companion object {
         const val BRANCH_PREFIX = "coder-exam/"
@@ -71,6 +73,8 @@ class ExamRunner(
                 budgetDeferred = true
                 roleOverrides = v.roles
                 policyText = { v.rules.joinToString("\n") { "- $it" } }
+                val adopted = runCatching { EvolutionEngine.storeFor(this@ExamRunner.context).promptOverrides() }.getOrDefault(emptyMap())
+                promptOverrides = { adopted + v.prompts }
                 onUsage = { spent += it }
                 beforeCall = { if (spent >= budgetLeft()) throw StopException("Haftalık sınav bütçesi doldu.") }
                 tools.repoOverride = case.repo

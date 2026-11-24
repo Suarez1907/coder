@@ -210,12 +210,16 @@ class ManagerSettingsTest {
         s.learnedRouting = true
         s.modelPool = listOf("gemini/a")
         val manager = SelfManager(s, EvolutionStore(tmp.newFolder()))
-        assertTrue(manager.pick("SIMPLE_EDIT").isEmpty()) // fewer than two usable models: the user's fixed choice
+        assertTrue(manager.pick("SIMPLE_EDIT") == null) // fewer than two usable models: the user's fixed choice
         s.modelPool = listOf("gemini/a", "deepseek/b") // deepseek has no key
-        assertTrue(manager.pick("SIMPLE_EDIT").isEmpty())
+        assertTrue(manager.pick("SIMPLE_EDIT") == null)
         s.modelPool = listOf("gemini/a", "gemini/b")
-        assertEquals(setOf("editor"), manager.pick("SIMPLE_EDIT").keys)
-        assertEquals(setOf("architect", "editor"), manager.pick("COMPLEX_ARCHITECT").keys)
+        assertEquals(setOf("editor"), manager.pick("SIMPLE_EDIT")!!.models.keys)
+        assertEquals(setOf("architect", "editor"), manager.pick("COMPLEX_ARCHITECT")!!.models.keys)
+        // With a task context the contextual chooser answers and records its propensities.
+        val ctx = com.suarez.coder.evolution.RouteContext.features(1.0, 2, doubleArrayOf(1.0, 0.0, 0.0, 0.0))
+        val p = manager.pick("COMPLEX_ARCHITECT", ctx)!!
+        assertTrue(p.prop!!.contains("architect=") && p.prop!!.contains("editor="))
 
         // Adopted experiments can be undone from the log.
         val store = EvolutionStore(tmp.newFolder())
