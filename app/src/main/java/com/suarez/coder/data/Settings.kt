@@ -365,6 +365,48 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** A failing or overloaded model hands the call to the next model in the escalation order. */
+    var failover: Boolean
+        get() = bool("failover", true)
+        set(v) = putBool("failover", v)
+
+    /** Background work (self-improvement, queue) uses Gemini Flex (half price, may be slower). */
+    var backgroundFlex: Boolean
+        get() = bool("background_flex", true)
+        set(v) = putBool("background_flex", v)
+
+    /** Executor starts with low thinking and learned output caps; raised when it struggles. */
+    var adaptiveBudget: Boolean
+        get() = bool("adaptive_budget", true)
+        set(v) = putBool("adaptive_budget", v)
+
+    /** Queue runs only between these local hours (start..end, may wrap midnight); -1 = any time. */
+    var queueWindowStart: Int
+        get() = prefs.getInt("queue_win_start", -1).coerceIn(-1, 23)
+        set(v) = prefs.edit().putInt("queue_win_start", v.coerceIn(-1, 23)).apply()
+    var queueWindowEnd: Int
+        get() = prefs.getInt("queue_win_end", -1).coerceIn(-1, 23)
+        set(v) = prefs.edit().putInt("queue_win_end", v.coerceIn(-1, 23)).apply()
+
+    /** Warm the quick-check caches on the default branch once a day per repo. */
+    var quickCheckWarm: Boolean
+        get() = bool("quick_check_warm", true)
+        set(v) = putBool("quick_check_warm", v)
+    var quickCheckWarmedAt: String
+        get() = str("quick_check_warmed")
+        set(v) = put("quick_check_warmed", v)
+
+    /** Prices of the watched models at the last check (PriceWatch JSON) and alerts the user dismissed. */
+    var priceSnapshot: String
+        get() = str("price_snapshot")
+        set(v) = put("price_snapshot", v)
+    var activePriceAlerts: Set<String>
+        get() = str("price_alerts_active").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("price_alerts_active", v.joinToString("\n"))
+    var dismissedPriceAlerts: Set<String>
+        get() = str("price_alerts_dismissed").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("price_alerts_dismissed", v.joinToString("\n"))
+
     /** The user's ordered list of stronger models ("provider/model" per line): repairs climb it one by one. */
     var escalationChain: String
         get() = str("escalation_chain")

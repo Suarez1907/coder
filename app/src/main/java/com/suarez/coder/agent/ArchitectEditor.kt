@@ -300,7 +300,12 @@ class ArchitectEditor(private val agent: Agent) {
             }
             val reply = agent.callModel(history, convo, step.ref, step.role, agent.editorSystem, emptyList(), ui,
                 useCache = false, maxOut = agent.settings.maxOutEditor,
-                thinking = if (step.role == "architect") agent.architectThinking() else agent.settings.thinkingEditor)
+                thinking = when {
+                    step.role == "architect" -> agent.architectThinking()
+                    // Adaptive budget: the first try is cheap; repairs think at the configured level.
+                    agent.settings.adaptiveBudget && attempt == 0 && agent.settings.thinkingEditor in setOf("medium", "high", "xhigh") -> "low"
+                    else -> agent.settings.thinkingEditor
+                })
             convo += reply
             outputs.append(reply.text).append("\n\n")
 

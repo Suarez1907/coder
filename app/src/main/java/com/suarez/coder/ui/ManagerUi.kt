@@ -100,6 +100,31 @@ fun ManagerSection(vm: ChatViewModel) {
         }
     }
 
+    Card {
+        Heading("Model karnesi (son 60 gün, kendi görevlerin)")
+        if (vm.modelRows.isEmpty()) Text("Henüz yeterli görev yok.", style = MaterialTheme.typography.bodySmall, color = dim)
+        vm.modelRows.take(10).forEach { r ->
+            Text(r.model, style = MaterialTheme.typography.bodyMedium, color = ink)
+            Text("${r.tasks} görev · başarı ${com.suarez.coder.cost.ModelReport.pct(r.successRate)} · görev başı ${com.suarez.coder.cost.Pricing.formatUsd(r.avgCost)}" +
+                (r.ciFirstTry?.let { " · CI ilk sefer ${com.suarez.coder.cost.ModelReport.pct(it)}" } ?: "") +
+                (if (r.tasks < com.suarez.coder.cost.ModelReport.MIN_TASKS) " · az veri" else ""),
+                style = MaterialTheme.typography.bodySmall, color = dim)
+        }
+        if (vm.modelRows.isNotEmpty()) Text("Birden çok model kullanılan görevler her birine sayılır; sonuçlar yaklaşık.", style = MaterialTheme.typography.bodySmall, color = dim)
+        if (vm.suggestedChain.isNotEmpty()) {
+            Text("Verine göre önerilen yükseltme sıralaması: " + vm.suggestedChain.joinToString(" → "), style = MaterialTheme.typography.bodySmall, color = ink)
+            OutlinedButton(onClick = { vm.applySuggestedChain() }, border = BorderStroke(1.dp, rule)) { Text("Sıralamaya uygula", color = ink) }
+        }
+    }
+
+    if (vm.cacheRows.isNotEmpty()) Card {
+        Heading("Önbellek isabeti (son 30 gün)")
+        vm.cacheRows.take(8).forEach { c ->
+            Text("${c.role} · ${c.model}: ${com.suarez.coder.cost.ModelReport.pct(c.hitRate)} (${c.calls} çağrı)", style = MaterialTheme.typography.bodySmall, color = ink)
+            com.suarez.coder.cost.ModelReport.cacheHint(c)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = dim) }
+        }
+    }
+
     vm.weekly?.let { r ->
         Card {
             Heading("Haftalık rapor (son 7 gün)")

@@ -227,6 +227,14 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 Text(it, style = Mono.tiny, color = coder.muted, maxLines = 2,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
             }
+            vm.priceAlerts.firstOrNull()?.let { a ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
+                    .border(1.dp, coder.border, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(a, style = Mono.tiny, modifier = Modifier.weight(1f), maxLines = 3)
+                    TextButton(onClick = { vm.dismissPriceAlert(a) }) { Text("Tamam", style = Mono.tiny) }
+                }
+            }
             TodoCard(vm)
             ControlBar(vm) { showSheet = true }
             val context = LocalContext.current

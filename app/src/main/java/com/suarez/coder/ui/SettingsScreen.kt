@@ -357,6 +357,13 @@ private fun ArchitectPage(vm: ChatViewModel) {
 
     Group {
         Title("Doğrulama ve onarım", "Ajanın kodu kendisi çalıştıramamasını telafi eden kontroller.")
+        SwitchSetting("Yedek modele geçiş", "Model çökerse sıradakiyle devam", s.failover,
+            "Model 429/5xx, aşırı yük veya zaman aşımı verirse aynı istek yükseltme sıralamandaki sıradaki modelle tekrarlanır (en fazla 2 kez).") { s.failover = it }
+        SwitchSetting("Uyarlanan bütçe", "Düşük düşünmeyle başla, gerekince yüksel", s.adaptiveBudget,
+            "Uygulayıcı ilk denemeyi düşük düşünmeyle yapar; hata, kırmızı CI veya onarım gerekince ayarladığın seviyeye çıkar. Çıktı sınırı da " +
+                "gerçek yanıt boylarından öğrenilir (kesilen yanıt büyük sınırla bir kez tekrarlanır). Düşünme tokenları gizli maliyetin büyük kısmıdır.") { s.adaptiveBudget = it }
+        SwitchSetting("Arka plan işleri Flex'te", "Öz-gelişim ve kuyruk Gemini'de yarı fiyat", s.backgroundFlex,
+            "Acelesi olmayan işler (öz-gelişim, sınavlar, iş kuyruğu) Gemini modellerinde Flex katmanını kullanır; daha yavaş olabilir, kapasite yoksa standart fiyata geçer.") { s.backgroundFlex = it }
         SwitchSetting("Yeşile kadar", "Kırmızı CI'da durmadan düzeltir", s.untilGreen,
             "CI başarısızsa ajan düzeltmeye devam eder. Aynı hata ikinci kez gelirse yükseltme sıralamandaki bir sonraki modele geçer; " +
                 "sıranın sonunda sana sorar.") { s.untilGreen = it }
@@ -369,6 +376,9 @@ private fun ArchitectPage(vm: ChatViewModel) {
             "Değişiklik [skip ci] ile geçici bir dala yazılır, GitHub Actions'ta yalnızca derleme/tür kontrolü çalışır (1-5 dk), dal silinir. " +
                 "Değişen dosyalarda hata varsa commit yapılmaz. İlk kullanımda repoya coder-quick.yml eklemek için izin ister. " +
                 "Kendi kontrolün için .coder/quick-check.sh yazabilirsin.") { s.quickCheck = it }
+        SwitchSetting("Ön kontrolü ısıt", "Günde bir kez önbellekleri doldurur", s.quickCheckWarm,
+            "Görev başlarken (repo başına günde en fazla bir kez) ön kontrol varsayılan dalda arka planda çalıştırılır; varsayılan daldaki " +
+                "önbellek tüm dallarca kullanılır, böylece ilk kontrol 1-2 dakikaya iner.") { s.quickCheckWarm = it }
         SwitchSetting("Android ekran görüntüleri", "Tam modda emülatörle sınar", s.androidShots,
             "Değerlendirici açıkken Android projelerinde uygulama GitHub Actions emülatöründe açılır, ekran görüntüsü sohbete gelir, çökme " +
                 "olursa düzeltme turu açılır. .coder/screens.txt'deki her satır (adb shell komutu) için ek ekran. Bir çalıştırma 10-20 dk.") { s.androidShots = it }
@@ -382,6 +392,10 @@ private fun ArchitectPage(vm: ChatViewModel) {
         SwitchSetting("Yalnızca Wi-Fi'da", "Mobil veriyi korur", s.queueRequiresWifi) { s.queueRequiresWifi = it }
         TextSetting("Görev başı bütçe (USD)", String.format(java.util.Locale.US, "%.2f", s.queueTaskBudget), keyboard = KeyboardType.Decimal,
             info = "Bir kuyruk görevi bu tutara ulaşınca durur.") { v -> v.replace(',', '.').toDoubleOrNull()?.let { s.queueTaskBudget = it } }
+        NumberSetting("Çalışma saati başlangıcı (-1 veya bitişe eşit = her zaman)", s.queueWindowStart,
+            info = "Kuyruk yalnızca bu saatten bitiş saatine kadar çalışır (yerel saat, gece yarısını aşabilir). Sağlayıcının ucuz saatlerine göre ayarla; " +
+                "örneğin DeepSeek'in indirimli saatlerini resmi fiyat sayfasından kontrol et.") { s.queueWindowStart = it }
+        NumberSetting("Çalışma saati bitişi (-1 = her zaman)", s.queueWindowEnd) { s.queueWindowEnd = it }
         SwitchSetting("Issue takibi", "\"coder\" etiketli issue'lar kuyruğa girer", s.issueWatch,
             "Repolarında coder etiketli açık issue'lar 6 saatte bir kontrol edilir ve kuyruğa eklenir; PR açıklamasına Closes #n yazılır.") {
             s.issueWatch = it; vm.queueSettingsChanged()

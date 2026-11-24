@@ -38,6 +38,10 @@ class QueueWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
         val ctx = applicationContext
         val settings = Settings(ctx)
         if (!settings.queueEnabled) return Result.success()
+        // Cheap hours only (e.g. a provider's off-peak discount): wait for the window.
+        val now = java.time.LocalTime.now()
+        val wait = QueueWindow.minutesUntil(settings.queueWindowStart, settings.queueWindowEnd, now.hour, now.minute)
+        if (wait > 0) { scheduleIn(ctx, wait.toLong()); return Result.success() }
         val store = store(ctx)
         store.recoverStale()
         runCatching { setForeground(WeeklyWorker.foreground(ctx, "Coder iş kuyruğu")) }
@@ -123,6 +127,12 @@ class QueueWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             schedulePeriodic(ctx)
         }
 
+        private fun scheduleIn(ctx: Context, minutes: Long) {
+            val s = Settings(ctx)
+            val req = OneTimeWorkRequestBuilder<QueueWorker>().setConstraints(constraints(s, false)).setInitialDelay(minutes, TimeUnit.MINUTES).build()
+            runCatching { WorkManager.getInstance(ctx).enqueueUniqueWork(NAME, ExistingWorkPolicy.REPLACE, req) }
+        }
+
         /** Issue watch: look for new "coder" issues every 6 hours. */
         fun schedulePeriodic(ctx: Context) {
             val s = Settings(ctx)
@@ -131,6 +141,19 @@ class QueueWorker(context: Context, params: WorkerParameters) : CoroutineWorker(
             val req = PeriodicWorkRequestBuilder<QueueWorker>(6, TimeUnit.HOURS).setConstraints(constraints(s, false)).build()
             wm.enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, req)
         }
+    }
+}
+
+/** The hours the queue may run in. */
+object QueueWindow {
+    /** Minutes until the window opens; 0 when inside it or when no window is set. [end] is exclusive and may wrap midnight. */
+    fun minutesUntil(start: Int, end: Int, hour: Int, minute: Int): Int {
+        if (start !in 0..23 || end !in 0..23 || start == end) return 0
+        val inside = if (start < end) hour in start until end else hour >= start || hour < end
+        if (inside) return 0
+        val nowMin = hour * 60 + minute
+        val startMin = start * 60
+        return ((startMin - nowMin) + 24 * 60) % (24 * 60)
     }
 }
 

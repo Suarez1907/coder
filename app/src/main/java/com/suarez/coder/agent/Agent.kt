@@ -35,6 +35,8 @@ import com.suarez.coder.llm.ToolSpec
 import com.suarez.coder.llm.Usage
 import com.suarez.coder.tools.ToolRegistry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -216,6 +218,25 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     /** Queue runs: nobody is watching, so nothing is installed or asked; confirmations are answered by the run's own rules. */
     var unattended = false
 
+    /**
+     * Fills the quick-check caches (Gradle, npm) on the default branch once a day: caches made on the default branch are
+     * readable from every branch, so the throwaway check branches start warm. Fire and forget.
+     */
+    private fun prewarmQuickCheck(repo: String) {
+        if (repo.isBlank()) return
+        val runner = tools.cloud ?: return
+        val warmed = runCatching { JSONObject(settings.quickCheckWarmedAt) }.getOrDefault(JSONObject())
+        if (System.currentTimeMillis() - warmed.optLong(repo.lowercase()) < 20 * 3_600_000L) return
+        warmed.put(repo.lowercase(), System.currentTimeMillis())
+        settings.quickCheckWarmedAt = warmed.toString()
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()).launch {
+            runCatching {
+                val t = com.suarez.coder.cloudtools.CloudWorkflowTemplates.QUICK
+                if (runner.installedOnDefault(repo, t)) tools.github.dispatchWorkflow(repo, t.file, tools.github.defaultBranch(repo), JSONObject())
+            }
+        }
+    }
+
     private suspend fun quickCheck(repo: String, branch: String, changes: List<Triple<String, String?, String?>>) {
         if (!settings.quickCheck || isEvolutionSession) return
         val runner = tools.cloud ?: return
@@ -248,6 +269,13 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         val sha = try { tools.github.branchSha(repo, branch) } catch (e: CancellationException) { throw e } catch (e: Exception) { runCheckpoints.remove("$repo@$branch"); return }
         liveHistory?.add(ChatMessage.Notice("Kontrol noktası: $branch" + (sha?.let { " @ ${it.take(7)}" } ?: " (yeni dal)"),
             Checkpoints.marker(Checkpoints.Point(repo, branch, sha))))
+    }
+
+    /** Parallel reads: no per-call status flicker (one status line covers them). */
+    private class NoStatusUi(private val ui: AgentUi) : AgentUi {
+        override fun update() {}
+        override fun status(text: String?) {}
+        override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) = ui.confirm(title, body, okText, cancelText)
     }
 
     private object NoUi : AgentUi {
@@ -364,6 +392,19 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         const val CLARIFY_MARK = "❓"
         /** Prefix of messages the "until green" controller adds in the user's place. */
         const val AUTO_NUDGE = "[Otomatik denetleyici] "
+        const val MAX_FAILOVERS = 2
+        /** Read-only tools that may run at the same time. */
+        val PARALLEL_SAFE = setOf("github_read_file", "github_read_files", "github_get_tree", "github_search_code", "github_list_repos",
+            "web_search", "web_fetch", "lookup_docs", "find_references", "ci_errors", "load_skill")
+        /** Roles whose output cap is learned (adaptive budget). */
+        val ADAPTIVE_ROLES = setOf("agent", "editor", "escalation", "architect")
+
+        /** Overload, rate limit, server error, timeout or a dead stream: worth trying another model. */
+        fun isTransient(e: Exception): Boolean {
+            val m = e.message.orEmpty().lowercase()
+            return Regex("\\((429|500|502|503|504|520|522|524|529)\\)").containsMatchIn(m) ||
+                listOf("overload", "rate limit", "unavailable", "bağlantı hatası", "takıldı", "20 dakikayı aştı", "boş yanıt", "timeout").any { m.contains(it) }
+        }
         /** Decision 1 difficulty (0 trivial … 3 very hard) below which the medium architect is used. */
         const val MEDIUM_COMPLEXITY = 1.5
         const val SNAPSHOT_MAX_COMMITS = 6
@@ -826,12 +867,56 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         stable: String? = null,
         jsonMode: Boolean = false,
     ): ChatMessage.Assistant {
+        var cur = ref
+        val tried = HashSet<String>()
+        while (true) {
+            tried += cur.key
+            try {
+                return callModelOn(history, messages, cur, role, system, toolSpecs, ui, useCache, maxOut, thinking, stable, jsonMode)
+            } catch (e: com.suarez.coder.llm.LlmException) {
+                // Provider failover: an overloaded or failing model hands the same call to the next model in the user's chain.
+                val next = if (settings.failover && isTransient(e) && !isEvolutionSession && modelOverride == null && role !in setOf("router", "decision"))
+                    (escalationChain() + listOfNotNull(escalationRef())).firstOrNull { it.key !in tried && settings.keyFor(it.provider).isNotBlank() }
+                else null
+                if (next == null || tried.size > MAX_FAILOVERS) throw e
+                history += ChatMessage.Notice("${cur.model} yanıt vermedi; aynı istek ${next.model} ile tekrarlanıyor", e.message?.take(300))
+                ui.update()
+                cur = next
+            }
+        }
+    }
+
+    /** The output cap for a role: learned from real answers (adaptive budget) or the configured value. */
+    fun learnedMaxOut(role: String, configured: Int?): Int? {
+        if (configured == null || !settings.adaptiveBudget || role !in ADAPTIVE_ROLES) return configured
+        return outputStats?.cap(role, configured) ?: configured
+    }
+
+    private val outputStats: com.suarez.coder.cost.OutputStats? = filesDir?.let { com.suarez.coder.cost.OutputStats(java.io.File(it, "outstats.json")) }
+
+    private suspend fun callModelOn(
+        history: MutableList<ChatMessage>,
+        messages: List<ChatMessage>,
+        ref: ModelRef,
+        role: String,
+        system: String,
+        toolSpecs: List<ToolSpec>,
+        ui: AgentUi,
+        useCache: Boolean,
+        maxOutConfigured: Int?,
+        thinking: String?,
+        stable: String?,
+        jsonMode: Boolean,
+    ): ChatMessage.Assistant {
+        val maxOut = learnedMaxOut(role, maxOutConfigured)
         beforeCall?.invoke()
         checkBudget(history, ui)
         val client = client(ref)
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
         val full = prefix + messages
-        val flex = settings.economyMode && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
+        // Background work (self-improvement, queue) may wait: it uses Flex (half price) when enabled.
+        val background = settings.backgroundFlex && (isEvolutionSession || unattended)
+        val flex = (settings.economyMode || background) && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
         var opts = CallOptions(
             thinkingLevel = thinking?.takeIf { it != "minimal" },
             maxOutputTokens = maxOut,
@@ -863,7 +948,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 cache.invalidate()
                 client.complete(system, full, toolSpecs, o.copy(cachedContent = null))
             } catch (e: GeminiClient.FlexUnavailableException) {
-                val ok = ui.confirm(
+                val ok = (isEvolutionSession || unattended) || ui.confirm(
                     "Flex kullanılamıyor",
                     "${e.message}\nFlex (%50 indirimli) kendiliğinden standart fiyata geçmez. Bu çalıştırma standart fiyatla devam etsin mi?",
                     "Standart fiyatla devam", "Durdur",
@@ -878,6 +963,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             val servedFlex = resp.serviceTier?.contains("flex") ?: (o.serviceTier == "flex" && !flexDisabledForRun)
             history += ChatMessage.UsageRecord(ref.model, role, resp.usage,
                 label = if (servedFlex) "flex" else "", discount = if (servedFlex) 0.5 else 1.0, actualUsd = resp.costUsd)
+            if (!resp.truncated && role in ADAPTIVE_ROLES) runCatching { outputStats?.add(role, resp.usage.output + resp.usage.thoughts) }
             onUsage?.invoke(costOf(history.last() as ChatMessage.UsageRecord))
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
         }
@@ -923,7 +1009,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         record(resp, opts)
         if (resp.truncated && maxOut != null && maxOut >= 64) {
             // A cut-off answer is useless (and a cut-off diff is dangerous): retry once with a larger cap.
-            val bigger = minOf(maxOut * 2, Settings.MAX_OUTPUT)
+            val bigger = minOf(maxOf(maxOut * 2, maxOutConfigured ?: 0), Settings.MAX_OUTPUT)
             history += ChatMessage.Notice("✂️ ${roleLabel(role)} yanıtı çıktı sınırına ($maxOut token) takıldı; $bigger ile bir kez yeniden deneniyor.")
             ui.update()
             val o2 = opts.copy(maxOutputTokens = bigger)
@@ -950,6 +1036,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         val start = history.size
         liveHistory = history
         liveUi = ui
+        if (settings.quickCheck && settings.quickCheckWarm && !unattended && !isEvolutionSession) prewarmQuickCheck(tools.activeRepo())
         runCheckpoints.clear()
         reviewedOnce.clear()
         try {
@@ -1323,6 +1410,12 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         var reads = 0
         var cur = ref
         val ci = CiState()
+        // Adaptive budget: the executor starts with low thinking and goes back to the configured level once it struggles.
+        val adaptiveThink = settings.adaptiveBudget && role == "agent" && !readOnly && thinking in setOf("medium", "high", "xhigh")
+        var think = if (adaptiveThink) "low" else thinking
+        fun raiseThinking(why: String) {
+            if (think != thinking) { think = thinking; history += ChatMessage.Notice("Düşünme seviyesi $thinking'e yükseltildi ($why)") }
+        }
         for (step in 1..settings.maxSteps) {
             // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
             HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->
@@ -1334,7 +1427,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, cur, role, system, toolSpecs, ui, maxOut = maxOut, thinking = thinking, stable = stable)
+            val reply = callModel(history, prepared.messages, cur, role, system, toolSpecs, ui, maxOut = maxOut, thinking = think, stable = stable)
             history += reply
             ui.update()
             if (reply.toolCalls.isEmpty()) {
@@ -1351,6 +1444,18 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
 
             var stopCall: ToolCall? = null
             val calls = reply.toolCalls
+            // Several read-only calls in one step run at the same time (results stay in order).
+            if (calls.size > 1 && calls.all { it.name in PARALLEL_SAFE } && maxReads == null) {
+                ui.status("${calls.size} okuma aynı anda çalışıyor")
+                val results = kotlinx.coroutines.coroutineScope {
+                    calls.map { c -> async { executeTool(c, readOnly, allowOps, NoStatusUi(ui), role) } }.map { it.await() }
+                }
+                ui.status(null)
+                results.forEach { (r, _) -> history += r }
+                consecutiveFailures = if (results.all { it.first.isError }) consecutiveFailures + 1 else 0
+                ui.update()
+                continue
+            }
             for ((i, call) in calls.withIndex()) {
                 if (call.name == stopTool) { stopCall = call; continue }
                 val readCount = if (call.name == "github_read_files") call.args.optJSONArray("paths")?.length() ?: 1 else 1
@@ -1365,6 +1470,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 if (call.name == "ci_wait" && !result.isError) {
                     val (r2, next) = afterCi(call, result, ci, cur, history, ui)
                     result = r2
+                    if (ci.lastFailed) raiseThinking("kırmızı CI")
                     if (next == null) {
                         history += result
                         calls.drop(i + 1).forEach { history += ChatMessage.ToolResult(it.id, it.name, "İptal edildi: kullanıcı durdurdu.", true) }
@@ -1380,6 +1486,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 history += result
                 ui.update()
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
+                if (consecutiveFailures >= 2) raiseThinking("üst üste hata")
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !isEvolutionSession) {
                     // Climb the user's model chain before asking.
                     Escalation.next(escalationChain(), cur)?.let { up ->
