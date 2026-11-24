@@ -124,7 +124,10 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         val v = PlanCritic.parse(reply.text) ?: return plan
         if (v.ok) { history += ChatMessage.Notice("Plan eleştirmeni: eksik bulmadı"); ui.update(); return plan }
         val known = plan.files.map { it.path }.toSet()
-        val tree = runCatching { tools.filteredTree(plan.repo, plan.branch.takeIf { it.isNotBlank() }) }.getOrDefault(emptyList()).map { it.path }.toSet()
+        // The plan's branch is often new: fall back to its base, then the default branch.
+        val tree = listOf(plan.branch.takeIf { it.isNotBlank() }, plan.base, null).distinct().firstNotNullOfOrNull { ref ->
+            runCatching { tools.filteredTree(plan.repo, ref) }.getOrNull()?.takeIf { it.isNotEmpty() }
+        }.orEmpty().map { it.path }.toSet()
         val add = v.addFiles.filter { it.path !in known && (it.action == "create" || it.path in tree) }
         history += ChatMessage.Notice("Plan eleştirmeni ${v.issues.size} not" + (if (add.isNotEmpty()) ", ${add.size} dosya ekledi" else ""),
             (v.issues.map { "- $it" } + add.map { "+ ${it.path}: ${it.instructions}" }).joinToString("\n"))
@@ -206,6 +209,31 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         history += ChatMessage.Notice("Öz-denetim commit'i durdurdu (${v.problems.size} sorun)", v.problems.joinToString("\n"))
         throw com.suarez.coder.tools.ToolException("Öz-denetim (commit YAPILMADI) şu sorunları buldu:\n- " + v.problems.joinToString("\n- ") +
             "\nDosyayı gerekirse yeniden oku, düzelt ve tekrar gönder. Bu bir yanlış alarmsa aynı değişikliği bir kez daha gönder; ikinci kez denetlenmez.")
+    }
+
+    /** Repos the user approved writing to in this session (besides the configured ones). */
+    private val confirmedRepos = HashSet<String>()
+
+    /** Repos the user works with: writes elsewhere (e.g. pushed by injected text) need a confirmation. */
+    private fun knownRepos(): Set<String> = (listOf(settings.defaultRepo, settings.contextRepo) + settings.profiles().map { it.repo } +
+        listOfNotNull(tools.repoOverride, context.repoOverride)).map { tools.normalizeRepo(it).lowercase() }.filter { it.isNotBlank() }.toSet() + confirmedRepos
+
+    /** (title, body) of the security question this call needs, or null. */
+    fun securityQuestion(call: ToolCall, method: String?): Pair<String, String>? {
+        if (call.name == "github_api") {
+            val path = call.args.optString("path")
+            com.suarez.coder.security.Guard.dangerousApi(method, path)?.let { what ->
+                return "Tehlikeli GitHub işlemi" to "Bu çağrı $what:\n${method ?: "GET"} $path\n\nOtomatik onay açık olsa da sorulur. Bunu sen mi istedin?"
+            }
+        }
+        if (call.name in ToolRegistry.WRITE_TOOLS && call.name != "ci_wait") {
+            val repo = call.args.optString("repo").takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it).lowercase() } ?: return null
+            val known = knownRepos()
+            if (known.isNotEmpty() && repo !in known) {
+                return "Başka bir repoya yazma" to "${call.name} → $repo\nBu repo ayarlarındaki projelerden biri değil. Yazılsın mı?"
+            }
+        }
+        return null
     }
 
     /** Queue runs end with a pull request: merging and raw write calls are left to the user. */
@@ -692,6 +720,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             if (repo != null) appendLine("Default repository: $repo.")
             (context.refOverride ?: settings.defaultBranch).takeIf { it.isNotBlank() }?.let { appendLine("Default branch: $it.") }
             if (settings.customInstructions.isNotBlank()) appendLine("User instructions: ${settings.customInstructions}")
+            appendLine(com.suarez.coder.security.Guard.INJECTION_RULE)
             // Rules the self-improvement manager adopted after they won an exam (rarely changes: stays cacheable).
             policyText?.invoke()?.takeIf { it.isNotBlank() }?.let { appendLine("Learned working rules:\n$it") }
             // Progressive disclosure: only one line per skill here; the body comes from load_skill.
@@ -1523,6 +1552,14 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         return try {
             val method = call.args.optString("method").ifBlank { null }
             if (unattended) unattendedDenied(call.name, method)?.let { return ChatMessage.ToolResult(call.id, call.name, it, true) to false }
+            // Hard rules (prompt injection, auto-approve): dangerous API calls and writes to unknown repos always ask.
+            securityQuestion(call, method)?.let { (title, body) ->
+                if (unattended || isEvolutionSession) return ChatMessage.ToolResult(call.id, call.name, "Güvenlik: $title gözetimsiz çalışmada yapılamaz.", true) to false
+                if (!ui.confirm(title, body, "Yine de yap", "İptal")) {
+                    return ChatMessage.ToolResult(call.id, call.name, "Kullanıcı güvenlik onayı vermedi: $title. Bunu neden yapmak istediğini kullanıcıya açıkla.", true) to true
+                }
+                call.args.optString("repo").takeIf { it.isNotBlank() }?.let { confirmedRepos += tools.normalizeRepo(it).lowercase() }
+            }
             val denied = (if (role in ToolRegistry.ARCHITECT_ROLES) ToolRegistry.architectDenied(call.name, method) else null)
                 ?: ToolRegistry.accessError(call.name, method, readOnly, allowOps)
             if (denied == null && tools.needsApproval(call) && !settings.autoApprove &&

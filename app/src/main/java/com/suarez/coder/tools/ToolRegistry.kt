@@ -224,6 +224,8 @@ class ToolRegistry(private val settings: Settings) {
         /** Planning roles: read-only, whatever a caller passes (enforced in [execute], not only in the prompt). */
         val ARCHITECT_ROLES = setOf("architect", "planner")
         const val REF_SCAN_FILES = 150
+        /** CI polling interval; tests shorten it. */
+        @Volatile var CI_POLL_MS = 15_000L
 
         /** Tools that change files, run things or change the repository. */
         val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
@@ -498,7 +500,7 @@ class ToolRegistry(private val settings: Settings) {
                         return summary
                     }
                 } else if (runs.all { it.status == "completed" }) break
-                delay(15_000)
+                delay(CI_POLL_MS)
             }
             if (runs.isEmpty() || runs.any { it.status != "completed" }) {
                 summary = "Zaman aşımı ($timeoutMinutes dk): " + runs.joinToString { "${it.name}: ${it.status}" }

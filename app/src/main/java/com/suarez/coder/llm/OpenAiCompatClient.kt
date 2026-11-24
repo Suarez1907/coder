@@ -30,7 +30,8 @@ class OpenAiCompatClient(
     companion object {
         /** Temporary upstream/proxy failures: retried, never treated as a model mistake. */
         val TRANSIENT_CODES = setOf(408, 429, 500, 502, 503, 504, 520, 522, 524, 529)
-        val BACKOFF_MS = listOf(2_000L, 5_000L, 10_000L)
+        /** Retry waits; tests shorten them. */
+        @Volatile var BACKOFF_MS = listOf(2_000L, 5_000L, 10_000L)
         private const val MAX_RETRY_AFTER_MS = 30_000L
 
         fun isTransient(code: Int) = code in TRANSIENT_CODES

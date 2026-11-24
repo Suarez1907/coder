@@ -49,9 +49,21 @@ class Web {
         return URLDecoder.decode(enc, "UTF-8")
     }
 
+    private val noRedirects = Http.client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+
     suspend fun fetch(url: String, start: Int = 0, maxChars: Int = 20_000, query: String? = null): String {
-        val u = if (url.startsWith("http")) url else "https://$url"
-        val r = Http.execute(Request.Builder().url(u).header("User-Agent", ua).get().build())
+        var u = if (url.startsWith("http")) url else "https://$url"
+        // No requests into the phone's own network, not even through a redirect (SSRF).
+        var r: Http.Result
+        var hops = 0
+        while (true) {
+            val target = u
+            if (kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.suarez.coder.security.Guard.isPrivateUrl(target) }) throw ToolException("Yerel ağ adreslerine erişim engellendi: $u")
+            r = Http.execute(Request.Builder().url(u).header("User-Agent", ua).get().build(), noRedirects)
+            val next = r.location?.takeIf { r.code in 300..399 } ?: break
+            if (++hops > 5) throw ToolException("Çok fazla yönlendirme: $url")
+            u = java.net.URI(u).resolve(next).toString()
+        }
         val type = r.contentType ?: ""
         val text = if (type.contains("html") || r.body.trimStart().startsWith("<!") || r.body.trimStart().startsWith("<html", true)) {
             val doc = Jsoup.parse(r.body, u)

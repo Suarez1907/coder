@@ -11,7 +11,7 @@ import java.net.URLEncoder
 class ToolException(message: String) : Exception(message)
 
 class GitHub(private val token: () -> String) {
-    private val api = "https://api.github.com"
+    private val api get() = API
 
     /**
      * Short-lived read cache shared by every GitHub instance (foreground and background agents): file contents, trees
@@ -210,6 +210,9 @@ class GitHub(private val token: () -> String) {
     }
 
     companion object {
+        /** API root; end-to-end tests point it at a fake GitHub. */
+        @Volatile var API = "https://api.github.com"
+
         /**
          * A contents request for a folder returns a JSON array of entries. Files may also start with '['
          * (TOML sections like `[versions]`, JSON arrays), so only a real array of {type, path} objects counts.

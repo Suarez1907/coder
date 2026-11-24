@@ -169,6 +169,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val latest = sessionStore.list().firstOrNull()
         currentSessionId = latest?.id ?: sessionStore.newId()
         if (latest != null) messages.addAll(sessionStore.load(latest.id))
+        messages.addAll(com.suarez.coder.security.Guard.closeDangling(messages))
         sessions = sessionStore.list()
         profiles = settings.profiles()
         activePlan = planStore.recover(currentSessionId)
@@ -1195,6 +1196,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             running = true
         } else {
             messages.addAll(sessionStore.load(id))
+            messages.addAll(com.suarez.coder.security.Guard.closeDangling(messages))
             running = false; status = null
         }
         refreshBackground()

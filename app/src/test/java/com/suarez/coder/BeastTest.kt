@@ -109,7 +109,7 @@ class BeastTest {
     }
 
     @Test fun issuesBecomeTasks() {
-        val issue = JSONObject("""{"number":7,"title":"Skor kayboluyor","body":"Uygulama kapanınca skor sıfırlanıyor"}""")
+        val issue = JSONObject("""{"number":7,"title":"Skor kayboluyor","body":"Uygulama kapanınca skor sıfırlanıyor","author_association":"OWNER"}""")
         val t = IssueWatcher.task("me/app", issue)!!
         assertEquals("issue:me/app#7", t.source)
         assertTrue(t.text.contains("Closes #7"))

@@ -162,6 +162,8 @@ class IssueWatcher(private val gh: com.suarez.coder.tools.GitHub, private val st
     companion object {
         fun task(repo: String, issue: JSONObject): QueuedTask? {
             if (issue.has("pull_request")) return null
+            // Only people with write access may hand work to an unattended run (labels alone can be set by triagers).
+            if (issue.optString("author_association") !in setOf("OWNER", "MEMBER", "COLLABORATOR")) return null
             val n = issue.optInt("number").takeIf { it > 0 } ?: return null
             val body = issue.optString("body").takeIf { it != "null" }.orEmpty().take(4_000)
             return QueuedTask("i${System.currentTimeMillis()}$n", repo,
