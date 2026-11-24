@@ -11,7 +11,8 @@ object MaestroFlows {
         "assertVisible, assertNotVisible, scrollUntilVisible, back, pressKey, waitForAnimationToEnd, takeScreenshot. Match " +
         "on-screen text exactly as the code shows it (string resources, Text(...) calls); use `.*part.*` regexes only when the text " +
         "is dynamic. On long screens use `scrollUntilVisible` with `element: \"<text>\"` and `timeout: 60000` (the default 20 s is too " +
-        "short for settings pages). End each flow with `- takeScreenshot: criterion_<n>`. Add a `# <criterion>` comment as the first line of the " +
+        "short for settings pages); it stops as soon as that element shows, so scroll to the LOWEST element you will assert or tap " +
+        "next. End each flow with `- takeScreenshot: criterion_<n>`. Add a `# <criterion>` comment as the first line of the " +
         "block. No other text."
 
     data class Flow(val name: String, val yaml: String)

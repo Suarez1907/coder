@@ -6,10 +6,10 @@ name: "Ayarlar sayfaları açılır"
     clearState: true
 - tapOn: "Mimar & Yönlendirme"
 - scrollUntilVisible:
-    element: "Tahmin ve aday düzenlemeler"
+    element: "Risk modeli"
     timeout: 60000
     speed: 70
-- assertVisible: "Risk modeli"
+- assertVisible: "Tahmin ve aday düzenlemeler"
 - back
 - assertVisible: "Ayarlar"
 - takeScreenshot: criterion_2
