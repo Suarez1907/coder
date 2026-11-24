@@ -124,7 +124,8 @@ class CodeIntelTest {
         assertTrue(Mutator.toJson(ms).contains("\"search\""))
         val (killed, survived, error) = Mutator.results("""{"results":[{"id":"m1","status":"killed"},{"id":"m2","status":"survived"}]}""", ms)
         assertEquals(1, killed); assertEquals(listOf("satır 5: `>=` → `<` (A.kt)"), survived); assertNull(error)
-        assertEquals("kırık", Mutator.results("""{"error":"kırık"}""", ms).third)
+        assertEquals("kırık", Mutator.results("""{"error":"kırık"}""", ms).error)
+        assertEquals(1, Mutator.results("""{"results":[{"id":"m1","status":"invalid"},{"id":"m2","status":"killed"}]}""", ms).invalid)
     }
 
     @Test fun maestroFlowsAndReports() {
@@ -166,7 +167,8 @@ class CodeIntelTest {
         val cm = CloudWorkflowTemplates.CODEMOD.yaml
         assertTrue(cm.contains("@ast-grep/cli@0.51.1") && cm.contains("--update-all") && cm.contains("__too_large__"))
         val mu = CloudWorkflowTemplates.MUTATE.yaml
-        assertTrue(mu.contains("results.json") && mu.contains("tr -cd"))
+        assertTrue(mu.contains("results.json") && mu.contains("tr -cd") && mu.contains("\"invalid\""))
+        assertTrue(CloudWorkflowTemplates.ANDROID_SHOTS.yaml.contains("---- Maestro ----"))
         assertTrue(CloudWorkflowTemplates.QUICK.yaml.contains("Etkilenen testler"))
         assertTrue(CloudWorkflowTemplates.ANDROID_SHOTS.yaml.contains("maestro test") && CloudWorkflowTemplates.ANDROID_SHOTS.yaml.contains("--format junit"))
         assertFalse(CloudWorkflowTemplates.MUTATE.scriptOptional) // the mutant list is required

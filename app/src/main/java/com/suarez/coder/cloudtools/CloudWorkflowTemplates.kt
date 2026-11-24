@@ -13,7 +13,7 @@ object CloudWorkflowTemplates {
     }
 
     /** Bumped when a template changes; the installed file carries it so the Skills screen can offer an update. */
-    const val VERSION = 3
+    const val VERSION = 4
     private fun marker(id: String) = "# coder-cloud-tool: $id v$VERSION (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)"
 
     // § stands for $ (keeps the GitHub expressions readable inside Kotlin strings).
@@ -628,6 +628,7 @@ object CloudWorkflowTemplates {
                   if [ -n "§FLOWS" ] && [ -d "§GITHUB_WORKSPACE/§FLOWS" ]; then
                     export PATH="§PATH:§HOME/.maestro/bin"
                     ( cd "§OUT" && maestro test "§GITHUB_WORKSPACE/§FLOWS" --format junit --output "§OUT/maestro-report.xml" ) > "§OUT/maestro.log" 2>&1 < /dev/null || echo "MAESTRO_FAILED" >> "§OUT/maestro.log"
+                    echo "---- Maestro ----"; tail -n 40 "§OUT/maestro.log"
                   fi
                   adb logcat -d -b crash > "§OUT/crash.txt" < /dev/null || true
                   if [ -s "§OUT/crash.txt" ]; then echo "UYGULAMA ÇÖKTÜ:"; cat "§OUT/crash.txt"; exit 1; fi
@@ -935,22 +936,35 @@ object CloudWorkflowTemplates {
                       export TEST_CMD="python -m pytest -q -x §FILES" ;;
                   esac
                   cat > "§RUNNER_TEMP/mutate.py" <<'PY'
-                  import json, os, subprocess, sys
+                  import json, os, re, subprocess, sys, time
                   muts = json.load(open(sys.argv[1])); out = sys.argv[2]; cmd = os.environ["TEST_CMD"]
+                  # Every write gets a new, later mtime and Python keeps no bytecode: a cached .pyc of the previous
+                  # mutant (same size, same second) must never be what the tests run.
+                  os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+                  stamp = [int(time.time())]
+                  def write(path, text):
+                      open(path, "w", encoding="utf-8").write(text)
+                      stamp[0] += 2; os.utime(path, (stamp[0], stamp[0]))
+                  # A mutant that does not even compile says nothing about the tests: it is not counted as caught.
+                  BROKEN = re.compile(r"(?m)^e: |Compilation error|Compilation failed|SyntaxError|IndentationError|TS[0-9]{4}:")
                   def run():
-                      try: return subprocess.run(cmd, shell=True, timeout=600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-                      except subprocess.TimeoutExpired: return 124
-                  if run() != 0:
-                      json.dump({"error": "Testler değişiklik olmadan da başarısız; mutasyon ölçülemez."}, open(out, "w")); sys.exit(0)
+                      try:
+                          p = subprocess.run(cmd, shell=True, timeout=600, capture_output=True, text=True, errors="replace")
+                          return p.returncode, p.stdout + p.stderr
+                      except subprocess.TimeoutExpired: return 124, "zaman aşımı"
+                  rc, log = run()
+                  if rc != 0:
+                      print(log[-4000:])
+                      json.dump({"error": "Testler değişiklik olmadan da başarısız; mutasyon ölçülemez.\n" + log[-1500:]}, open(out, "w")); sys.exit(0)
                   res = []
                   for m in muts[:8]:
                       p = m["path"]; text = open(p, encoding="utf-8").read()
                       if text.count(m["search"]) != 1:
                           res.append({"id": m["id"], "status": "skipped"}); continue
-                      open(p, "w", encoding="utf-8").write(text.replace(m["search"], m["replace"], 1))
-                      rc = run()
-                      open(p, "w", encoding="utf-8").write(text)
-                      res.append({"id": m["id"], "status": "killed" if rc != 0 else "survived"})
+                      write(p, text.replace(m["search"], m["replace"], 1))
+                      rc, log = run()
+                      write(p, text)
+                      res.append({"id": m["id"], "status": "survived" if rc == 0 else ("invalid" if BROKEN.search(log) else "killed")})
                   json.dump({"results": res}, open(out, "w"))
                   print(res)
                   PY

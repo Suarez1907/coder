@@ -1,4 +1,4 @@
-# coder-cloud-tool: android v3 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
+# coder-cloud-tool: android v4 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
 name: Coder Android Screens
 
 on:
@@ -88,6 +88,7 @@ jobs:
           if [ -n "$FLOWS" ] && [ -d "$GITHUB_WORKSPACE/$FLOWS" ]; then
             export PATH="$PATH:$HOME/.maestro/bin"
             ( cd "$OUT" && maestro test "$GITHUB_WORKSPACE/$FLOWS" --format junit --output "$OUT/maestro-report.xml" ) > "$OUT/maestro.log" 2>&1 < /dev/null || echo "MAESTRO_FAILED" >> "$OUT/maestro.log"
+            echo "---- Maestro ----"; tail -n 40 "$OUT/maestro.log"
           fi
           adb logcat -d -b crash > "$OUT/crash.txt" < /dev/null || true
           if [ -s "$OUT/crash.txt" ]; then echo "UYGULAMA ÇÖKTÜ:"; cat "$OUT/crash.txt"; exit 1; fi

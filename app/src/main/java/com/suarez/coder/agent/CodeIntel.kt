@@ -163,12 +163,15 @@ object Mutator {
 
     fun toJson(ms: List<Mutant>) = JSONArray().also { a -> ms.forEach { a.put(JSONObject().put("id", it.id).put("path", it.path).put("search", it.search).put("replace", it.replace)) } }.toString()
 
-    /** results.json → (killed, survived descriptions, error). */
-    fun results(json: String, ms: List<Mutant>): Triple<Int, List<String>, String?> {
+    /** Mutants the tests caught, the ones they missed (descriptions), the ones that did not compile, or the run's error. */
+    data class Score(val killed: Int, val survived: List<String>, val error: String?, val invalid: Int = 0)
+
+    fun results(json: String, ms: List<Mutant>): Score {
         val o = JSONObject(json)
-        if (o.has("error")) return Triple(0, emptyList(), o.getString("error"))
+        if (o.has("error")) return Score(0, emptyList(), o.getString("error"))
         val a = o.getJSONArray("results")
         val st = (0 until a.length()).associate { a.getJSONObject(it).let { r -> r.getString("id") to r.getString("status") } }
-        return Triple(st.count { it.value == "killed" }, ms.filter { st[it.id] == "survived" }.map { it.desc + " (${it.path})" }, null)
+        return Score(st.count { it.value == "killed" }, ms.filter { st[it.id] == "survived" }.map { it.desc + " (${it.path})" }, null,
+            st.count { it.value == "invalid" })
     }
 }

@@ -143,11 +143,13 @@ internal class CloudSkills(private val agent: Agent) : CloudOps {
         val source = gh.branchSha(repo, branch)?.let { branch } ?: gh.defaultBranch(repo)
         val dir = runOnScratch(repo, source, CloudWorkflowTemplates.MUTATE, inputs, listOf(GitHub.FileChange(".coder/mutants.json", Mutator.toJson(ms), false)), 40 * 60_000L)
         try {
-            val (killed, survived, error) = Mutator.results(File(dir, "results.json").readText(), ms)
-            if (error != null) return "Mutasyon testi ölçülemedi: $error"
+            val (killed, survived, error, invalid) = Mutator.results(File(dir, "results.json").readText(), ms)
+            if (error != null) return "Mutasyon testi ölçülemedi: ${error.take(2_000)}"
             val total = killed + survived.size
-            val pct = if (total == 0) 0 else killed * 100 / total
-            return "Mutasyon skoru: $killed/$total yakalandı (%$pct). Testler: ${chosen.joinToString()}\n" +
+            if (total == 0) return "Hiçbir mutant ölçülemedi" + (if (invalid > 0) " ($invalid tanesi derlenmedi)" else "") + "."
+            val pct = killed * 100 / total
+            return "Mutasyon skoru: $killed/$total yakalandı (%$pct). Testler: ${chosen.joinToString()}" +
+                (if (invalid > 0) " ($invalid mutant derlenmediği için sayılmadı)" else "") + "\n" +
                 (if (survived.isEmpty()) "Tüm mutantlar yakalandı; testler bu kodu iyi koruyor."
                 else "Testlerin YAKALAMADIĞI değişiklikler (bunları yakalayan test ekle):\n" + survived.joinToString("\n") { "- $it" })
         } finally { dir.deleteRecursively() }
