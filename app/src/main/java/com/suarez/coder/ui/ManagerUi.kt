@@ -117,6 +117,23 @@ fun ManagerSection(vm: ChatViewModel) {
         }
     }
 
+    Card {
+        Heading("Değerlendirme seti (sürüm karşılaştırması)")
+        Text("Repolarındaki ${vm.evalSuiteSize} başarılı görev her yeni sürümde aynı şekilde geçici dallarda yeniden çözülür ve CI ile ölçülür. " +
+            "Sonuçlar güven aralığıyla verilir; iki sürüm eşleştirilmiş testle (McNemar) karşılaştırılır. Haftalık sınav bütçesinden harcar.",
+            style = MaterialTheme.typography.bodySmall, color = dim)
+        vm.evalRuns.takeLast(5).asReversed().forEach { r ->
+            Text(r.summary(), style = MaterialTheme.typography.bodySmall, color = ink)
+            Text(r.config, style = MaterialTheme.typography.bodySmall, color = dim)
+        }
+        if (vm.evalRuns.size >= 2) Text(com.suarez.coder.evolution.EvalRun.compare(vm.evalRuns[vm.evalRuns.size - 2], vm.evalRuns.last()),
+            style = MaterialTheme.typography.bodySmall, color = ink)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { vm.runEvalNow() }, enabled = vm.evalSuiteSize >= 2 || vm.evalRuns.isEmpty(), border = BorderStroke(1.dp, rule)) { Text("Şimdi çalıştır", color = ink) }
+            TextButton(onClick = { vm.rebuildEvalSuite() }) { Text("Seti yenile", color = dim) }
+        }
+    }
+
     if (vm.cacheRows.isNotEmpty()) Card {
         Heading("Önbellek isabeti (son 30 gün)")
         vm.cacheRows.take(8).forEach { c ->

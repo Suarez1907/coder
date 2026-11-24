@@ -365,6 +365,11 @@ class Settings(context: Context) {
         get() = bool("clarify_first", true)
         set(v) = putBool("clarify_first", v)
 
+    /** Run the fixed evaluation set once after each app update (inside the weekly exam budget). */
+    var evalOnUpdate: Boolean
+        get() = bool("eval_on_update", true)
+        set(v) = putBool("eval_on_update", v)
+
     /** A failing or overloaded model hands the call to the next model in the escalation order. */
     var failover: Boolean
         get() = bool("failover", true)

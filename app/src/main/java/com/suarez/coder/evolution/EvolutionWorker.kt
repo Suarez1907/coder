@@ -38,6 +38,30 @@ class EvolutionWorker(context: Context, params: WorkerParameters) : CoroutineWor
  * Weekly self-improvement loop (crash watch, GitHub scout, exams). Runs as a foreground job because an exam waits
  * for CI and can take longer than a normal background job is allowed to.
  */
+/** "Değerlendirmeyi şimdi çalıştır": the fixed task set with the current version, in the foreground (it waits for CI). */
+class EvalWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        val ctx = applicationContext
+        runCatching { setForeground(WeeklyWorker.foreground(ctx, "Coder değerlendirme seti çalışıyor")) }
+        val settings = com.suarez.coder.data.Settings(ctx)
+        val store = EvolutionEngine.storeFor(ctx)
+        val left = { settings.examWeeklyBudget - store.spentSince(WeeklyCycle.weekStart(System.currentTimeMillis()), EvoTier.EXAM) }
+        val msg = runCatching {
+            EvalSuite(ctx, settings, store) { s -> runCatching { setForegroundAsync(WeeklyWorker.foreground(ctx, s)) } }.run(left)
+        }.getOrElse { "Değerlendirme hatası: ${it.message?.take(120)}" }
+        com.suarez.coder.ci.TaskNotifier.done(ctx, "Değerlendirme", "bitti", msg)
+        return Result.success()
+    }
+
+    companion object {
+        fun start(context: Context) {
+            val req = androidx.work.OneTimeWorkRequestBuilder<EvalWorker>()
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build()
+            runCatching { WorkManager.getInstance(context).enqueueUniqueWork("coder-eval", androidx.work.ExistingWorkPolicy.KEEP, req) }
+        }
+    }
+}
+
 class WeeklyWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         runCatching { setForeground(foreground(applicationContext, "Coder kendini sınıyor")) }

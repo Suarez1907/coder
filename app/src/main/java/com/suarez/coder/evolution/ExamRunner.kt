@@ -55,7 +55,11 @@ class ExamRunner(
     }
 
     /** null = the question could not be scored (no CI ran on the branch). */
-    suspend fun score(case: ExamCase, v: Variant): ExamScore? {
+    /**
+     * [realConfig]: run with the user's full configuration (self-review, until-green, critic...) as an unattended run,
+     * for release evaluations; otherwise as an isolated evolution session (experiments).
+     */
+    suspend fun score(case: ExamCase, v: Variant, realConfig: Boolean = false): ExamScore? {
         val main = Agent(settings) // unguarded: creates and deletes the scratch branch, waits for CI
         val branch = branchFor(case, v.tag)
         onStatus("Sınav: ${case.request.take(40)} (${v.tag})")
@@ -63,7 +67,7 @@ class ExamRunner(
         var spent = 0.0
         try {
             val agent = Agent(settings, context.filesDir).apply {
-                isEvolutionSession = true // never recorded, never chained
+                if (realConfig) unattended = true else isEvolutionSession = true // never recorded, never chained
                 budgetDeferred = true
                 roleOverrides = v.roles
                 policyText = { v.rules.joinToString("\n") { "- $it" } }

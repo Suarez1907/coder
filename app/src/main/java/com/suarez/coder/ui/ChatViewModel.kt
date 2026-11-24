@@ -787,70 +787,48 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---- Model report card, cache hits, price watch ----
+    // ---- Model report card, cache hits, price watch (InsightsController) ----
 
-    var modelRows by mutableStateOf<List<com.suarez.coder.cost.ModelReport.Row>>(emptyList())
-        private set
-    var cacheRows by mutableStateOf<List<com.suarez.coder.cost.ModelReport.CacheRow>>(emptyList())
-        private set
-    /** Escalation order suggested by the user's own results (provider/model keys). */
-    var suggestedChain by mutableStateOf<List<String>>(emptyList())
-        private set
-    var priceAlerts by mutableStateOf<List<String>>(emptyList())
-        private set
+    val insights = InsightsController(viewModelScope, settings, evoStore, ledger, { agent }, { modelOptions() }, { refreshSettings() })
+    val modelRows get() = insights.modelRows
+    val cacheRows get() = insights.cacheRows
+    val suggestedChain get() = insights.suggestedChain
+    val priceAlerts get() = insights.priceAlerts
+    fun refreshReport() = insights.refreshReport()
+    fun applySuggestedChain() = insights.applySuggestedChain()
+    fun checkPrices() = insights.checkPrices()
+    fun dismissPriceAlert(text: String) = insights.dismissPriceAlert(text)
 
-    // Kotlin runs initializers in source order: these must come after the state above.
+    // Kotlin runs initializers in source order: this must come after the controller above.
     init { refreshReport(); checkPrices() }
 
-    private fun keyFor(modelName: String): String? =
-        modelOptions().firstOrNull { it.model == modelName || it.key == modelName }?.key
+    // ---- Release evaluation (fixed task set, statistics) ----
 
-    fun refreshReport() {
+    var evalRuns by mutableStateOf<List<com.suarez.coder.evolution.EvalRun>>(emptyList())
+        private set
+    var evalSuiteSize by mutableStateOf(0)
+        private set
+
+    fun refreshEval() {
         viewModelScope.launch(Dispatchers.IO) {
-            val since = System.currentTimeMillis() - 60L * 86_400_000L
-            val rows = com.suarez.coder.cost.ModelReport.rows(evoStore.traces(), since)
-            val cache = com.suarez.coder.cost.ModelReport.cacheRows(ledger.readAll(), System.currentTimeMillis() - 30L * 86_400_000L)
-            val chain = com.suarez.coder.cost.ModelReport.suggestedChain(rows, agent.editorRef().model)
-            withContext(Dispatchers.Main) { modelRows = rows; cacheRows = cache; suggestedChain = chain.mapNotNull { keyFor(it) } }
+            val s = com.suarez.coder.evolution.EvalSuite(getApplication(), settings, evoStore)
+            val runs = s.evals.runs(); val size = s.evals.suite().size
+            withContext(Dispatchers.Main) { evalRuns = runs; evalSuiteSize = size }
         }
     }
 
-    fun applySuggestedChain() {
-        if (suggestedChain.isEmpty()) return
-        settings.escalationChain = suggestedChain.joinToString("\n")
-        refreshSettings()
-    }
+    fun runEvalNow() { com.suarez.coder.evolution.EvalWorker.start(getApplication()); evoStatus = "Değerlendirme arka planda başladı; bitince bildirim gelir." }
 
-    /** Compares the prices of the models in use with the last check; also warns about announced price changes. */
-    fun checkPrices() {
-        viewModelScope.launch(Dispatchers.Default) {
-            val watched = (listOf(agent.editorRef(), agent.architectRef(), agent.singleRef()).map { it.model } +
-                com.suarez.coder.agent.Escalation.parse(settings.escalationChain).map { it.substringAfter('/') } +
-                settings.modelPool.map { it.substringAfter('/') }).filter { it.isNotBlank() }.distinct()
-            val now = watched.associateWith { agent.price(it) }
-            val old = com.suarez.coder.cost.PriceWatch.parse(settings.priceSnapshot)
-            val fresh = com.suarez.coder.cost.PriceWatch.alerts(old, now).map { a ->
-                // A cheaper model that did as well in the user's own tasks, if the report knows one.
-                val me = modelRows.firstOrNull { it.model == a.model }
-                val alt = me?.let { m -> modelRows.firstOrNull { it.model != m.model && it.tasks >= com.suarez.coder.cost.ModelReport.MIN_TASKS &&
-                    it.avgCost < m.avgCost && it.successRate >= m.successRate - 0.05 } }
-                a.text + (alt?.let { " Kendi görevlerinde benzer başarılı ve daha ucuz: ${it.model}." } ?: "")
-            }
-            settings.priceSnapshot = com.suarez.coder.cost.PriceWatch.snapshot(now)
-            val active = (settings.activePriceAlerts + fresh) - settings.dismissedPriceAlerts
-            settings.activePriceAlerts = active
-            withContext(Dispatchers.Main) { priceAlerts = active.toList() }
+    fun rebuildEvalSuite() {
+        viewModelScope.launch(Dispatchers.IO) {
+            com.suarez.coder.evolution.EvalSuite(getApplication(), settings, evoStore).ensureSuite(refresh = true)
+            refreshEval()
         }
-    }
-
-    fun dismissPriceAlert(text: String) {
-        settings.dismissedPriceAlerts = settings.dismissedPriceAlerts + text
-        settings.activePriceAlerts = settings.activePriceAlerts - text
-        priceAlerts = priceAlerts - text
     }
 
     fun refreshManager() {
         refreshReport()
+        refreshEval()
         viewModelScope.launch(Dispatchers.IO) {
             val exps = evoStore.experiments().asReversed()
             val best = listOf("SIMPLE_EDIT", "COMPLEX_ARCHITECT", "QUESTION_ONLY").mapNotNull { r ->
@@ -1355,80 +1333,31 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         refreshSettings()
     }
 
-    // ---- Saving: coalesced, because a long chat is megabytes of JSON and the agent updates many times per step ----
+    // ---- Saving (SessionSaver) ----
 
-    private class PendingSave(val messages: List<ChatMessage>, val repo: String, val cost: Double)
-    private val pendingSaves = LinkedHashMap<String, PendingSave>()
-    private var saveJob: Job? = null
-    private val saveLock = kotlinx.coroutines.sync.Mutex()
-    private var ledgerLen = -1L
+    private val saver = SessionSaver(viewModelScope, sessionStore, ledger, File(app.filesDir, "ledger.jsonl"), loggedKeys,
+        { id, repo, r -> entryFor(id, repo, r) }, { agent.sessionCost(it) }, { repoNow() },
+        { list -> withContext(Dispatchers.Main) { sessions = list } })
 
-    private fun save(now: Boolean = false) = saveSession(currentSessionId, messages, now)
+    private fun save(now: Boolean = false) = saver.save(currentSessionId, messages, now)
+    private fun saveSession(sid: String, work: List<ChatMessage>, now: Boolean = false) = saver.save(sid, work, now)
 
-    private fun saveSession(sid: String, work: List<ChatMessage>, now: Boolean = false) {
-        val snapshot = work.toList()
-        synchronized(pendingSaves) { pendingSaves[sid] = PendingSave(snapshot, repoNow(), agent.sessionCost(snapshot)) }
-        if (now) { saveJob?.cancel(); saveJob = viewModelScope.launch(Dispatchers.IO) { writePending() }; return }
-        if (saveJob?.isActive == true) return
-        saveJob = viewModelScope.launch(Dispatchers.IO) {
-            kotlinx.coroutines.delay(SAVE_DEBOUNCE_MS)
-            writePending()
-        }
-    }
+    // ---- Task queue (QueueController) ----
 
-    /** Writes the latest snapshot of every chat with unsaved changes, and their new cost records to the ledger. */
-    private suspend fun writePending(refreshList: Boolean = true) = saveLock.withLock {
-        val batch = synchronized(pendingSaves) { LinkedHashMap(pendingSaves).also { pendingSaves.clear() } }
-        if (batch.isEmpty()) return@withLock
-        // The queue worker appends to the ledger too: pick up its keys so nothing is counted twice.
-        val ledgerFile = File(getApplication<Application>().filesDir, "ledger.jsonl")
-        if (ledgerFile.length() != ledgerLen) { runCatching { synchronized(loggedKeys) { loggedKeys.addAll(ledger.keys()) } } }
-        for ((id, p) in batch) {
-            runCatching { sessionStore.save(id, p.messages, p.repo, p.cost) }
-            // New cost records go to the permanent ledger exactly once.
-            val fresh = p.messages.filterIsInstance<ChatMessage.UsageRecord>().filter { r ->
-                synchronized(loggedKeys) { loggedKeys.add(Ledger.key(id, r.at, r.role, r.model)) }
-            }
-            runCatching { ledger.append(fresh.map { entryFor(id, p.repo, it) }) }
-        }
-        ledgerLen = ledgerFile.length()
-        if (!refreshList) return@withLock
-        val list = sessionStore.list()
-        withContext(Dispatchers.Main) { sessions = list }
-    }
-
-    // ---- Task queue (unattended runs) ----
-
-    private val queueStore = com.suarez.coder.queue.QueueWorker.store(app)
-    var queue by mutableStateOf<List<com.suarez.coder.agent.QueuedTask>>(emptyList())
-        private set
-
-    fun refreshQueue() {
-        viewModelScope.launch(Dispatchers.IO) { val l = queueStore.all(); withContext(Dispatchers.Main) { queue = l } }
-    }
-
-    fun enqueue(text: String, repo: String) {
-        val r = agent.tools.normalizeRepo(repo.ifBlank { agent.tools.activeRepo() })
-        if (text.isBlank() || !r.contains('/')) return
-        queueStore.add(com.suarez.coder.agent.QueuedTask("t${System.currentTimeMillis()}", r, text.trim()))
-        com.suarez.coder.queue.QueueWorker.schedule(getApplication())
-        refreshQueue()
-    }
-
-    fun runQueueNow() { com.suarez.coder.queue.QueueWorker.schedule(getApplication(), now = true) }
-    fun removeQueued(id: String) { queueStore.remove(id); refreshQueue() }
-    fun requeue(id: String) { queueStore.update(id) { it.copy(state = com.suarez.coder.agent.QueuedTask.State.QUEUED, note = "") }; com.suarez.coder.queue.QueueWorker.schedule(getApplication()); refreshQueue() }
-    fun queueSettingsChanged() { com.suarez.coder.queue.QueueWorker.schedulePeriodic(getApplication()) }
+    val queueCtl = QueueController(app, viewModelScope) { agent }
+    val queue get() = queueCtl.queue
+    fun refreshQueue() = queueCtl.refresh()
+    fun enqueue(text: String, repo: String) = queueCtl.enqueue(text, repo)
+    fun runQueueNow() = queueCtl.runNow()
+    fun removeQueued(id: String) = queueCtl.remove(id)
+    fun requeue(id: String) = queueCtl.requeue(id)
+    fun queueSettingsChanged() = queueCtl.settingsChanged()
 
     /** Called when the app goes to the background: nothing typed or generated may wait in memory. */
-    fun flushSaves() { viewModelScope.launch(Dispatchers.IO) { writePending() } }
+    fun flushSaves() = saver.flush()
 
     override fun onCleared() {
-        kotlinx.coroutines.runBlocking(Dispatchers.IO) { runCatching { writePending(refreshList = false) } } // main is blocked: no hop back
+        saver.flushBlocking()
         super.onCleared()
-    }
-
-    private companion object {
-        const val SAVE_DEBOUNCE_MS = 1_200L
     }
 }

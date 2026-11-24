@@ -72,6 +72,14 @@ class WeeklyCycle(
                 out += it; store.addLog(EvoTier.MEMORY, it)
             }
         }
+        // A new app version is measured on the fixed task set first (fair comparison with the previous version).
+        if (settings.evalOnUpdate && settings.githubToken.isNotBlank()) {
+            val suite = EvalSuite(context, settings, store, onStatus)
+            if (suite.evals.runs().lastOrNull()?.version != suite.version()) {
+                val left = { settings.examWeeklyBudget - store.spentSince(weekStart(System.currentTimeMillis()), EvoTier.EXAM) }
+                if (left() > 0.05) out += runCatching { suite.run(left) }.getOrElse { "Değerlendirme hatası: ${it.message?.take(100)}" }
+            }
+        }
         queueDefaultExperiment()
         out += runExperiments()
         return out.filter { it.isNotBlank() }.joinToString(" ")
