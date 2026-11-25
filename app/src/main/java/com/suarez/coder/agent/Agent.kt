@@ -187,19 +187,22 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     fun customModes(): List<CustomMode> = CustomMode.list(settings.customModes)
     fun activeMode(): CustomMode? = settings.activeMode.takeIf { it.isNotBlank() }?.let { n -> customModes().firstOrNull { it.name == n } }
 
-    private suspend fun runMode(history: MutableList<ChatMessage>, ui: AgentUi, mode: CustomMode) {
+    private suspend fun runMode(history: MutableList<ChatMessage>, ui: AgentUi, mode: CustomMode, task: String = "") {
         val ref = ModelRef.parse(mode.model)?.takeIf { settings.keyFor(it.provider).isNotBlank() } ?: editorRef()
         history += ChatMessage.RouteInfo("Mod: ${mode.name} (${ref.model}, ${mode.access.label})", mode.instructions.take(400), "MODE", false)
         ui.update()
-        val readOnly = mode.access == CustomMode.Access.READ_ONLY
-        val specs = when (mode.access) {
+        // READ_ONLY bir model kimliği değil, çalışma fazıdır: yazma niyetli görevde salt okunur moda düşmeyiz.
+        val writeIntent = ReadOnlyMismatchRecovery.hasWriteIntent(task)
+        val readOnly = mode.access == CustomMode.Access.READ_ONLY && !writeIntent
+        val access = if (mode.access == CustomMode.Access.READ_ONLY && !readOnly) CustomMode.Access.FULL else mode.access
+        val specs = when (access) {
             CustomMode.Access.READ_ONLY -> tools.readOnlySpecs.filter { it.name != "submit_plan" }
             CustomMode.Access.NO_OPS -> tools.specs.filter { it.name !in setOf("github_create_pull_request", "github_merge_pull_request", "github_run_workflow") }
             CustomMode.Access.FULL -> tools.specs
         }
         val system = (if (readOnly) questionSystem() else agentSystem()) + "\nACTIVE MODE \"${mode.name}\" (follow it): ${mode.instructions}"
         agentLoop(history, ui, ref, "agent", system, "agent", specs, readOnly = readOnly, stopTool = null,
-            maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
+            maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel, writeIntent = writeIntent, writeSpecs = tools.specs)
     }
 
     private val cache = GeminiCacheManager(settings)
