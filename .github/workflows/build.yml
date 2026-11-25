@@ -46,8 +46,11 @@ jobs:
           path: Coder-${{ github.run_number }}.apk
 
       # evo/ (self-PR proposals) and coder-exam/ (exam runs) are never published as the latest release.
+      # GitHub's release API occasionally returns 500 (service outages); the APK is already
+      # uploaded as an artifact, so a release hiccup must not fail the whole build.
       - name: Publish release
         if: ${{ !startsWith(github.ref_name, 'evo/') && !startsWith(github.ref_name, 'coder-exam/') }}
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
