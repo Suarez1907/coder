@@ -853,7 +853,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 }
             }
             val mode = if (override == null && !isEvolutionSession) activeMode() else null
-            if (mode != null) { runMode(history, ui, mode); return }
+            if (mode != null) { runMode(history, ui, mode, request?.text.orEmpty()); return }
             var route: Route? = override
             var auto: com.suarez.coder.context.ContextProvider.Loaded? = null
             var autoPaths: List<String> = emptyList()
@@ -951,9 +951,14 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 Route.SIMPLE_EDIT ->
                     agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
-                Route.QUESTION_ONLY ->
-                    agentLoop(history, ui, editorRef(), "agent", questionSystem(), "agent", questionSpecs, readOnly = true, stopTool = null,
-                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
+                Route.QUESTION_ONLY -> {
+                    // Salt okunur yalnızca gerçek bir soru görevinde; yazma niyeti varsa READ_WRITE başla.
+                    val ro = ReadOnlyMismatchRecovery.readOnlyForRoute(route, request?.text.orEmpty())
+                    agentLoop(history, ui, editorRef(), "agent", if (ro) questionSystem() else agentSystem(), "agent",
+                        if (ro) questionSpecs else tools.specs, readOnly = ro, stopTool = null,
+                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel,
+                        writeIntent = ReadOnlyMismatchRecovery.hasWriteIntent(request?.text.orEmpty()), writeSpecs = tools.specs)
+                }
                 null ->
                     if (settings.architectMode) architectFlow(history, ui)
                     else agentLoop(history, ui, singleRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
