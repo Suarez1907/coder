@@ -18,8 +18,13 @@ data class Usage(val input: Long = 0, val output: Long = 0, val cached: Long = 0
 }
 
 sealed class ChatMessage {
-    /** [images]: paths of prepared JPEG files (resized on the device); sent as inline image parts to vision models. */
-    data class User(val text: String, val images: List<String> = emptyList()) : ChatMessage()
+    /** [images]: paths of prepared JPEG files (resized on the device); sent as inline image parts to vision models.
+     *  [isHarnessInternal]: the app (not the user) added this message, e.g. an automatic authority upgrade. */
+    data class User(
+        val text: String,
+        val images: List<String> = emptyList(),
+        val isHarnessInternal: Boolean = false,
+    ) : ChatMessage()
 
     data class Assistant(
         val text: String,
