@@ -1262,7 +1262,14 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             ui.update()
             if (reply.toolCalls.isEmpty()) {
                 // Yetki kurtarma: "yetkim yok" halüsinasyonu → yükselt ve aynı görevi bir kez daha dene.
-                if (ReadOnlyMismatchRecovery.isMismatch(reply.text, writeIntent, ro) && tryUpgrade("model yazma yetkisi olmadığını söyledi")) continue
+                if (ReadOnlyMismatchRecovery.isMismatch(reply.text, writeIntent, ro)) {
+                    if (tryUpgrade("model yazma yetkisi olmadığını söyledi")) continue
+                    // Yükseltme tükendi: salt okunur oturumu kapat, görev yazma yetkili Uygulayıcı'ya devredilir.
+                    history += ChatMessage.Notice(ReadOnlyMismatchRecovery.statusLine(ReadOnlyMismatchRecovery.Action.HANDOFF),
+                        "Görev yazma gerektiriyor; bu salt okunur oturum burada bırakıldı.")
+                    ui.update()
+                    return null
+                }
                 // Until green: the model may not stop on a red CI (twice at most, then the user decides).
                 if (settings.untilGreen && ci.lastFailed && !ro && !isEvolutionSession && ci.nudges < 2) {
                     ci.nudges++
@@ -1318,9 +1325,13 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 history += result
                 ui.update()
                 // Araç salt okunur reddettiyse oturumu yükselt; kalan çağrılar bir sonraki adımda yeniden denenebilir.
-                if (result.isError && ReadOnlyMismatchRecovery.isMismatch(result.content, writeIntent, ro) && tryUpgrade("araç yazmayı salt okunur gerekçesiyle reddetti")) {
+                if (result.isError && ReadOnlyMismatchRecovery.isMismatch(result.content, writeIntent, ro)) {
                     calls.drop(i + 1).forEach { history += ChatMessage.ToolResult(it.id, it.name, "Yetki yükseltildi; sonraki adımda yeniden çağrılabilir.", true) }
-                    break
+                    if (tryUpgrade("araç yazmayı salt okunur gerekçesiyle reddetti")) break
+                    history += ChatMessage.Notice(ReadOnlyMismatchRecovery.statusLine(ReadOnlyMismatchRecovery.Action.HANDOFF),
+                        "Araç yazmayı reddetti; görev yazma yetkili Uygulayıcı'ya devredildi.")
+                    ui.update()
+                    return null
                 }
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
                 if (consecutiveFailures >= 2) raiseThinking("üst üste hata")
