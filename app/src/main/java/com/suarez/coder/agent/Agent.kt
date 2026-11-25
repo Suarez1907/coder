@@ -1217,13 +1217,31 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         maxReads: Int? = null,
         thinking: String? = null,
         allowOps: Boolean = false,
+        writeIntent: Boolean = false,
+        writeSpecs: List<ToolSpec>? = null,
     ): ToolCall? {
         var consecutiveFailures = 0
         var reads = 0
         var cur = ref
         val ci = CiController.CiState()
+        // Yetki kurtarma: yazma niyetli görevde salt okunur yanıt gelirse oturumu bir kez READ_WRITE'a yükselt.
+        var ro = readOnly
+        var specs = toolSpecs
+        var upgrades = 0
+        fun tryUpgrade(why: String): Boolean {
+            if (!ro || !writeIntent) return false
+            val action = ReadOnlyMismatchRecovery.next(upgrades)
+            if (action == ReadOnlyMismatchRecovery.Action.HANDOFF) return false
+            upgrades++
+            ro = false
+            specs = writeSpecs ?: toolSpecs
+            history += ChatMessage.User(ReadOnlyMismatchRecovery.upgradePrompt(), isHarnessInternal = true)
+            history += ChatMessage.Notice(ReadOnlyMismatchRecovery.statusLine(action), why)
+            ui.update()
+            return true
+        }
         // Adaptive budget: the executor starts with low thinking and goes back to the configured level once it struggles.
-        val adaptiveThink = settings.adaptiveBudget && role == "agent" && !readOnly && thinking in setOf("medium", "high", "xhigh")
+        val adaptiveThink = settings.adaptiveBudget && role == "agent" && !ro && thinking in setOf("medium", "high", "xhigh")
         var think = if (adaptiveThink) "low" else thinking
         fun raiseThinking(why: String) {
             if (think != thinking) { think = thinking; history += ChatMessage.Notice("Düşünme seviyesi $thinking'e yükseltildi ($why)") }
@@ -1239,12 +1257,14 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, cur, role, system, toolSpecs, ui, maxOut = maxOut, thinking = think, stable = stable)
+            val reply = callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
             history += reply
             ui.update()
             if (reply.toolCalls.isEmpty()) {
+                // Yetki kurtarma: "yetkim yok" halüsinasyonu → yükselt ve aynı görevi bir kez daha dene.
+                if (ReadOnlyMismatchRecovery.isMismatch(reply.text, writeIntent, ro) && tryUpgrade("model yazma yetkisi olmadığını söyledi")) continue
                 // Until green: the model may not stop on a red CI (twice at most, then the user decides).
-                if (settings.untilGreen && ci.lastFailed && !readOnly && !isEvolutionSession && ci.nudges < 2) {
+                if (settings.untilGreen && ci.lastFailed && !ro && !isEvolutionSession && ci.nudges < 2) {
                     ci.nudges++
                     history += ChatMessage.User(AUTO_NUDGE + "CI hâlâ kırmızı. Son hatayı düzelt, commit et ve ci_wait ile doğrula; " +
                         "düzeltilemiyorsa nedenini kısaca açıkla.")
@@ -1260,7 +1280,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             if (calls.size > 1 && calls.all { it.name in PARALLEL_SAFE } && maxReads == null) {
                 ui.status("${calls.size} okuma aynı anda çalışıyor")
                 val results = kotlinx.coroutines.coroutineScope {
-                    calls.map { c -> async { executeTool(c, readOnly, allowOps, NoStatusUi(ui), role) } }.map { it.await() }
+                    calls.map { c -> async { executeTool(c, ro, allowOps, NoStatusUi(ui), role) } }.map { it.await() }
                 }
                 ui.status(null)
                 results.forEach { (r, _) -> history += r }
@@ -1278,7 +1298,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                     continue
                 }
                 if (call.name in setOf("github_read_file", "github_read_files")) reads += readCount
-                var (result, rejected) = executeTool(call, readOnly, allowOps, ui, role)
+                var (result, rejected) = executeTool(call, ro, allowOps, ui, role)
                 if (call.name == "ci_wait" && !result.isError) {
                     val (r2, next) = ciController.afterCi(call, result, ci, cur, history, ui)
                     result = r2
@@ -1297,6 +1317,11 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 }
                 history += result
                 ui.update()
+                // Araç salt okunur reddettiyse oturumu yükselt; kalan çağrılar bir sonraki adımda yeniden denenebilir.
+                if (result.isError && ReadOnlyMismatchRecovery.isMismatch(result.content, writeIntent, ro) && tryUpgrade("araç yazmayı salt okunur gerekçesiyle reddetti")) {
+                    calls.drop(i + 1).forEach { history += ChatMessage.ToolResult(it.id, it.name, "Yetki yükseltildi; sonraki adımda yeniden çağrılabilir.", true) }
+                    break
+                }
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
                 if (consecutiveFailures >= 2) raiseThinking("üst üste hata")
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !isEvolutionSession) {
