@@ -41,4 +41,30 @@ class LogFilterTest {
         assertTrue("Should contain Unresolved reference", result.contains("Unresolved reference"))
         assertFalse("Should not contain fallback header", result.contains("(Belirgin hata satırı bulunamadı; logun son 40 satırı)"))
     }
+
+    @Test
+    fun dockerManifestUnknownErrorDetected() {
+        val log = """
+            Pulling image myimage:latest
+            Error response from daemon: manifest unknown: manifest unknown
+        """.trimIndent()
+
+        val result = LogFilter.extract(log)
+
+        assertTrue("Should contain manifest unknown", result.contains("manifest unknown"))
+        assertFalse("Should not contain fallback header", result.contains("(Belirgin hata satırı bulunamadı; logun son 40 satırı)"))
+    }
+
+    @Test
+    fun dockerManifestNotFoundErrorDetected() {
+        val log = """
+            Pulling image myimage:latest
+            Error response from daemon: manifest not found
+        """.trimIndent()
+
+        val result = LogFilter.extract(log)
+
+        assertTrue("Should contain manifest not found", result.contains("manifest not found"))
+        assertFalse("Should not contain fallback header", result.contains("(Belirgin hata satırı bulunamadı; logun son 40 satırı)"))
+    }
 }
