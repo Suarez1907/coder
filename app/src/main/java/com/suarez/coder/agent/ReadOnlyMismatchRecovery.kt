@@ -43,6 +43,10 @@ object ReadOnlyMismatchRecovery {
         Action.HANDOFF -> "Yetki kurtarma: yükseltme yetersiz; görev READ_WRITE Uygulayıcı'ya devredildi."
     }
 
+    /** Görev başında fazı şeffafça duyuran tek satır (yalnızca salt okunur fazdaysa gösterilir). */
+    fun phaseLine(): String = "Yetki fazı: READ_ONLY. Görev yazma gerektirirse oturum bir kez otomatik READ_WRITE'a yükseltilir; " +
+        "yetersizse görev yazma yetkili Uygulayıcı'ya devredilir."
+
     /** Yükseltme sonrası modele verilen sentetik (harness içi) mesaj. */
     fun upgradePrompt(): String = Agent.AUTO_NUDGE +
         "Yetki kurtarma: bu görev yazma niyetli. Oturum READ_WRITE'a yükseltildi; " +

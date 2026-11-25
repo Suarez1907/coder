@@ -1246,6 +1246,11 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         fun raiseThinking(why: String) {
             if (think != thinking) { think = thinking; history += ChatMessage.Notice("Düşünme seviyesi $thinking'e yükseltildi ($why)") }
         }
+        // Şeffaflık: salt okunur fazda başlayan görev zaman çizelgesine tek satırla kaydedilir.
+        if (ro) {
+            history += ChatMessage.Notice(ReadOnlyMismatchRecovery.phaseLine())
+            ui.update()
+        }
         for (step in 1..settings.maxSteps) {
             // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
             HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->

@@ -66,5 +66,8 @@ class ToolAccessTest {
         assertEquals(ReadOnlyMismatchRecovery.Action.HANDOFF, ReadOnlyMismatchRecovery.next(ReadOnlyMismatchRecovery.MAX_UPGRADES))
         assertTrue(ReadOnlyMismatchRecovery.statusLine(ReadOnlyMismatchRecovery.Action.UPGRADE).contains("READ_WRITE"))
         assertTrue(ReadOnlyMismatchRecovery.statusLine(ReadOnlyMismatchRecovery.Action.HANDOFF).contains("Uygulayıcı"))
+        // Faz kaydı da tek satır ve şeffaf olmalı.
+        val phase = ReadOnlyMismatchRecovery.phaseLine()
+        assertTrue(phase.contains("READ_ONLY") && phase.contains("Uygulayıcı") && !phase.contains("\n"))
     }
 }
