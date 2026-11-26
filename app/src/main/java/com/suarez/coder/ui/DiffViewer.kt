@@ -15,7 +15,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,10 +45,13 @@ fun DiffViewer(files: List<DiffFile>, onDismiss: () -> Unit) {
     val red = coder.warn
     val green = coder.cacheGood
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        SystemBarsEffect()
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column {
                 Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Kapat") }
+                    IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Close, "Kapat") }
+                    Icon(Icons.Rounded.Difference, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Diff", style = MaterialTheme.typography.titleMedium)
                         Row {
@@ -70,9 +74,9 @@ fun DiffViewer(files: List<DiffFile>, onDismiss: () -> Unit) {
                                     val bg = when (l.kind) { '-' -> red.copy(alpha = 0.12f); '+' -> green.copy(alpha = 0.12f); else -> MaterialTheme.colorScheme.background }
                                     val fg = when (l.kind) { '-' -> red; '+' -> green; else -> MaterialTheme.colorScheme.onSurface }
                                     Row(Modifier.background(bg).widthIn(min = 2000.dp).padding(horizontal = 8.dp)) {
-                                        Text((l.oldNo?.toString() ?: "").padStart(4), style = Mono.tiny, color = coder.muted)
+                                        Text((l.oldNo?.toString() ?: "").padStart(4), style = Mono.tiny.copy(fontFeatureSettings = "tnum"), color = coder.muted)
                                         Spacer(Modifier.width(4.dp))
-                                        Text((l.newNo?.toString() ?: "").padStart(4), style = Mono.tiny, color = coder.muted)
+                                        Text((l.newNo?.toString() ?: "").padStart(4), style = Mono.tiny.copy(fontFeatureSettings = "tnum"), color = coder.muted)
                                         Spacer(Modifier.width(8.dp))
                                         Text("${l.kind} ${l.text}", style = Mono.small, color = fg, softWrap = false)
                                     }

@@ -2,6 +2,25 @@ package com.suarez.coder.ui
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.CheckCircleOutline
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.PlayCircleOutline
+import androidx.compose.material.icons.rounded.RadioButtonUnchecked
+import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -43,32 +62,65 @@ import com.suarez.coder.orchestrator.TaskStatus
 @Composable
 fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
     var editing by remember { mutableStateOf(false) }
-    var expanded by remember(plan.id) { mutableStateOf(!plan.state.finished) }
-    val accent = when (plan.state) {
-        PlanState.RUNNING -> coder.architect
-        PlanState.DONE -> coder.cacheGood
-        PlanState.FAILED, PlanState.CANCELLED -> coder.warn
-        else -> coder.cost
-    }
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.6f)),
-        modifier = Modifier.fillMaxWidth().animateContentSize(),
+    var expanded by remember(plan.id, plan.state) { mutableStateOf(plan.state != PlanState.DONE) }
+    val done = plan.tasks.count { it.status == TaskStatus.DONE }
+    val totalCost = plan.totalCost
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, RoundedCornerShape(12.dp))
+            .animateContentSize(),
     ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
-                Text("🗂 ", style = MaterialTheme.typography.titleSmall)
-                Column(Modifier.weight(1f)) {
-                    Text(if (plan.repair) "Onarım bekliyor" else "Orkestratör · ${plan.mode.label}", style = MaterialTheme.typography.titleSmall)
-                    Text("${plan.repo}@${plan.branch} · ${plan.tasks.count { it.status == TaskStatus.DONE }}/${plan.tasks.size} · ${plan.state.label}",
-                        style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (plan.state == PlanState.DONE && !expanded) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Rounded.CheckCircleOutline, null, tint = coder.cacheGood, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${plan.mode.label} · $done/${plan.tasks.size} görev · ${Pricing.formatUsd(totalCost)}",
+                    style = Mono.small,
+                    color = coder.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = { expanded = true }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Rounded.ExpandMore, "Genişlet", tint = coder.muted, modifier = Modifier.size(18.dp))
                 }
-                Text(Pricing.formatUsd(plan.totalCost), style = Mono.small, color = coder.cost)
-                Text(if (expanded) " ▴" else " ▾", color = coder.muted)
+                IconButton(onClick = { vm.dismissPlan() }, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Rounded.Close, "Kapat", tint = coder.muted, modifier = Modifier.size(18.dp))
+                }
             }
-            plan.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (plan.state == PlanState.PAUSED) coder.cost else coder.muted) }
-            if (expanded) {
+        } else {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.AccountTree, null, tint = coder.architect, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Orkestratör · ${plan.mode.label}", style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${plan.repo}@${plan.branch} · $done/${plan.tasks.size} · ${plan.state.label}",
+                            style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(Pricing.formatUsd(totalCost), style = Mono.small, color = coder.cost)
+                    if (plan.state == PlanState.DONE) {
+                        IconButton(onClick = { expanded = false }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Rounded.ExpandLess, "Daralt", tint = coder.muted, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    IconButton(onClick = { vm.dismissPlan() }, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Rounded.Close, "Kapat", tint = coder.muted, modifier = Modifier.size(18.dp))
+                    }
+                }
+                if (plan.state == PlanState.RUNNING || plan.state == PlanState.AWAITING_APPROVAL || plan.state == PlanState.PAUSED) {
+                    val frac = if (plan.tasks.isEmpty()) 0f else done.toFloat() / plan.tasks.size
+                    Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(3.dp)).background(coder.border)) {
+                        Box(Modifier.fillMaxWidth(frac.coerceIn(0f, 1f)).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(coder.architect))
+                    }
+                }
+                plan.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (plan.state == PlanState.PAUSED) coder.cost else coder.muted) }
                 plan.tasks.forEach { t -> TaskRow(t) }
                 if (plan.roleCosts.isNotEmpty()) {
                     Text(plan.roleCosts.entries.joinToString(" · ") { "${it.key} ${Pricing.formatUsd(it.value)}" },
@@ -77,35 +129,27 @@ fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
                 if (plan.mode == OrchestratorMode.FULL_MULTI_AGENT && plan.reviewRound > 0) {
                     Text("İnceleme turu: ${plan.reviewRound}/${vm.settings.orchMaxReviewRounds}", style = Mono.tiny, color = coder.muted)
                 }
-            }
-            val busy = vm.running
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                when (plan.state) {
-                    PlanState.AWAITING_APPROVAL -> {
-                        Button(onClick = { vm.startPlan() }, enabled = !busy) { Text("Planı Başlat") }
-                        OutlinedButton(onClick = { editing = true }, enabled = !busy) { Text("Düzenle") }
-                        TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
-                    }
-                    PlanState.RUNNING -> {
-                        OutlinedButton(onClick = { vm.pausePlan() }, enabled = !vm.pauseRequested) {
-                            Text(if (vm.pauseRequested) "Bu adımdan sonra duracak" else "Duraklat")
+                val busy = vm.running
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    when (plan.state) {
+                        PlanState.AWAITING_APPROVAL -> {
+                            Button(onClick = { vm.startPlan() }, enabled = !busy) { Text("Planı Başlat") }
+                            OutlinedButton(onClick = { editing = true }, enabled = !busy) { Text("Düzenle") }
+                            TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
                         }
-                        TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
-                    }
-                    PlanState.PAUSED -> {
-                        val failed = plan.tasks.any { it.status == TaskStatus.FAILED }
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { vm.startPlan() }, enabled = !busy) { Text(if (failed) "Tekrar Dene" else "Devam Et") }
-                                OutlinedButton(onClick = { editing = true }, enabled = !busy) { Text(if (failed) "Yönlendirme Ekle" else "Düzenle") }
+                        PlanState.RUNNING -> {
+                            OutlinedButton(onClick = { vm.pausePlan() }, enabled = !vm.pauseRequested) {
+                                Text(if (vm.pauseRequested) "Bu adımdan sonra duracak" else "Duraklat")
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (failed) TextButton(onClick = { vm.askArchitect() }, enabled = !busy) { Text("Mimar'a Sor") }
-                                TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
-                            }
+                            TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
                         }
+                        PlanState.PAUSED -> {
+                            Button(onClick = { vm.startPlan() }, enabled = !busy) { Text("Devam Et") }
+                            OutlinedButton(onClick = { editing = true }, enabled = !busy) { Text("Düzenle") }
+                            TextButton(onClick = { vm.cancelPlan() }) { Text("İptal", color = coder.warn) }
+                        }
+                        else -> TextButton(onClick = { vm.dismissPlan() }) { Text("Kartı kapat") }
                     }
-                    else -> TextButton(onClick = { vm.dismissPlan() }) { Text("Kartı kapat") }
                 }
             }
         }
@@ -121,10 +165,18 @@ private fun TaskRow(t: SubTask) {
         TaskStatus.FAILED -> coder.warn
         else -> coder.muted
     }
-    Row(verticalAlignment = Alignment.Top) {
-        Text(t.status.icon, color = color, style = Mono.body, modifier = Modifier.width(22.dp))
+    val icon = when (t.status) {
+        TaskStatus.DONE -> Icons.Rounded.CheckCircleOutline
+        TaskStatus.RUNNING -> Icons.Rounded.PlayCircleOutline
+        TaskStatus.FAILED -> Icons.Rounded.ErrorOutline
+        TaskStatus.SKIPPED -> Icons.Rounded.RemoveCircleOutline
+        else -> Icons.Rounded.RadioButtonUnchecked
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = color, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
-            Text((if (t.fix) "🔧 " else "") + "${t.id} · ${t.title}", style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text((if (t.fix) "onarım · " else "") + "${t.id} · ${t.title}", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(listOfNotNull(
                 t.ownedFiles.joinToString { it.substringAfterLast('/') },
                 t.dependsOn.takeIf { it.isNotEmpty() }?.let { "← ${it.joinToString()}" },
@@ -160,8 +212,7 @@ private fun PlanEditor(plan: OrchestratorPlan, onSave: (OrchestratorPlan) -> Uni
                         }
                         if (!locked && t.status != TaskStatus.SKIPPED) {
                             OutlinedTextField(t.description, { d -> tasks = tasks.map { if (it.id == t.id) it.copy(description = d) else it } },
-                                label = { Text(if (t.status == TaskStatus.FAILED) "Açıklama / Uygulayıcı'ya yönlendirme" else "Açıklama") },
-                                minLines = 2, modifier = Modifier.fillMaxWidth())
+                                label = { Text("Açıklama") }, minLines = 2, modifier = Modifier.fillMaxWidth())
                         }
                     }
                 }

@@ -1,11 +1,20 @@
 package com.suarez.coder.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.Icon
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -96,25 +105,29 @@ fun MarkdownText(md: String, modifier: Modifier = Modifier) {
         for (b in splitBlocks(md)) {
             when (b) {
                 is Block.Text -> SelectionContainer { Text(inline(b.text, codeColor), style = MaterialTheme.typography.bodyMedium) }
-                is Block.Code -> Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.fillMaxWidth(),
+                is Block.Code -> Column(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(coder.codeBg)
+                        .border(1.dp, coder.border, RoundedCornerShape(10.dp)),
                 ) {
-                    Column {
-                        Row(Modifier.fillMaxWidth().padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(b.lang.ifBlank { "kod" }, style = MaterialTheme.typography.labelSmall)
-                            TextButton(onClick = { clipboard.setText(AnnotatedString(b.code)) }) { Text("Kopyala") }
+                    Row(Modifier.fillMaxWidth().padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(b.lang.ifBlank { "kod" }, style = MaterialTheme.typography.labelSmall, color = coder.muted)
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(b.code)) }) {
+                            Icon(Icons.Outlined.ContentCopy, null, tint = coder.muted, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Kopyala", style = MaterialTheme.typography.labelSmall, color = coder.muted)
                         }
-                        SelectionContainer {
-                            Text(
-                                b.code,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.sp,
-                                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
-                            )
-                        }
+                    }
+                    SelectionContainer {
+                        Text(
+                            b.code,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                        )
                     }
                 }
             }

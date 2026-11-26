@@ -30,13 +30,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -46,12 +50,27 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.outlined.AccountBalanceWallet
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.CheckCircleOutline
+import androidx.compose.material.icons.rounded.Difference
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.PlayCircleOutline
+import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.material3.DrawerValue
@@ -86,7 +105,6 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -160,10 +178,14 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val listState = rememberLazyListState()
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion // recompose when settings change
 
-    // Rebuilt only when the messages change (not on every keystroke or status update).
-    val items by remember { derivedStateOf { buildItems(vm.messages) } }
-    val lastRoute by remember { derivedStateOf { vm.messages.lastOrNull { it is ChatMessage.RouteInfo } } }
+    val items = buildItems(vm.messages)
+    val lastRoute = vm.messages.lastOrNull { it is ChatMessage.RouteInfo }
     val lastToolsKey = items.lastOrNull { it is DItem.Tools }?.key
+    // APK links already shown on an assistant bubble; the tool-output card must not repeat them.
+    val shownApkUrls = remember(items) {
+        items.filterIsInstance<DItem.Msg>().mapNotNull { (it.m as? ChatMessage.Assistant)?.text }
+            .flatMap { ApkLinks.find(it) }.map { it.first }.toSet()
+    }
 
     LaunchedEffect(vm.messages.size, vm.running) {
         val count = items.size + if (vm.running) 1 else 0
@@ -192,36 +214,26 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (items.isEmpty()) item { EmptyState() }
-                items(items, key = { it.key }, contentType = { if (it is DItem.Tools) "tools" else (it as DItem.Msg).m::class.simpleName }) { item ->
+                items(items, key = { it.key }) { item ->
                     when (item) {
                         is DItem.Tools -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             ToolGroupCard(item, active = vm.running && item.key == lastToolsKey)
-                            val results = item.calls.mapNotNull { it.second?.content }.joinToString("\n")
-                            ApkActions(vm, results)
-                            CloudResultCards(vm, results)
+                            ApkActions(vm, item.calls.mapNotNull { it.second?.content }.joinToString("\n"), skipUrls = shownApkUrls)
                         }
                         is DItem.Msg -> when (val m = item.m) {
-                            is ChatMessage.User -> UserBubble(com.suarez.coder.docs.DocumentReader.collapse(m.text), m.images)
+                            is ChatMessage.User -> UserBubble(m.text, m.images)
                             is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 MarkdownText(m.text)
                                 ApkActions(vm, m.text)
                             }
-                            is ChatMessage.Notice -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                val cp = com.suarez.coder.agent.Checkpoints.find(m.detail)
-                                if (cp != null) CheckpointItem(vm, m.text, cp)
-                                else {
-                                    NoticeItem(m.text, m.detail, m.isError)
-                                    m.detail?.let { CloudResultCards(vm, it) }
-                                }
-                            }
-                            is ChatMessage.Summary -> NoticeItem("🗜 Eski mesajlar özetlendi", m.text, false)
+                            is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
+                            is ChatMessage.Summary -> NoticeItem("Eski mesajlar özetlendi", m.text, false)
                             is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
-                            is ChatMessage.ContextBlock -> NoticeItem("📎 Bağlam: ${m.label}", m.text.take(20_000), false)
+                            is ChatMessage.ContextBlock -> NoticeItem("Bağlam: ${m.label}", m.text.take(20_000), false)
                             else -> Unit
                         }
                     }
                 }
-                if (!vm.running && vm.canRate && items.isNotEmpty()) item(key = "rate") { RateRow(vm) }
                 vm.activePlan?.let { plan -> item(key = "plan-${plan.id}") { PlanCard(vm, plan) } }
                 if (vm.running) item(key = "running") { RunningRow(vm) }
             }
@@ -229,15 +241,6 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 Text(it, style = Mono.tiny, color = coder.muted, maxLines = 2,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp))
             }
-            vm.priceAlerts.firstOrNull()?.let { a ->
-                Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
-                    .border(1.dp, coder.border, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text(a, style = Mono.tiny, modifier = Modifier.weight(1f), maxLines = 3)
-                    TextButton(onClick = { vm.dismissPriceAlert(a) }) { Text("Tamam", style = Mono.tiny) }
-                }
-            }
-            TodoCard(vm)
             ControlBar(vm) { showSheet = true }
             val context = LocalContext.current
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(ImagePrep.MAX_IMAGES)) { uris ->
@@ -251,25 +254,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 }
             }
             if (vm.attachments.isNotEmpty()) AttachmentRow(vm.attachments) { vm.removeImage(it) }
-            val docPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> vm.addDocuments(uris) }
-            if (vm.docs.isNotEmpty()) DocumentRow(vm)
-            SlashSuggestions(input, vm.settings.promptTemplates + vm.skills.filter { it.enabled }.map { "/" + it.name to it.description }) { text ->
-                input = if (text.startsWith("/")) text.substringBefore(' ') + " " else text
-                vm.onInputChanged(input)
-            }
-            val atWord = Regex("@([^\\s@]*)$").find(input) != null
-            LaunchedEffect(atWord) { if (atWord) vm.loadRepoPaths() }
-            if (atWord) MentionSuggestions(com.suarez.coder.agent.Mentions.suggestions(input, vm.repoPaths)) { token ->
-                input = input.replace(Regex("@([^\\s@]*)$"), token) + if (token.endsWith("://")) "" else " "
-                vm.onInputChanged(input)
-            }
-            InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty() || vm.docs.any { it.text != null },
-                enhancing = vm.enhancing,
-                onEnhance = { vm.enhancePrompt(input) { better -> input = better; vm.onInputChanged(better) } },
-                onDoc = {
-                    if (vm.docs.size >= com.suarez.coder.docs.DocumentReader.MAX_DOCS) Toast.makeText(context, "En fazla ${com.suarez.coder.docs.DocumentReader.MAX_DOCS} belge", Toast.LENGTH_SHORT).show()
-                    else docPicker.launch(arrayOf("*/*"))
-                },
+            SlashSuggestions(input, vm.settings.promptTemplates) { text -> input = text; vm.onInputChanged(text) }
+            InputRow(input, running = vm.running, hasAttachments = vm.attachments.isNotEmpty(),
                 onChange = { input = it; vm.onInputChanged(it) },
                 onSend = { vm.send(input); if (vm.visionWarning == null) input = "" },
                 onStop = { vm.stop() },
@@ -297,6 +283,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
+            SystemBarsEffect()
             ProfileSheet(vm, onDone = { showProfiles = false })
         }
     }
@@ -307,6 +294,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
+            SystemBarsEffect()
             ControlSheet(vm, onOpenContext = { showSheet = false; showContext = true })
         }
     }
@@ -339,34 +327,35 @@ private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit, onMenu: ()
     val cost = vm.agent.sessionCost(vm.messages)
     val calls = vm.messages.filterIsInstance<ChatMessage.UsageRecord>().filter { it.role != "cache" && it.role != "decision" }
     val hit = vm.agent.cacheHitRate(calls)
-    TopAppBar(
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-        navigationIcon = { IconButton(onClick = onMenu) { Icon(Icons.Default.Menu, "Sohbetler") } },
-        title = {
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Coder", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.width(8.dp))
-                    Box(Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onRepo)) {
-                        Badge((repo ?: "repo yok") + " ▾", if (repo != null) coder.editor else coder.muted)
-                    }
-                }
-                Row {
-                    Text(Pricing.formatUsd(cost), style = Mono.small, color = coder.cost)
-                    Text(" · ${Pricing.formatTry(cost * s.usdTry)}", style = Mono.small, color = coder.muted)
-                    if (hit != null) {
-                        val pct = (hit * 100).toInt()
-                        Text(" · Önbellek ", style = Mono.small, color = coder.muted)
-                        Text("%$pct", style = Mono.small, color = cacheColor(hit))
-                    }
-                }
+    val subtitle = buildString {
+        append(Pricing.formatUsd(cost))
+        append(" · ").append(Pricing.formatTry(cost * s.usdTry))
+        if (hit != null) append(" · Önbellek %").append((hit * 100).toInt())
+    }
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onMenu) { Icon(Icons.Default.Menu, "Sohbetler", tint = coder.muted) }
+            Column(
+                Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable(onClick = onRepo).padding(horizontal = 4.dp),
+            ) {
+                Text(
+                    (repo ?: "repo yok") + " ▾",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (repo != null) coder.editor else coder.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(subtitle, style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-        },
-        actions = {
-            IconButton(onClick = { vm.newChat() }) { Icon(Icons.Default.Add, "Yeni sohbet") }
-            IconButton(onClick = onOpenSettings) { Icon(Icons.Default.Settings, "Ayarlar") }
-        },
-    )
+            IconButton(onClick = { vm.newChat() }) { Icon(Icons.Rounded.Add, "Yeni sohbet", tint = coder.muted) }
+            IconButton(onClick = onOpenSettings) { Icon(Icons.Outlined.Settings, "Ayarlar", tint = coder.muted) }
+        }
+        HorizontalDivider(color = coder.border, thickness = 0.5.dp)
+    }
 }
 
 @Composable
@@ -385,8 +374,7 @@ fun Badge(text: String, color: Color) {
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier
-            .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-            .background(color.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
+            .border(1.dp, coder.border, RoundedCornerShape(6.dp))
             .padding(horizontal = 6.dp, vertical = 1.dp),
     )
 }
@@ -400,35 +388,36 @@ private fun thinkingShort(level: String) = when (level) {
 @Composable
 private fun ControlBar(vm: ChatViewModel, onOpen: () -> Unit) {
     val s = vm.settings
+    val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
+    val parts = buildList {
+        if (s.architectMode) {
+            add("Mimar: ${shortModel(vm.agent.architectRef().model)}")
+            add("Uyg: ${shortModel(vm.agent.editorRef().model)}")
+        } else {
+            add("Model: ${shortModel(vm.agent.singleRef().model)}")
+        }
+        add("Düşünme: ${thinkingShort(s.thinkingLevel)}")
+        add("Bağlam: ${s.contextFiles.size}")
+        if (s.smartRouting) add("Akıllı")
+        if (s.economyMode) add("Flex")
+        if (orch != com.suarez.coder.orchestrator.OrchestratorMode.OFF) add("Ork: ${orch.short}")
+    }
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-            .border(1.dp, coder.border, RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
             .clickable(onClick = onOpen)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-            if (s.architectMode) {
-                Text("Mimar: ", style = Mono.small, color = coder.muted)
-                Text(shortModel(vm.agent.architectRef().model), style = Mono.small, color = coder.architect)
-                Text(" · Uyg: ", style = Mono.small, color = coder.muted)
-                Text(shortModel(vm.agent.editorRef().model), style = Mono.small, color = coder.editor)
-            } else {
-                Text("Model: ", style = Mono.small, color = coder.muted)
-                Text(shortModel(vm.agent.singleRef().model), style = Mono.small, color = coder.architect)
-            }
-            Text(" · ${thinkingShort(s.thinkingLevel)} · Bağlam: ${s.contextFiles.size}", style = Mono.small, color = coder.muted)
-            if (s.smartRouting) Text(" · ⚡", style = Mono.small)
-            if (s.economyMode) Text(" · Flex", style = Mono.small, color = coder.cost)
-            val orch = com.suarez.coder.orchestrator.OrchestratorMode.of(s.orchestratorMode)
-            if (orch != com.suarez.coder.orchestrator.OrchestratorMode.OFF) Text(" · Ork: ${orch.short}", style = Mono.small, color = coder.architect)
-            vm.agent.activeMode()?.let { Text(" · Mod: ${it.name}", style = Mono.small, color = coder.editor) }
-            if (vm.backgroundRuns.isNotEmpty()) Text(" · Arka plan: ${vm.backgroundRuns.size}", style = Mono.small, color = coder.muted)
-        }
-        Icon(Icons.Default.KeyboardArrowUp, "Kontroller", tint = coder.muted, modifier = Modifier.size(18.dp))
+        Text(
+            parts.joinToString(" · "),
+            style = Mono.tiny,
+            color = coder.muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(Icons.Default.KeyboardArrowUp, "Kontroller", tint = coder.muted, modifier = Modifier.size(16.dp))
     }
 }
 
@@ -442,45 +431,53 @@ private fun InputRow(
     onStop: () -> Unit,
     onPick: () -> Unit,
     onMic: () -> Unit,
-    onDoc: () -> Unit = {},
-    enhancing: Boolean = false,
-    onEnhance: () -> Unit = {},
 ) {
-    Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp, top = 2.dp), verticalAlignment = Alignment.Bottom) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .navigationBarsPadding()
+            .clip(RoundedCornerShape(24.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, coder.border, RoundedCornerShape(24.dp))
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onPick, enabled = !running, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Outlined.Image, "Görsel ekle", tint = coder.muted, modifier = Modifier.size(20.dp))
+        }
         OutlinedTextField(
             value = text,
             onValueChange = onChange,
-            modifier = Modifier.weight(1f).heightIn(max = 180.dp),
-            placeholder = { Text("Ne yapmamı istersin?") },
-            // Thumb-reachable extras inside the field: screenshots (left) and dictation (right).
-            leadingIcon = {
-                Row {
-                    IconButton(onClick = onPick, enabled = !running) { Text("🖼", fontSize = 18.sp) }
-                    IconButton(onClick = onDoc, enabled = !running) { Icon(Icons.Outlined.Add, "Belge ekle", tint = coder.muted) }
-                }
-            },
-            trailingIcon = {
-                Row {
-                    if (text.isNotBlank()) IconButton(onClick = onEnhance, enabled = !running && !enhancing) {
-                        if (enhancing) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Outlined.Edit, "İsteği iyileştir", tint = coder.muted)
-                    }
-                    IconButton(onClick = onMic, enabled = !running) { Text("🎙", fontSize = 18.sp) }
-                }
-            },
-            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.weight(1f).heightIn(max = 160.dp),
+            placeholder = { Text("Ne yapmamı istersin?", style = MaterialTheme.typography.bodyMedium, color = coder.muted) },
+            textStyle = MaterialTheme.typography.bodyMedium,
+            maxLines = 6,
             colors = OutlinedTextFieldDefaults.colors(
-                unfocusedBorderColor = coder.border,
-                unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                focusedContainerColor = MaterialTheme.colorScheme.surface,
+                focusedBorderColor = Color.Transparent,
+                unfocusedBorderColor = Color.Transparent,
+                disabledBorderColor = Color.Transparent,
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent,
+                disabledContainerColor = Color.Transparent,
             ),
         )
-        Spacer(Modifier.width(8.dp))
+        IconButton(onClick = onMic, enabled = !running, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Outlined.Mic, "Sesle yaz", tint = coder.muted, modifier = Modifier.size(20.dp))
+        }
+        Spacer(Modifier.width(2.dp))
         if (running) {
-            FilledIconButton(onClick = onStop, modifier = Modifier.size(52.dp)) { Icon(Icons.Default.Close, "Durdur") }
+            FilledIconButton(onClick = onStop, shape = RoundedCornerShape(24.dp), modifier = Modifier.size(34.dp)) {
+                Icon(Icons.Rounded.Stop, "Durdur", modifier = Modifier.size(20.dp))
+            }
         } else {
-            FilledIconButton(onClick = onSend, enabled = text.isNotBlank() || hasAttachments, modifier = Modifier.size(52.dp)) {
-                Icon(Icons.AutoMirrored.Filled.Send, "Gönder")
+            FilledIconButton(
+                onClick = onSend,
+                enabled = text.isNotBlank() || hasAttachments,
+                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier.size(34.dp),
+            ) {
+                Icon(Icons.Rounded.ArrowUpward, "Gönder", modifier = Modifier.size(20.dp))
             }
         }
     }
@@ -491,9 +488,7 @@ private fun InputRow(
 private fun SlashSuggestions(input: String, templates: List<Pair<String, String>>, onPick: (String) -> Unit) {
     if (!input.startsWith("/") || input.contains(' ') || input.contains('\n')) return
     val query = input.removePrefix("/").lowercase()
-    // Skills are listed as "/name" → description; picking one inserts "/name " for the user to complete.
-    val matches = templates.map { (n, t) -> if (n.startsWith("/")) n.removePrefix("/") to "$n $t" else n to t }
-        .filter { it.first.lowercase().startsWith(query) }.distinctBy { it.first }
+    val matches = templates.filter { it.first.lowercase().startsWith(query) }
     if (matches.isEmpty()) return
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -527,7 +522,7 @@ private fun Thumb(path: String, size: Int, modifier: Modifier = Modifier) {
             modifier = modifier.size(size.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, coder.border, RoundedCornerShape(8.dp)))
     } else {
         Box(modifier.size(size.dp).border(1.dp, coder.border, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-            Text("🖼", color = coder.muted)
+            Icon(Icons.Outlined.Image, null, tint = coder.muted, modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -552,87 +547,21 @@ private fun AttachmentRow(paths: List<String>, onRemove: (String) -> Unit) {
     }
 }
 
-/** "Buraya geri dön": the branch head saved before the agent's first write in that run. */
-@Composable
-private fun CheckpointItem(vm: ChatViewModel, text: String, p: com.suarez.coder.agent.Checkpoints.Point) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(text, style = Mono.tiny, color = coder.muted, modifier = Modifier.weight(1f), maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-        TextButton(onClick = { vm.rewind(p) }, enabled = !vm.running) { Text("Buraya geri dön", style = Mono.tiny) }
-    }
-}
-
-/** The agent's task list (update_todos) for the current request. */
-@Composable
-private fun TodoCard(vm: ChatViewModel) {
-    val items = remember(vm.messages.size) { com.suarez.coder.agent.Todos.latest(vm.messages) }
-    if (items.isEmpty()) return
-    val done = items.count { it.status == com.suarez.coder.agent.Todos.Status.DONE }
-    if (done == items.size && !vm.running) return
-    var open by remember { mutableStateOf(true) }
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
-            .border(1.dp, coder.border, RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(10.dp))
-            .clickable { open = !open }.padding(horizontal = 10.dp, vertical = 6.dp),
-    ) {
-        Text("Görevler $done/${items.size}", style = Mono.small, color = coder.muted)
-        if (open) items.forEach { i ->
-            val (mark, color) = when (i.status) {
-                com.suarez.coder.agent.Todos.Status.DONE -> "[x]" to coder.muted
-                com.suarez.coder.agent.Todos.Status.IN_PROGRESS -> "[>]" to MaterialTheme.colorScheme.onSurface
-                com.suarez.coder.agent.Todos.Status.PENDING -> "[ ]" to coder.muted
-            }
-            Text("$mark ${i.text}", style = Mono.small, color = color, maxLines = 2)
-        }
-    }
-}
-
-@Composable
-private fun MentionSuggestions(items: List<String>, onPick: (String) -> Unit) {
-    if (items.isEmpty()) return
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        items.forEach { t ->
-            Text(t, style = Mono.small, maxLines = 1,
-                modifier = Modifier.border(1.dp, coder.border, RoundedCornerShape(8.dp)).clickable { onPick(t) }.padding(horizontal = 8.dp, vertical = 5.dp))
-        }
-    }
-}
-
-/** Documents waiting to be sent: name, state, and remove. */
-@Composable
-private fun DocumentRow(vm: ChatViewModel) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)) {
-        vm.docs.forEach { d ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(d.name, style = Mono.small, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    Text(d.busy?.let { "$it…" } ?: d.error ?: "${d.text?.length ?: 0} karakter okundu",
-                        style = Mono.tiny, color = if (d.error != null) MaterialTheme.colorScheme.error else coder.muted, maxLines = 3)
-                }
-                TextButton(onClick = { vm.removeDocument(d.id) }) { Text("Kaldır") }
-            }
-        }
-        vm.docStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
-    }
-}
-
 /** "Download & install" buttons for APK links found in [text]. */
 @Composable
-internal fun ApkActions(vm: ChatViewModel, text: String) {
+private fun ApkActions(vm: ChatViewModel, text: String, skipUrls: Set<String> = emptySet()) {
     if (!text.contains("http")) return
-    val links = remember(text) { ApkLinks.find(text) }
+    val links = remember(text, skipUrls) { ApkLinks.find(text).filter { it.first !in skipUrls } }
     if (links.isEmpty()) return
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         links.forEach { (url, target) ->
             val state = vm.downloads[url]
             val label = when (state) {
-                null -> "⬇ İndir ve Kur"
+                null -> "İndir ve Kur"
                 is DownloadState.Running -> "İndiriliyor %${state.percent}"
-                is DownloadState.Ready -> "📦 Kur"
-                is DownloadState.Failed -> "↻ Tekrar dene"
+                is DownloadState.Ready -> "Kur"
+                is DownloadState.Failed -> "Tekrar dene"
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(
@@ -674,29 +603,16 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
     val s = vm.settings
     @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion
     val options = vm.modelOptions()
-    val priceOf: (ModelRef) -> String = { vm.priceLabel(it) }
+    val priceOf: (ModelRef) -> String = { ref ->
+        val p = vm.agent.price(ref.model)
+        String.format(Locale.US, "$%.2f / $%.2f 1M", p.input, p.output) + if (vm.agent.supportsVision(ref)) " · görsel" else ""
+    }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).navigationBarsPadding()
             .padding(bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Çalışma ayarları", style = MaterialTheme.typography.titleMedium)
-        var showTimeline by remember { mutableStateOf(false) }
-        if (vm.timeline.isNotEmpty()) TextButton(onClick = { showTimeline = true }) { Text("Son görevin zaman çizelgesi") }
-        if (showTimeline) TimelineDialog(vm.timeline) { showTimeline = false }
-        val customList = vm.customModes()
-        if (customList.isNotEmpty()) {
-            Text("Mod", style = MaterialTheme.typography.labelLarge, color = coder.muted)
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                (listOf("" to "Otomatik") + customList.map { it.name to it.name }).forEach { (key, label) ->
-                    val on = s.activeMode == key
-                    OutlinedButton(onClick = { vm.setActiveMode(key) },
-                        border = androidx.compose.foundation.BorderStroke(1.dp, if (on) MaterialTheme.colorScheme.onSurface else coder.border)) {
-                        Text(label, style = Mono.small, color = if (on) MaterialTheme.colorScheme.onSurface else coder.muted)
-                    }
-                }
-            }
-        }
         SheetSwitch("Mimar Modu", "Planı güçlü model, kodu ucuz model yazar", s.architectMode) { vm.setArchitectMode(it) }
         SheetSwitch("Akıllı Yönlendirme", "Yerel kural → Decision 1 → ucuz model", s.smartRouting) { vm.setSmartRouting(it) }
         SheetSwitch("Ekonomi (Flex %50)", "Yarı fiyat; yanıtlar dakikalar sürebilir", s.economyMode) { vm.setEconomy(it) }
@@ -709,7 +625,7 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
             ModelSelect("Model", vm.agent.singleRef(), coder.architect, options, priceOf) { vm.selectSingle(it) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { vm.refreshCatalog() }) { Text("↻ Model listesini güncelle") }
+            TextButton(onClick = { vm.refreshCatalog() }) { Text("Model listesini güncelle") }
             vm.catalogStatus?.let { Text(it, style = Mono.tiny, color = coder.muted) }
         }
 
@@ -734,7 +650,7 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
         Text(when (orch) {
             com.suarez.coder.orchestrator.OrchestratorMode.OFF -> "Normal akış; ek çağrı yok."
             com.suarez.coder.orchestrator.OrchestratorMode.LIGHT_SEQUENTIAL -> "Mimar'a giden işler alt görevlere bölünür, sırayla ve ayrı commit'lerle yapılır."
-            com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT -> "⚠️ Tam mod daha pahalıdır: Planlayıcı + paralel işçiler + İnceleyici ayrı çağrılar yapar."
+            com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT -> "Tam mod daha pahalıdır: Planlayıcı + paralel işçiler + İnceleyici ayrı çağrılar yapar."
         }, style = MaterialTheme.typography.bodySmall,
             color = if (orch == com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT) coder.cost else coder.muted)
 
@@ -763,14 +679,14 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
                 Text(if (s.contextFiles.isEmpty()) "Seçili dosya yok" else "${s.contextFiles.size} dosya sabitlendi",
                     style = MaterialTheme.typography.bodySmall, color = coder.muted)
             }
-            OutlinedButton(onClick = onOpenContext) { Text("📎 Düzenle") }
+            OutlinedButton(onClick = onOpenContext) { Text("Bağlamı düzenle") }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Önbellek", style = MaterialTheme.typography.bodyLarge)
                 Text(vm.agent.cacheStatus, style = Mono.tiny, color = coder.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            OutlinedButton(onClick = { vm.clearCache() }, enabled = !vm.running) { Text("🧹 Temizle") }
+            OutlinedButton(onClick = { vm.clearCache() }, enabled = !vm.running) { Text("Temizle") }
         }
     }
 }
@@ -787,7 +703,7 @@ private fun SheetSwitch(title: String, subtitle: String, value: Boolean, onChang
 }
 
 @Composable
-internal fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, priceOf: (ModelRef) -> String, onPick: (ModelRef) -> Unit) {
+private fun ModelSelect(label: String, current: ModelRef, accent: Color, options: List<ModelRef>, priceOf: (ModelRef) -> String, onPick: (ModelRef) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()
@@ -903,7 +819,7 @@ private fun RouteBar(m: ChatMessage.RouteInfo, isLatest: Boolean, onOverride: ()
             .padding(horizontal = 10.dp, vertical = 7.dp)
             .animateContentSize(),
     ) {
-        Text("⚡ " + m.text + if (m.detail != null) (if (open) "  ▴" else "  ▾") else "", style = Mono.small, color = MaterialTheme.colorScheme.onSurface)
+        Text(stripLeadingEmoji(m.text) + if (m.detail != null) (if (open) "  ▴" else "  ▾") else "", style = Mono.small, color = MaterialTheme.colorScheme.onSurface)
         if (open && m.detail != null) {
             Spacer(Modifier.size(4.dp))
             Text(m.detail, style = Mono.tiny, color = coder.muted)
@@ -916,26 +832,56 @@ private fun RouteBar(m: ChatMessage.RouteInfo, isLatest: Boolean, onOverride: ()
     }
 }
 
+private fun stripLeadingEmoji(s: String): String {
+    var i = 0
+    while (i < s.length) {
+        val cp = s.codePointAt(i)
+        val isEmoji = cp >= 0x1F000 || cp in 0x2600..0x27BF || cp in 0x2190..0x21FF ||
+            cp == 0xFE0F || cp == 0x200D || cp == 0x20E3
+        if (isEmoji) i += Character.charCount(cp) else break
+    }
+    return s.substring(i).trimStart()
+}
+
 @Composable
 private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
     var open by remember { mutableStateOf(false) }
-    val isCost = text.startsWith("💰")
+    val clean = remember(text) { stripLeadingEmoji(text) }
+    val isCost = text.startsWith("\uD83D\uDCB0") || clean.startsWith("Maliyet", ignoreCase = true)
     val diff = rememberDiffFiles(detail)
     var showDiff by remember { mutableStateOf(false) }
     if (showDiff && diff != null) DiffViewer(diff) { showDiff = false }
     Column(Modifier.fillMaxWidth().animateContentSize().clickable(enabled = detail != null) { open = !open }) {
-        Text(
-            text + if (detail != null) (if (open) "  ▴" else "  ▾") else "",
-            style = if (isCost) Mono.tiny else MaterialTheme.typography.bodySmall,
-            color = when {
-                isError -> coder.warn
-                isCost -> coder.cost
-                else -> coder.muted
-            },
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val icon = when {
+                isError -> Icons.Rounded.ErrorOutline
+                isCost -> Icons.Outlined.AccountBalanceWallet
+                text.startsWith("\uD83D\uDDFA") -> Icons.Outlined.Layers
+                else -> Icons.Outlined.Info
+            }
+            Icon(
+                icon, null,
+                tint = when {
+                    isError -> coder.warn
+                    isCost -> coder.cost
+                    else -> coder.muted
+                },
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                clean + if (detail != null) (if (open) "  ▴" else "  ▾") else "",
+                style = if (isCost) Mono.tiny else MaterialTheme.typography.bodySmall,
+                color = when {
+                    isError -> coder.warn
+                    isCost -> coder.cost
+                    else -> coder.muted
+                },
+            )
+        }
         if (diff != null) {
             TextButton(onClick = { showDiff = true }, contentPadding = PaddingValues(0.dp)) {
-                Text("🔍 Diff'i görüntüle", style = MaterialTheme.typography.labelMedium, color = coder.editor)
+                Text("Diff'i görüntüle", style = MaterialTheme.typography.labelMedium, color = coder.editor)
             }
         }
         if (open && detail != null) {
@@ -964,42 +910,54 @@ private fun ToolGroupCard(item: DItem.Tools, active: Boolean) {
     val pending = item.calls.firstOrNull { it.second == null }
     val inProgress = active && pending != null
     var userOpen by remember(item.key) { mutableStateOf<Boolean?>(null) }
-    // Open while running, fold into a one-line summary when done (unless the user toggled it).
     val expanded = userOpen ?: inProgress
     val repo = item.calls.firstNotNullOfOrNull { it.first.args.optString("repo").takeIf { r -> r.isNotBlank() } }
-
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, coder.border),
-        modifier = Modifier.fillMaxWidth().animateContentSize(),
+    val headline = when {
+        inProgress -> "${pending!!.first.name} çalışıyor (${total - item.calls.count { it.second == null } + 1}/$total)"
+        pending != null -> "${item.calls.count { it.second != null }}/$total işlem · durduruldu"
+        else -> "$total işlem tamamlandı" + if (errors > 0) " · $errors hata" else ""
+    }
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, RoundedCornerShape(12.dp))
+            .animateContentSize(),
     ) {
-        Column {
-            Row(
-                Modifier.fillMaxWidth().clickable { userOpen = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                when {
-                    inProgress -> CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.editor)
-                    errors > 0 -> Text("⚠", color = coder.warn)
-                    pending != null -> Text("■", color = coder.muted)
-                    else -> Text("✓", color = coder.cacheGood)
-                }
-                Spacer(Modifier.width(8.dp))
-                val headline = when {
-                    inProgress -> "${pending!!.first.name} çalışıyor (${total - item.calls.count { it.second == null } + 1}/$total)"
-                    pending != null -> "${item.calls.count { it.second != null }}/$total işlem · durduruldu"
-                    else -> "$total işlem tamamlandı" + if (errors > 0) " · $errors hata" else ""
-                }
-                Text(headline + (repo?.let { " · $it" } ?: ""), style = Mono.small, modifier = Modifier.weight(1f),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    color = if (errors > 0 && !inProgress) coder.warn else MaterialTheme.colorScheme.onSurface)
-                Text(if (expanded) "▴" else "▾", color = coder.muted)
+        Row(
+            Modifier.fillMaxWidth().clickable { userOpen = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            when {
+                inProgress -> CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.editor)
+                errors > 0 -> Icon(Icons.Rounded.ErrorOutline, null, tint = coder.warn, modifier = Modifier.size(14.dp))
+                pending != null -> Icon(Icons.Rounded.RemoveCircleOutline, null, tint = coder.muted, modifier = Modifier.size(14.dp))
+                else -> Icon(Icons.Rounded.CheckCircleOutline, null, tint = coder.cacheGood, modifier = Modifier.size(14.dp))
             }
-            if (expanded) {
-                HorizontalDivider(color = coder.border)
-                Column(Modifier.padding(vertical = 4.dp)) {
-                    item.calls.forEach { (call, result) -> ToolRow(call, result, isActive = inProgress && call === pending?.first) }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                headline + (repo?.let { " · $it" } ?: ""),
+                style = Mono.small,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = if (errors > 0 && !inProgress) coder.warn else MaterialTheme.colorScheme.onSurface,
+            )
+            Icon(
+                if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                null, tint = coder.muted, modifier = Modifier.size(16.dp),
+            )
+        }
+        if (expanded) {
+            Row(
+                Modifier.fillMaxWidth().height(IntrinsicSize.Min).padding(start = 18.dp, end = 12.dp, bottom = 10.dp),
+            ) {
+                Box(Modifier.width(1.dp).fillMaxHeight().background(coder.border))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    item.calls.forEach { (call, result) ->
+                        ToolRow(call, result, isActive = inProgress && call === pending?.first)
+                    }
                 }
             }
         }
@@ -1012,21 +970,45 @@ private fun ToolRow(call: ToolCall, result: ChatMessage.ToolResult?, isActive: B
     val diff = remember(call.id) { diffFilesFor(call.name, call.args) }
     var showDiff by remember(call.id) { mutableStateOf(false) }
     if (showDiff && diff != null) DiffViewer(diff) { showDiff = false }
-    Column(Modifier.fillMaxWidth().clickable { if (diff != null) showDiff = true else open = !open }.padding(horizontal = 12.dp, vertical = 5.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            when {
-                isActive -> CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp, color = coder.editor)
-                result == null -> Text("·", style = Mono.small, color = coder.muted)
-                result.isError -> Text("⚠", style = Mono.small, color = coder.warn)
-                else -> Text("✓", style = Mono.small, color = coder.cacheGood)
+    val failed = result?.isError == true
+    val stepIcon = when {
+        failed -> Icons.Rounded.ErrorOutline
+        result != null -> Icons.Rounded.CheckCircleOutline
+        isActive -> Icons.Rounded.PlayCircleOutline
+        else -> Icons.Rounded.AccountTree
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickable { if (diff != null) showDiff = true else open = !open },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (isActive) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = coder.architect)
+            } else {
+                Icon(
+                    stepIcon, null,
+                    tint = when {
+                        failed -> coder.warn
+                        result != null -> coder.cacheGood
+                        isActive -> coder.architect
+                        else -> coder.muted
+                    },
+                    modifier = Modifier.size(14.dp),
+                )
             }
             Spacer(Modifier.width(8.dp))
             Text(call.name, style = Mono.small, color = coder.editor)
             Spacer(Modifier.width(8.dp))
             Text(summarize(call), style = Mono.tiny, color = coder.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            if (diff != null) Text(" 🔍", style = Mono.tiny)
+            if (diff != null) {
+                TextButton(onClick = { showDiff = true }, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                    Icon(Icons.Rounded.Difference, null, tint = coder.editor, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Diff'i görüntüle", style = MaterialTheme.typography.labelSmall, color = coder.editor)
+                }
+            }
         }
-        if (diff != null && result?.isError == true) Text(result.content.take(300), style = Mono.tiny, color = coder.warn)
+        if (diff != null && failed) Text(result!!.content.take(300), style = Mono.tiny, color = coder.warn)
         if (open) {
             Spacer(Modifier.size(4.dp))
             Text("Parametreler", style = MaterialTheme.typography.labelSmall, color = coder.muted)
