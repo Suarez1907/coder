@@ -274,8 +274,12 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
         when (e.kind) {
             Experiment.Kind.MODEL -> {
                 val role = e.payload.optString("role"); val model = e.payload.optString("model")
-                val old = if (role == "architect") settings.architectModel else settings.editorModel
-                if (role == "architect") settings.architectModel = model else settings.editorModel = model
+                if (role == "architect") {
+                    store.addLog(EvoTier.MODEL, "Mimar modeli kilitli, deney uygulanmadı: ${e.title}")
+                    return
+                }
+                val old = settings.editorModel
+                settings.editorModel = model
                 store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}", undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).toString())
             }
             Experiment.Kind.RULE -> {
@@ -302,7 +306,9 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
     fun undo(json: String): Boolean {
         val o = runCatching { JSONObject(json) }.getOrNull() ?: return false
         when (o.optString("kind")) {
-            "MODEL" -> if (o.optString("role") == "architect") settings.architectModel = o.optString("old") else settings.editorModel = o.optString("old")
+            "MODEL" -> if (o.optString("role") == "architect") {
+                store.addLog(EvoTier.MODEL, "Mimar modeli kilitli, geri alma reddedildi.")
+            } else settings.editorModel = o.optString("old")
             "RULE" -> store.setPolicyRules(store.policyRules() - o.optString("text"))
             "SKILL" -> skills.setEnabled(o.optString("name"), false)
             "PROMPT" -> store.setPromptOverride(o.optString("section"), if (o.isNull("old")) null else o.optString("old"))
