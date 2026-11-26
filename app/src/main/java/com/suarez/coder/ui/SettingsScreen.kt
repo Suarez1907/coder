@@ -88,6 +88,8 @@ private enum class Page(
     CACHE("Önbellek & Bağlam", Icons.Outlined.Layers, "Context Caching, sıkıştırma, geçmiş"),
     GITHUB("GitHub & Bütçe", Icons.Outlined.AccountBalanceWallet, "Token, repo, onay, bütçe ve fiyatlar"),
     TEMPLATES("Komut şablonları", Icons.Outlined.Terminal, "Sohbette / ile açılan hazır istemler"),
+    EVOLUTION("Öz-gelişim", AutoAwesomeOutlined, "Otomatiğe dönüş-gelişim, K1-K3, evrim günlüğü ve PR'lar"),
+    SKILLS("Yetenekler & Eklentiler", ExtensionOutlined, "Yetenekler, bulut araçları ve GitHub'dan içe aktarma"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -122,6 +124,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.CACHE -> CachePage(vm)
                 Page.GITHUB -> GitHubPage(vm)
                 Page.TEMPLATES -> TemplatesPage(vm)
+                Page.EVOLUTION -> EvolutionPage(vm)
+                Page.SKILLS -> SkillsPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -162,7 +166,10 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
         Modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surface)
             .border(1.dp, coder.border, shape),
     ) {
-        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES)
+        val pages = listOf(
+            Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES,
+            Page.EVOLUTION, Page.SKILLS,
+        )
         pages.forEachIndexed { i, p ->
             Row(
                 Modifier.fillMaxWidth().clickable { open(p) }.padding(horizontal = 16.dp, vertical = 14.dp),
