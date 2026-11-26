@@ -123,6 +123,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     var similarFor: ((repo: String, request: String) -> String?)? = null
     /** CI error → fix memory (shared file; null without app storage). */
     val fixMemory: FixMemory? = filesDir?.let { FixMemory(java.io.File(it, "fixes.json")) }
+    /** CI ders defteri: aynı hata tekrar gelince sınıf + çözüm ipucu (null depolama yoksa). */
+    val ciKnowledge: com.suarez.coder.ci.CiKnowledgeBase? = filesDir?.let { com.suarez.coder.ci.CiKnowledgeBase(java.io.File(it, "ci-lessons.json")) }
 
     /** The user's ordered stronger models (keys present); falls back to the single escalation model. */
     fun escalationChain(): List<ModelRef> {

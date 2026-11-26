@@ -34,7 +34,11 @@ internal class CiController(private val agent: Agent) {
         if (com.suarez.coder.evolution.ExamRunner.ciPassed(text)) {
             st.lastFailed = false
             val sig = st.pendingSig
-            if (sig != null && settings.fixMemory && st.fixes.isNotEmpty()) agent.fixMemory?.record(FixMemory.Fix(st.pendingRepo, sig, st.fixes.joinToString("; ").take(800), System.currentTimeMillis()))
+            if (sig != null && settings.fixMemory && st.fixes.isNotEmpty()) {
+                val fix = st.fixes.joinToString("; ").take(800)
+                agent.fixMemory?.record(FixMemory.Fix(st.pendingRepo, sig, fix, System.currentTimeMillis()))
+                agent.ciKnowledge?.record(st.pendingRepo, sig, fix)
+            }
             st.pendingSig = null; st.fixes.clear()
             return result to cur
         }
