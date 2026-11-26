@@ -35,6 +35,16 @@ class WeeklyCycle(
         /** A cheaper pool model for a role, not tried yet: the default experiment when nothing else is queued. */
         fun cheaperModel(current: String, pool: List<String>, price: (String) -> Double, tried: Set<String>): String? =
             pool.filter { it != current && it !in tried && price(it) < price(current) * 0.8 }.minByOrNull { price(it) }
+
+        /**
+         * Roles whose model the user chose and no automatic run may replace. The architect is the top of the chain:
+         * a cheaper architect would silently weaken every plan, so its model changes only by hand.
+         */
+        val LOCKED_ROLES = setOf("architect")
+
+        /** True when a won experiment may be applied without asking (Auto-Ship). */
+        fun autoAdoptable(e: Experiment): Boolean =
+            e.kind != Experiment.Kind.MODEL || e.payload.optString("role") !in LOCKED_ROLES
     }
 
     private val agent = Agent(settings) // GitHub + pricing; not used for model calls
@@ -251,12 +261,15 @@ class WeeklyCycle(
             return "${exp.title}: ölçülemedi."
         }
         val won = Experiment.wins(b, c)
+        val locked = won && !autoAdoptable(exp)
         val state = when {
             !won -> Experiment.State.REJECTED
+            locked -> Experiment.State.PROPOSED
             settings.autonomyLevel >= 2 -> Experiment.State.ADOPTED
             else -> Experiment.State.PROPOSED
         }
-        val decided = exp.copy(state = state, decidedAt = System.currentTimeMillis(), baseline = b, candidate = c)
+        val decided = exp.copy(state = state, decidedAt = System.currentTimeMillis(), baseline = b, candidate = c,
+            note = if (locked) "Sınavı kazandı ama Mimar modeli kilitli: uygulamak için siz onaylayın." else exp.note)
         store.saveExperiment(decided)
         if (state == Experiment.State.ADOPTED) ExperimentApplier(settings, store, skills).apply(decided)
         store.addLog(EvoTier.EXAM, "${exp.title}: ${state.label} (mevcut $b, aday $c)")
@@ -274,9 +287,15 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
         when (e.kind) {
             Experiment.Kind.MODEL -> {
                 val role = e.payload.optString("role"); val model = e.payload.optString("model")
-                val old = if (role == "architect") settings.architectModel else settings.editorModel
-                if (role == "architect") settings.architectModel = model else settings.editorModel = model
-                store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}", undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).toString())
+                // Defence in depth: even a hand-started apply cannot swap the architect model automatically.
+                if (role in WeeklyCycle.LOCKED_ROLES) {
+                    store.addLog(EvoTier.MODEL, "Uygulanmadı (Mimar modeli kilitli): ${e.title}")
+                    return
+                }
+                val old = settings.editorModel
+                settings.editorModel = model
+                store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}",
+                    undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).put("new", model).toString())
             }
             Experiment.Kind.RULE -> {
                 val text = e.payload.optString("text")
@@ -302,7 +321,13 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
     fun undo(json: String): Boolean {
         val o = runCatching { JSONObject(json) }.getOrNull() ?: return false
         when (o.optString("kind")) {
-            "MODEL" -> if (o.optString("role") == "architect") settings.architectModel = o.optString("old") else settings.editorModel = o.optString("old")
+            "MODEL" -> {
+                if (o.optString("role") in WeeklyCycle.LOCKED_ROLES) return false
+                val old = o.optString("old"); if (old.isBlank()) return false
+                // The user picked another model after the adoption: an undo must not overwrite that choice.
+                if (o.has("new") && settings.editorModel != o.optString("new")) return false
+                settings.editorModel = old
+            }
             "RULE" -> store.setPolicyRules(store.policyRules() - o.optString("text"))
             "SKILL" -> skills.setEnabled(o.optString("name"), false)
             "PROMPT" -> store.setPromptOverride(o.optString("section"), if (o.isNull("old")) null else o.optString("old"))
