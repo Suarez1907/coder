@@ -13,31 +13,49 @@ package com.suarez.coder.diff
  * An empty SEARCH section creates a new file (or fills an empty one).
  */
 object SearchReplace {
-    data class Block(val path: String, val search: String, val replace: String, val index: Int)
+    enum class MatchTier { EXACT, WHITESPACE_NORMALIZED, LINE_ANCHOR }
+
+    data class Block(
+        val path: String,
+        val search: String,
+        val replace: String,
+        val index: Int,
+        val startLine: Int? = null
+    )
 
     data class ParseResult(val blocks: List<Block>, val errors: List<String>)
 
     data class Failure(val block: Block, val reason: String)
 
-    data class FileResult(val content: String, val applied: List<Block>, val failures: List<Failure>)
+    data class FileResult(
+        val content: String,
+        val applied: List<Block>,
+        val failures: List<Failure>,
+        val tiersUsed: Map<Int, MatchTier> = emptyMap()
+    )
 
-    private val searchRe = Regex("^\\s*<{5,9}\\s*SEARCH\\s*$")
+    private val searchRe = Regex("^\\s*<{5,9}\\s*SEARCH(?:\\s*(?:@L?|:)(\\d+))?\\s*$", RegexOption.IGNORE_CASE)
     private val dividerRe = Regex("^\\s*={5,9}\\s*$")
     private val replaceRe = Regex("^\\s*>{5,9}\\s*REPLACE\\s*$")
     private val fenceRe = Regex("^\\s*```.*$")
+    private val lineHintRe = Regex("(?:@L?|:)(\\d+)\\s*$")
 
-    fun parse(text: String): ParseResult {
+    fun parse(text: String, defaultStartLine: Int? = null): ParseResult {
         val lines = text.replace("\r\n", "\n").split("\n")
         val blocks = ArrayList<Block>()
         val errors = ArrayList<String>()
         var candidate: String? = null
+        var candidateLineHint: Int? = null
         var lastPath: String? = null
         var i = 0
         while (i < lines.size) {
             val line = lines[i]
-            if (searchRe.matches(line)) {
+            val searchMatch = searchRe.find(line)
+            if (searchMatch != null) {
                 val path = candidate ?: lastPath
-                val startLine = i + 1
+                val blockStartLine = i + 1
+                val inlineHint = searchMatch.groupValues.getOrNull(1)?.toIntOrNull()
+                val parsedStartLine = inlineHint ?: candidateLineHint ?: defaultStartLine
                 val search = ArrayList<String>()
                 i++
                 while (i < lines.size && !dividerRe.matches(lines[i])) {
@@ -45,8 +63,9 @@ object SearchReplace {
                     search += lines[i]; i++
                 }
                 if (i >= lines.size || !dividerRe.matches(lines[i])) {
-                    errors += "Blok (satır $startLine): '=======' ayırıcısı bulunamadı."
+                    errors += "Blok (satır $blockStartLine): '=======' ayırıcısı bulunamadı."
                     candidate = null
+                    candidateLineHint = null
                     continue
                 }
                 i++
@@ -56,36 +75,53 @@ object SearchReplace {
                     replace += lines[i]; i++
                 }
                 if (i >= lines.size || !replaceRe.matches(lines[i])) {
-                    errors += "Blok (satır $startLine): '>>>>>>> REPLACE' bitişi bulunamadı."
+                    errors += "Blok (satır $blockStartLine): '>>>>>>> REPLACE' bitişi bulunamadı."
                     candidate = null
+                    candidateLineHint = null
                     continue
                 }
                 if (path == null) {
-                    errors += "Blok (satır $startLine): dosya yolu yok. Yolu SEARCH satırının hemen üstüne yazın."
+                    errors += "Blok (satır $blockStartLine): dosya yolu yok. Yolu SEARCH satırının hemen üstüne yazın."
                 } else {
-                    blocks += Block(path, search.joinToString("\n"), replace.joinToString("\n"), blocks.size + 1)
+                    blocks += Block(
+                        path = path,
+                        search = search.joinToString("\n"),
+                        replace = replace.joinToString("\n"),
+                        index = blocks.size + 1,
+                        startLine = parsedStartLine
+                    )
                     lastPath = path
                 }
                 candidate = null
+                candidateLineHint = null
                 i++
                 continue
             }
             val t = line.trim()
-            if (t.isNotEmpty() && !fenceRe.matches(line)) candidate = cleanPath(t)
+            if (t.isNotEmpty() && !fenceRe.matches(line)) {
+                val cleaned = cleanPathWithLineHint(t)
+                candidate = cleaned.first
+                candidateLineHint = cleaned.second
+            }
             i++
         }
         return ParseResult(blocks, errors)
     }
 
-    private fun cleanPath(raw: String): String? {
+    private fun cleanPathWithLineHint(raw: String): Pair<String?, Int?> {
         var s = raw.trim().trim('`', '*', '"', '\'').trim()
         s = s.removePrefix("File:").removePrefix("Dosya:").trim()
-        // Remove all leading # characters and any whitespace after them (markdown headings)
         s = s.replace(Regex("^#+\\s*"), "").trim()
         s = s.trim('`', '*').trim()
         s = s.removePrefix("./")
-        if (s.isBlank() || s.length > 300) return null
-        return s
+        if (s.isBlank() || s.length > 300) return null to null
+        val hintMatch = lineHintRe.find(s)
+        val hint = hintMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (hintMatch != null) {
+            s = s.substring(0, hintMatch.range.first).trim()
+        }
+        if (s.isBlank() || s.length > 300) return null to null
+        return s to hint
     }
 
     /** Applies blocks for a single file in order. Failed blocks are reported, successful ones kept. */
@@ -93,11 +129,13 @@ object SearchReplace {
         var content = original?.replace("\r\n", "\n")
         val applied = ArrayList<Block>()
         val failures = ArrayList<Failure>()
+        val tiers = mutableMapOf<Int, MatchTier>()
         for (b in blocks) {
             if (b.search.isBlank()) {
                 if (content == null || content.isBlank()) {
                     content = b.replace + if (b.replace.endsWith("\n")) "" else "\n"
                     applied += b
+                    tiers[b.index] = MatchTier.EXACT
                 } else {
                     failures += Failure(b, "SEARCH bölümü boş ama dosya zaten var. Değiştirilecek mevcut satırları SEARCH'e yazın.")
                 }
@@ -107,57 +145,187 @@ object SearchReplace {
                 failures += Failure(b, "Dosya mevcut değil. Yeni dosya için SEARCH bölümünü boş bırakın.")
                 continue
             }
-            when (val r = replaceOnce(content, b.search, b.replace)) {
-                is Match.Ok -> { content = r.text; applied += b }
+            when (val r = replaceOnce(content, b.search, b.replace, b.startLine)) {
+                is Match.Ok -> {
+                    content = r.text
+                    applied += b
+                    tiers[b.index] = r.tierUsed
+                }
                 is Match.Err -> failures += Failure(b, r.reason)
             }
         }
-        return FileResult(content ?: "", applied, failures)
+        return FileResult(content ?: "", applied, failures, tiers)
     }
 
     sealed class Match {
-        data class Ok(val text: String) : Match()
+        data class Ok(val text: String, val tierUsed: MatchTier = MatchTier.EXACT) : Match()
         data class Err(val reason: String) : Match()
     }
 
     /** A SEARCH line that abbreviates the middle of a long region. */
     private fun isEllipsis(line: String) = line.trim() == "..." || line.trim() == "…"
 
-    fun replaceOnce(content: String, search: String, replace: String): Match {
+    fun replaceOnce(content: String, search: String, replace: String, startLine: Int? = null): Match {
         val sLines = search.split("\n")
-        if (sLines.count { isEllipsis(it) } == 1 && !content.contains(search)) return replaceAnchored(content, sLines, replace)
-        // 1) Exact match.
-        val exact = countOccurrences(content, search)
-        if (exact == 1) return Match.Ok(content.replaceFirst(search, replace))
-        if (exact > 1) return Match.Err("SEARCH metni dosyada $exact kez geçiyor; benzersiz olması için daha fazla satır ekleyin.")
+        if (sLines.count { isEllipsis(it) } == 1 && !content.contains(search)) {
+            return replaceAnchored(content, sLines, replace)
+        }
 
-        // 2) Line based: ignore trailing whitespace, then ignore indentation.
-        val fileLines = content.split("\n")
-        val searchLines = search.split("\n").let { trimBlankEdges(it) }
+        // Tier 1: EXACT match on CRLF normalized content
+        val normContent = content.replace("\r\n", "\n")
+        val normSearch = search.replace("\r\n", "\n")
+        val normReplace = replace.replace("\r\n", "\n")
+
+        val exactOccurrences = findExactLineIndices(normContent, normSearch)
+        if (exactOccurrences.size == 1) {
+            return Match.Ok(normContent.replaceFirst(normSearch, normReplace), MatchTier.EXACT)
+        }
+        if (exactOccurrences.size > 1) {
+            val linesStr = exactOccurrences.joinToString(", ")
+            return Match.Err("SEARCH metni dosyada ${exactOccurrences.size} kez geçiyor (satırlar: $linesStr); benzersiz olması için daha fazla satır ekleyin.")
+        }
+
+        val fileLines = normContent.split("\n")
+        val searchLines = normSearch.split("\n").let { trimBlankEdges(it) }
         if (searchLines.isEmpty()) return Match.Err("SEARCH bölümü yalnızca boş satırlardan oluşuyor.")
-        val replaceLines = replace.split("\n")
+        val replaceLines = normReplace.split("\n")
 
+        // Tier 2: WHITESPACE_NORMALIZED (trimEnd then trim)
         for (mode in 0..1) {
             val norm: (String) -> String = if (mode == 0) { s -> s.trimEnd() } else { s -> s.trim() }
             val target = searchLines.map(norm)
             val hits = ArrayList<Int>()
             for (start in 0..fileLines.size - target.size) {
                 var ok = true
-                for (k in target.indices) if (norm(fileLines[start + k]) != target[k]) { ok = false; break }
+                for (k in target.indices) {
+                    if (norm(fileLines[start + k]) != target[k]) { ok = false; break }
+                }
                 if (ok) hits += start
             }
-            if (hits.size > 1) return Match.Err("SEARCH metni dosyada ${hits.size} yerde eşleşiyor; daha fazla bağlam satırı ekleyin.")
+            if (hits.size > 1) {
+                val lineNums = hits.map { it + 1 }
+                return Match.Err("SEARCH metni dosyada ${hits.size} yerde eşleşiyor (satırlar: ${lineNums.joinToString(", ")}); daha fazla bağlam satırı ekleyin.")
+            }
             if (hits.size == 1) {
                 val start = hits[0]
-                val newLines = if (mode == 1) reindent(searchLines, fileLines.subList(start, start + target.size), replaceLines) else replaceLines
+                val newLines = reindent(searchLines, fileLines.subList(start, start + target.size), replaceLines)
                 val out = ArrayList<String>(fileLines.size)
                 out.addAll(fileLines.subList(0, start))
-                if (!(replace.isEmpty())) out.addAll(newLines)
+                if (normReplace.isNotEmpty()) out.addAll(newLines)
                 out.addAll(fileLines.subList(start + target.size, fileLines.size))
-                return Match.Ok(out.joinToString("\n"))
+                return Match.Ok(out.joinToString("\n"), MatchTier.WHITESPACE_NORMALIZED)
             }
         }
-        return Match.Err("SEARCH metni dosyada bulunamadı" + hint(fileLines, searchLines) + ". Dosyayı tekrar okuyup satırları birebir kopyalayın.")
+
+        // Tier 3: LINE_ANCHOR (startLine +/- 25 window, first 2 & last 2 anchor lines)
+        if (startLine != null && startLine > 0) {
+            val anchorMatch = matchLineAnchor(fileLines, searchLines, replaceLines, startLine)
+            if (anchorMatch is Match.Ok) return anchorMatch
+        }
+
+        // All 3 tiers failed: generate intelligent feedback with closest window
+        val windowHint = closestWindow(fileLines, searchLines, startLine, maxLines = 15)
+        return Match.Err("SEARCH metni dosyada bulunamadı. Dosyayı tekrar okuyup satırları birebir kopyalayın.\n$windowHint")
+    }
+
+    private fun findExactLineIndices(content: String, search: String): List<Int> {
+        val result = ArrayList<Int>()
+        var idx = content.indexOf(search)
+        while (idx >= 0) {
+            val lineNum = content.substring(0, idx).count { it == '\n' } + 1
+            result.add(lineNum)
+            idx = content.indexOf(search, idx + 1)
+        }
+        return result
+    }
+
+    private fun matchLineAnchor(
+        fileLines: List<String>,
+        searchLines: List<String>,
+        replaceLines: List<String>,
+        startLine: Int
+    ): Match? {
+        val nonBlankSearch = searchLines.filter { it.isNotBlank() }
+        if (nonBlankSearch.isEmpty()) return null
+
+        val headAnchors = nonBlankSearch.take(2).map { it.trim() }
+        val tailAnchors = nonBlankSearch.takeLast(2).map { it.trim() }
+
+        val center = startLine - 1
+        val winStart = (center - 25).coerceAtLeast(0)
+        val winEnd = (center + 25 + searchLines.size).coerceAtMost(fileLines.size)
+        if (winStart >= winEnd) return null
+
+        fun matchesPatternAt(idx: Int, pat: List<String>): Boolean {
+            if (idx + pat.size > winEnd) return false
+            return pat.indices.all { fileLines[idx + it].trim() == pat[it] }
+        }
+
+        val headMatches = (winStart until winEnd).filter { matchesPatternAt(it, headAnchors) }
+        if (headMatches.size != 1) return null
+        val hIdx = headMatches[0]
+
+        val tMatches = (hIdx + headAnchors.size until winEnd).filter { matchesPatternAt(it, tailAnchors) }
+        if (tMatches.size != 1) return null
+        val tIdx = tMatches[0] + tailAnchors.size
+
+        val regionSize = tIdx - hIdx
+        if (regionSize > searchLines.size + 10 || regionSize <= 0) return null
+
+        val region = fileLines.subList(hIdx, tIdx)
+        val newLines = reindent(searchLines, region, replaceLines)
+        val out = ArrayList<String>(fileLines.size)
+        out.addAll(fileLines.subList(0, hIdx))
+        if (replaceLines.isNotEmpty() && (replaceLines.size > 1 || replaceLines[0].isNotEmpty())) {
+            out.addAll(newLines)
+        }
+        out.addAll(fileLines.subList(tIdx, fileLines.size))
+        return Match.Ok(out.joinToString("\n"), MatchTier.LINE_ANCHOR)
+    }
+
+    private fun closestWindow(
+        fileLines: List<String>,
+        searchLines: List<String>,
+        startLine: Int?,
+        maxLines: Int = 15
+    ): String {
+        if (fileLines.isEmpty()) return "En yakın pencere: (dosya boş)"
+        val firstSearch = searchLines.firstOrNull { it.isNotBlank() }?.trim() ?: ""
+
+        val centerLineIdx = if (firstSearch.isNotEmpty()) {
+            var bestIdx = -1
+            var bestScore = -1
+            for (i in fileLines.indices) {
+                val f = fileLines[i].trim()
+                if (f.isEmpty()) continue
+                val score = commonTokenScore(f, firstSearch)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestIdx = i
+                }
+            }
+            if (bestScore > 0) bestIdx else ((startLine?.let { it - 1 }) ?: 0).coerceIn(0, fileLines.size - 1)
+        } else {
+            ((startLine?.let { it - 1 }) ?: 0).coerceIn(0, fileLines.size - 1)
+        }
+
+        val half = maxLines / 2
+        val start = (centerLineIdx - half).coerceAtLeast(0)
+        val end = (start + maxLines).coerceAtMost(fileLines.size)
+        val actualStart = (end - maxLines).coerceAtLeast(0)
+
+        val snippet = (actualStart until end).joinToString("\n") { idx ->
+            "${idx + 1}: ${fileLines[idx]}"
+        }
+        return "En yakın dosya penceresi (satırlar ${actualStart + 1}..$end):\n$snippet"
+    }
+
+    private fun commonTokenScore(a: String, b: String): Int {
+        if (a == b) return 1000
+        val tokensA = a.split(Regex("[^a-zA-Z0-9_]+")).filter { it.isNotBlank() }.toSet()
+        val tokensB = b.split(Regex("[^a-zA-Z0-9_]+")).filter { it.isNotBlank() }.toSet()
+        val common = tokensA.intersect(tokensB).size
+        return common * 10 - kotlin.math.abs(a.length - b.length)
     }
 
     /**
