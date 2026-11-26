@@ -59,7 +59,7 @@ data class Experiment(
             runCatching { State.valueOf(o.optString("state")) }.getOrDefault(State.QUEUED), o.optString("source"),
             o.optLong("created"), o.optLong("decided"),
             o.optJSONObject("base")?.let { ExamScore.fromJson(it) }, o.optJSONObject("cand")?.let { ExamScore.fromJson(it) },
-            o.optNullableString("note"),
+            o.optString("note").takeIf { it.isNotEmpty() && it != "null" },
         )
 
         fun model(role: String, model: String, source: String): Experiment {
@@ -72,7 +72,7 @@ data class Experiment(
             Experiment(kind = Kind.RULE, title = "Kural: " + text.take(80), payload = JSONObject().put("text", text.trim()), source = source)
 
         fun prompt(section: String, text: String, source: String) =
-            Experiment(kind = Kind.PROMPT, title = "İstem: ${com.suarez.coder.agent.PromptSections.label(section)} yeniden yazımı",
+            Experiment(kind = Kind.PROMPT, title = "İstem: $section yeniden yazımı",
                 payload = JSONObject().put("section", section).put("text", text), source = source)
 
         fun skill(name: String, source: String) =
@@ -89,27 +89,5 @@ data class Experiment(
             cand.passed == base.passed && cand.costUsd <= base.costUsd * 0.9 -> true
             else -> false
         }
-    }
-}
-
-/** A past task that ended well, replayable as an exam question. */
-data class ExamCase(val id: String, val repo: String, val baseSha: String, val request: String, val route: String)
-
-object ExamCases {
-    /** Successful code tasks with a known starting commit and CI, newest first, at most one per request text. */
-    fun from(traces: List<SessionTrace>, excluded: Set<String> = emptySet()): List<ExamCase> = traces
-        .filter { t -> Outcome.of(t) >= 0.8 && t.rating >= 0 && t.repo.isNotBlank() && t.baseSha != null && t.ciRuns > 0 }
-        .filter { (it.route ?: "").let { r -> r.startsWith("SIMPLE") || r.startsWith("COMPLEX") } && it.request.length >= 10 }
-        .filter { it.id !in excluded }
-        .sortedByDescending { it.at }
-        .distinctBy { it.request.lowercase().take(120) }
-        .map { ExamCase(it.id, it.repo, it.baseSha!!, it.request, it.route ?: "SIMPLE_EDIT") }
-
-    /** Up to [k] questions, spread over repositories. */
-    fun pick(cases: List<ExamCase>, k: Int): List<ExamCase> {
-        val byRepo = cases.groupBy { it.repo }.values.map { it.toMutableList() }
-        val out = ArrayList<ExamCase>()
-        while (out.size < k && byRepo.any { it.isNotEmpty() }) for (l in byRepo) if (l.isNotEmpty() && out.size < k) out += l.removeAt(0)
-        return out
     }
 }
