@@ -4,6 +4,7 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 
 ## Yapı
 - `agent/Agent.kt`: ana ajan döngüsü (`agentLoop`), araç çağrısı, yetki fazı kablolaması.
+- `ci/CiKnowledgeBase.kt`: CI ders defteri (belirti → sebep sınıfı → çözüm, hits); `Agent.ciKnowledge`, `CiController` yeşile dönünce kaydeder, hatada tekrar gelirse ipucu ekler.
 - `agent/ReadOnlyMismatchRecovery.kt`: READ_ONLY faz kararı + yetki kurtarma (1 yükseltme → Uygulayıcı'ya devir).
 - `tools/ToolRegistry.kt`: `accessError` (readOnly/allowOps erişim kuralları); salt okunur `github_releases` (sürüm + asset bağlantıları, `GitHub.releaseSummary` saf biçimlendirici).
 - `ui/ChatScreen.kt` + `ui/ChatViewModel.kt`: sohbet zaman çizelgesi (Notice satırları görünür).
