@@ -92,7 +92,15 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             guards.quickCheck(repo, branch, changes)
         }
         tools.beforeWrite = { repo, branch -> guards.checkpoint(repo, branch) }
-        tools.afterCommit = { repo, result, paths, newFiles -> runCatching { foresight.recordCommit(repo, result, paths, newFiles) } }
+        tools.afterCommit = { repo, result, paths, newFiles ->
+            runCatching { foresight.recordCommit(repo, result, paths, newFiles) }
+            // SkillsSync: a committed .coder/skills/* file makes the repo skill cache stale and tells the agent how to
+            // use the skill right now (the catalog itself is refreshed on the next request).
+            if (com.suarez.coder.skills.SkillSync.touches(paths)) {
+                runCatching { tools.skills?.invalidate(repo) }
+                com.suarez.coder.skills.SkillSync.notice(paths)?.let { n -> if (!isEvolutionSession) liveHistory?.add(ChatMessage.Notice(n)) }
+            }
+        }
     }
 
     // ---- Run-scoped helpers: self-review, checkpoints, @-mentions, similar tasks, custom modes ----
