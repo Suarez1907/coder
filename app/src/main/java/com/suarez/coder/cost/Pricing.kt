@@ -7,6 +7,8 @@ import java.util.Locale
 data class Price(val input: Double, val output: Double, val cachedInput: Double, val storagePerHour: Double = 0.0)
 
 object Pricing {
+    const val ROLE_AUDIT = "Denetim"
+
     /**
      * Standard paid-tier prices (prompts ≤200k) from the Gemini API pricing page, read on 2026-11-20.
      * Gemini 4 models support only implicit caching. DeepSeek values are estimates; override them in Settings.
@@ -116,6 +118,13 @@ object Pricing {
     }
 
     fun inputCost(tokens: Long, p: Price) = tokens * p.input / 1_000_000.0
+
+    fun auditCost(
+        inputTokens: Long,
+        outputTokens: Long = 32,
+        model: String,
+        overrides: Map<String, Price> = emptyMap(),
+    ): Double = cost(Usage(input = inputTokens, output = outputTokens), priceFor(model, overrides))
 
     fun storageCost(tokens: Long, minutes: Double, p: Price) = tokens * p.storagePerHour / 1_000_000.0 * (minutes / 60.0)
 

@@ -8,6 +8,46 @@ import java.util.UUID
  * (usage records, notices, tool results, route info), so recording costs nothing.
  */
 object SessionTraceRecorder {
+    private var preflightBlocksCount: Int = 0
+    private var searchReplaceTier2Count: Int = 0
+    private var searchReplaceTier3Count: Int = 0
+    private var oscillationEscalationsCount: Int = 0
+    private var prePushGateWarningsCount: Int = 0
+    private var surgicalReads: Int = 0
+    private var totalReads: Int = 0
+
+    fun recordPreflightBlock(count: Int = 1) {
+        preflightBlocksCount += count.coerceAtLeast(0)
+    }
+
+    fun recordSearchReplaceTiers(tier2: Int, tier3: Int) {
+        searchReplaceTier2Count += tier2.coerceAtLeast(0)
+        searchReplaceTier3Count += tier3.coerceAtLeast(0)
+    }
+
+    fun recordOscillationEscalation() {
+        oscillationEscalationsCount++
+    }
+
+    fun recordPrePushGateWarning() {
+        prePushGateWarningsCount++
+    }
+
+    fun recordFileRead(surgical: Boolean) {
+        totalReads++
+        if (surgical) surgicalReads++
+    }
+
+    fun resetPhase1Counters() {
+        preflightBlocksCount = 0
+        searchReplaceTier2Count = 0
+        searchReplaceTier3Count = 0
+        oscillationEscalationsCount = 0
+        prePushGateWarningsCount = 0
+        surgicalReads = 0
+        totalReads = 0
+    }
+
     private val CORRECTION = Regex(
         "(?i)\\b(hayır|yanlış|olmadı|olmamış|çalışmıyor|bozuldu|bozdun|geri al|revert|hala|hâlâ|tekrar dene|düzelmedi|wrong|broken|doesn'?t work|undo)\\b",
     )
@@ -67,6 +107,12 @@ object SessionTraceRecorder {
             stopped = stopped,
             ciRuns = ci.size,
             steps = ProcedureMiner.steps(run),
+            preflightBlocksCount = preflightBlocksCount,
+            searchReplaceTier2Count = searchReplaceTier2Count,
+            searchReplaceTier3Count = searchReplaceTier3Count,
+            oscillationEscalationsCount = oscillationEscalationsCount,
+            prePushGateWarningsCount = prePushGateWarningsCount,
+            surgicalReadRatio = if (totalReads > 0) surgicalReads.toDouble() / totalReads.toDouble() else 0.0,
         )
     }
 

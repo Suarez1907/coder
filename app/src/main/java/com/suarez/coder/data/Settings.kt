@@ -648,6 +648,14 @@ class Settings(context: Context) {
         get() = prefs.getLong("decision_timeout_ms", 2_000L)
         set(v) = prefs.edit().putLong("decision_timeout_ms", v.coerceIn(500L, 30_000L)).apply()
 
+    var prePushGate: Boolean
+        get() = if (prefs.contains("pre_push_gate")) {
+            prefs.getBoolean("pre_push_gate", true)
+        } else {
+            if (geminiKey.isNotBlank() || openrouterKey.isNotBlank()) true else true
+        }
+        set(v) = prefs.edit().putBoolean("pre_push_gate", v).apply()
+
     // ---- Selected context files ----
 
     var contextRepo: String
