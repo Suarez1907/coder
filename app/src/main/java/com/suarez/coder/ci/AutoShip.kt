@@ -20,31 +20,55 @@ object AutoShip {
     ) {
         val version: String get() = tag.ifBlank { name }
 
-        /** Aynı commit/dal ya da aynı sürüm numarası (v1.3.0 ≈ 1.3.0 ≈ coder-1.3.0). */
+        /**
+         * Yalnızca kesin kanıt: aynı commit (tam/kısa sha) ya da aynı sürüm adı
+         * (v1.3.0 = 1.3.0; 1.3.0 ≠ 3.0). build.yml sürümü `target_commitish: github.sha` ile
+         * açtığı için sha eşleşmesi yeterlidir. Dal adı ve gevşek "ile bitiyor" eşleşmesi
+         * kaldırıldı: bunlar eski bir sürümü yeni build'in sürümü sayıp yanlış APK gösterirdi.
+         */
         fun matches(ref: String): Boolean {
             val r = ref.trim()
             if (r.isEmpty()) return false
-            if (commitish.isNotBlank() && sameCommit(commitish, r)) return true
-            val a = version.filter { it.isLetterOrDigit() }.lowercase()
-            val b = r.substringAfterLast('/').filter { it.isLetterOrDigit() }.lowercase()
-            return a.isNotEmpty() && b.isNotEmpty() && (a == b || a.endsWith(b) || b.endsWith(a))
+            if (isSha(r)) return sameCommit(commitish, r)
+            if (!isSha(commitish)) return false
+            val a = norm(version)
+            return a.isNotEmpty() && a == norm(r)
         }
 
-        private fun sameCommit(a: String, b: String): Boolean =
-            a == b || (a.length >= 7 && b.startsWith(a)) || (b.length >= 7 && a.startsWith(b))
+        /** "v1.3.0" ile "1.3.0" aynı sürüm; nokta/tire ve v ön eki yok sayılır. */
+        private fun norm(s: String) = s.filter { it.isLetterOrDigit() }.lowercase().removePrefix("v")
+
+        private fun sameCommit(a: String, b: String): Boolean {
+            val x = a.trim().lowercase()
+            val y = b.trim().lowercase()
+            if (!isSha(x) || x.length < 7) return false
+            return x == y || y.startsWith(x) || x.startsWith(y)
+        }
     }
 
     enum class State { SHIPPED, NO_APK, NO_RELEASE }
 
-    /** Commit'e ([sha]/[branch]) ait sürüm; yoksa en yeni yayınlanmış sürüm. Taslak asla gönderilmez. */
-    fun pick(body: String, sha: String? = null, branch: String? = null): Ship? {
+    /**
+     * [sha]/[branch] için yayınlanmış sürüm. Ref verilmiş ama eşleşen sürüm yoksa null:
+     * başka commit'in sürümünü "bu build yayınlandı" diye göstermek yanlış APK demek olurdu.
+     * Hiç ref verilmezse en yeni yayınlanmış sürüm seçilir. Taslak asla seçilmez.
+     */
+    fun pick(body: String, sha: String? = null, branch: String? = null): Ship? =
+        pick(body, listOfNotNull(sha, branch))
+
+    fun pick(body: String, refs: List<String>): Ship? {
         val arr = runCatching { JSONArray(body) }.getOrNull() ?: return null
         val ships = (0 until arr.length()).mapNotNull { parse(arr.optJSONObject(it)) }
         if (ships.isEmpty()) return null
-        val refs = listOfNotNull(sha, branch).map { it.trim() }.filter { it.isNotEmpty() }
-        for (ref in refs) ships.firstOrNull { it.matches(ref) }?.let { return it }
+        val wanted = refs.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        for (ref in wanted) ships.firstOrNull { it.matches(ref) }?.let { return it }
+        if (wanted.isNotEmpty()) return null
         return ships.firstOrNull { !it.prerelease } ?: ships.first()
     }
+
+    private val SHA = Regex("^[0-9a-f]{7,40}$")
+
+    private fun isSha(s: String): Boolean = SHA.matches(s)
 
     private fun parse(o: JSONObject?): Ship? {
         if (o == null || o.optBoolean("draft")) return null

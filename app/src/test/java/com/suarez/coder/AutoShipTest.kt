@@ -8,6 +8,9 @@ import org.junit.Test
 
 class AutoShipTest {
 
+    private val shaA = "1111222233334444555566667777888899990000"
+    private val shaB = "aaaabbbbccccddddeeeeffff0000111122223333"
+
     private fun release(
         tag: String,
         commitish: String = "main",
@@ -34,20 +37,24 @@ class AutoShipTest {
     }
 
     @Test
-    fun matchesShortShaAndBranchName() {
-        val body = list(release("build-7", commitish = "fe1f0d0aa"))
-        assertEquals("build-7", AutoShip.pick(body, "fe1f0d0", null)?.tag)
-        assertEquals("build-7", AutoShip.pick(list(release("build-7", commitish = "ccr-branch")), null, "ccr-branch")?.tag)
+    fun matchesCommitShaExactly() {
+        assertEquals("build-7", AutoShip.pick(list(release("build-7", commitish = shaA)), "111122223333444", null)?.tag)
+        assertEquals("build-7", AutoShip.pick(list(release("build-7", commitish = shaA)), shaA, null)?.tag)
+        // Sürüm adına göre eşleşme kesin: v1.3.0 = 1.3.0, ama 1.3.0 ≠ 3.0.
+        assertEquals("v1.3.0", AutoShip.pick(list(release("v1.3.0", commitish = shaA)), null, "1.3.0")?.tag)
+        assertNull(AutoShip.pick(list(release("v1.3.0", commitish = shaA)), null, "3.0"))
     }
 
     @Test
-    fun skipsDraftsAndFallsBackToNewestPublished() {
+    fun missingReleaseForACommitIsNeverReplacedByAnOlderOne() {
         val body = list(
-            release("build-200", commitish = "dev", draft = true),
-            release("build-199", commitish = "dev", prerelease = true),
-            release("build-198", commitish = "dev"),
+            release("build-200", commitish = shaA, draft = true),
+            release("build-199", commitish = shaA, prerelease = true),
+            release("build-198", commitish = shaA),
         )
-        assertEquals("build-198", AutoShip.pick(body, "no-such-sha", null)?.tag)
+        assertNull(AutoShip.pick(body, shaB, "main"))
+        // Hiç ref verilmezse "en yeni yayınlanmış" modu korunur (taslak atlanır, ön izleme son çare).
+        assertEquals("build-198", AutoShip.pick(body)?.tag)
     }
 
     @Test
