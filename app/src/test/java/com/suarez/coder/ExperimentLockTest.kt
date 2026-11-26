@@ -6,6 +6,7 @@ import com.suarez.coder.evolution.EvolutionStore
 import com.suarez.coder.evolution.Experiment
 import com.suarez.coder.evolution.ExperimentApplier
 import com.suarez.coder.skills.SkillRepository
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -27,11 +28,27 @@ class ExperimentLockTest {
         SkillRepository(tmp.newFolder(), { _ -> emptyList() }, { _, _ -> null }),
     )
 
+    private fun architectExperiment(model: String) = Experiment(
+        kind = Experiment.Kind.MODEL,
+        title = "Uygulayıcı → mimar tuzağı",
+        payload = JSONObject().put("role", "architect").put("model", model),
+        source = "test",
+    )
+
+    @Test fun theFactoryRefusesToCreateArchitectModelExperiments() {
+        try {
+            Experiment.model("architect", "deepseek/x", "test")
+            throw AssertionError("architect deneyi üretilmemeliydi")
+        } catch (e: IllegalArgumentException) {
+            // beklenen: fabrika kilitli
+        }
+    }
+
     @Test fun anExperimentThatTargetsTheArchitectModelIsNeverApplied() {
         val settings = Settings(ApplicationProvider.getApplicationContext())
         val architect = settings.architectModel
         settings.editorModel = "deepseek/editor"
-        newApplier(settings).apply(Experiment.model("architect", "deepseek/architect-killer", "test"))
+        newApplier(settings).apply(architectExperiment("deepseek/architect-killer"))
         assertEquals(architect, settings.architectModel)
         assertEquals("deepseek/editor", settings.editorModel)
     }
@@ -57,8 +74,7 @@ class ExperimentLockTest {
         assertEquals("deepseek/editor-eski", settings.editorModel)
     }
 
-    @Test fun anArchitectTargetedExperimentIsTitlemarkedYetRejectedCleanly() {
-        val e = Experiment.model("architect", "deepseek/x", "test")
-        assertTrue(e.title.startsWith("Mimar"))
+    @Test fun aManuallyBuiltArchitectExperimentIsRecognisedAsLocked() {
+        assertTrue(architectExperiment("deepseek/y").isArchitectExperiment())
     }
 }
