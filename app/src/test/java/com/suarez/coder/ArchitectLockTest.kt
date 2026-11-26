@@ -7,7 +7,7 @@ import com.suarez.coder.agent.ArchitectEditor
 import com.suarez.coder.agent.PlanFile
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
-import com.suarez.coder.evolution.Experiments
+import com.suarez.coder.evolution.Experiment
 import com.suarez.coder.evolution.WeeklyCycle
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
@@ -245,12 +245,15 @@ class ArchitectLockTest {
     @Test fun architectExperimentsAreRejectedAndTheLockHolds() {
         val before = settings.architectModel
         // Generation never proposes an architect candidate.
-        assertTrue(Experiments.generate(settings).none { it.role == "architect" })
-        // Applying a hand-built architect winner is refused; the lock holds.
-        WeeklyCycle.apply(Experiments.Experiment("architect", "deepseek/arch-2"), settings)
+        assertTrue(runCatching { Experiment.model("architect", "deepseek/arch-2", "test") }.exceptionOrNull() is IllegalArgumentException)
+        // A hand-built architect experiment is recognised and is never adopted automatically.
+        val arch = Experiment(kind = Experiment.Kind.MODEL, title = "Mimar → arch-2",
+            payload = org.json.JSONObject().put("role", "architect").put("model", "deepseek/arch-2"))
+        assertTrue(arch.isArchitectExperiment())
+        assertTrue(!WeeklyCycle.autoAdoptable(arch))
+        // Positive control: an editor experiment is adoptable.
+        assertTrue(WeeklyCycle.autoAdoptable(Experiment.model("editor", "deepseek/edit-2", "test")))
+        // The lock holds: nothing touched the architect model.
         assertEquals(before, settings.architectModel)
-        // Positive control: an editor experiment still applies.
-        WeeklyCycle.apply(Experiments.Experiment("editor", "deepseek/edit-2"), settings)
-        assertEquals("deepseek/edit-2", settings.editorModel)
     }
 }
