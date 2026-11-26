@@ -498,7 +498,8 @@ class Settings(context: Context) {
         get() = prefs.getInt("ci_max_rounds", 4).coerceIn(1, 10)
         set(v) = prefs.edit().putInt("ci_max_rounds", v.coerceIn(1, 10)).apply()
 
-    /** Auto-Ship: for user-initiated tasks only, run code → PR → CI → merge → version bump → APK automatically. Never for evo/* PRs. */
+    // Auto-Ship: for user-initiated tasks only, run code, PR, CI, merge, version bump and APK
+    // automatically. Never for evo-prefixed PRs. (Not a block comment: Kotlin nests /* */.)
     var autoShip: Boolean
         get() = bool("auto_ship", false)
         set(v) = putBool("auto_ship", v)
