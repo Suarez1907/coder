@@ -79,9 +79,12 @@ object SearchReplace {
 
     private fun cleanPath(raw: String): String? {
         var s = raw.trim().trim('`', '*', '"', '\'').trim()
-        s = s.removePrefix("File:").removePrefix("Dosya:").removePrefix("#").trim().trim('`', '*').trim()
+        s = s.removePrefix("File:").removePrefix("Dosya:").trim()
+        // Remove all leading # characters and any whitespace after them (markdown headings)
+        s = s.replace(Regex("^#+\\s*"), "").trim()
+        s = s.trim('`', '*').trim()
         s = s.removePrefix("./")
-        if (s.isEmpty() || s.contains(' ') || s.length > 300) return null
+        if (s.isBlank() || s.length > 300) return null
         return s
     }
 
