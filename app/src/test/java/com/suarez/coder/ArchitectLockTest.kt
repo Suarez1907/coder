@@ -7,6 +7,8 @@ import com.suarez.coder.agent.ArchitectEditor
 import com.suarez.coder.agent.PlanFile
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.evolution.Experiments
+import com.suarez.coder.evolution.WeeklyCycle
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
@@ -236,5 +238,19 @@ class ArchitectLockTest {
         assertTrue(vm.settings.modelCatalog.contains("gemini/gemini-3.8-flash"))
         // No silent "medium architect" by default.
         assertEquals("", Settings(ApplicationProvider.getApplicationContext()).architectModelMedium)
+    }
+
+    // 6. The architect model is locked: experiments never target or replace it.
+
+    @Test fun architectExperimentsAreRejectedAndTheLockHolds() {
+        val before = settings.architectModel
+        // Generation never proposes an architect candidate.
+        assertTrue(Experiments.generate(settings).none { it.role == "architect" })
+        // Applying a hand-built architect winner is refused; the lock holds.
+        WeeklyCycle.apply(Experiments.Experiment("architect", "deepseek/arch-2"), settings)
+        assertEquals(before, settings.architectModel)
+        // Positive control: an editor experiment still applies.
+        WeeklyCycle.apply(Experiments.Experiment("editor", "deepseek/edit-2"), settings)
+        assertEquals("deepseek/edit-2", settings.editorModel)
     }
 }
