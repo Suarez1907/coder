@@ -287,15 +287,13 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
         when (e.kind) {
             Experiment.Kind.MODEL -> {
                 val role = e.payload.optString("role"); val model = e.payload.optString("model")
-                // Defence in depth: even a hand-started apply cannot swap the architect model automatically.
-                if (role in WeeklyCycle.LOCKED_ROLES) {
-                    store.addLog(EvoTier.MODEL, "Uygulanmadı (Mimar modeli kilitli): ${e.title}")
+                if (role == "architect") {
+                    store.addLog(EvoTier.MODEL, "Mimar modeli kilitli, deney uygulanmadı: ${e.title}")
                     return
                 }
                 val old = settings.editorModel
                 settings.editorModel = model
-                store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}",
-                    undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).put("new", model).toString())
+                store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}", undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).toString())
             }
             Experiment.Kind.RULE -> {
                 val text = e.payload.optString("text")
@@ -321,13 +319,9 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
     fun undo(json: String): Boolean {
         val o = runCatching { JSONObject(json) }.getOrNull() ?: return false
         when (o.optString("kind")) {
-            "MODEL" -> {
-                if (o.optString("role") in WeeklyCycle.LOCKED_ROLES) return false
-                val old = o.optString("old"); if (old.isBlank()) return false
-                // The user picked another model after the adoption: an undo must not overwrite that choice.
-                if (o.has("new") && settings.editorModel != o.optString("new")) return false
-                settings.editorModel = old
-            }
+            "MODEL" -> if (o.optString("role") == "architect") {
+                store.addLog(EvoTier.MODEL, "Mimar modeli kilitli, geri alma reddedildi.")
+            } else settings.editorModel = o.optString("old")
             "RULE" -> store.setPolicyRules(store.policyRules() - o.optString("text"))
             "SKILL" -> skills.setEnabled(o.optString("name"), false)
             "PROMPT" -> store.setPromptOverride(o.optString("section"), if (o.isNull("old")) null else o.optString("old"))

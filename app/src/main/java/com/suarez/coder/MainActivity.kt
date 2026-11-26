@@ -9,10 +9,13 @@ import com.suarez.coder.apk.ApkLinks
 import com.suarez.coder.ci.CiWatchService
 import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -27,12 +30,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Crashes are written to disk: a learning signal and the trigger for rolling back a bad self-update.
-        com.suarez.coder.evolution.CrashRecorder.install(this)
-        enableEdgeToEdge()
+        applySystemBars(isDarkTheme(vm.settings.themeMode) ?: isSystemDark())
         handleInstallIntent(intent)
         setContent {
             @Suppress("UNUSED_VARIABLE") val v = vm.settingsVersion // re-read the theme when settings change
+            val dark = isDarkTheme(vm.settings.themeMode) ?: isSystemInDarkTheme()
+            LaunchedEffect(dark) { applySystemBars(dark) }
             CoderTheme(vm.settings.themeMode) {
                 var showSettings by rememberSaveable { mutableStateOf(needsSetup()) }
                 if (showSettings) {
@@ -43,11 +46,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    override fun onStop() {
-        vm.flushSaves()
-        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -72,4 +70,25 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun needsSetup() = vm.settings.geminiKey.isBlank() && vm.settings.deepseekKey.isBlank() && vm.settings.openrouterKey.isBlank()
+
+    /** Explicit theme decision: "light" -> false, "system" -> null (follow OS), "dark"/"oled" -> true. */
+    private fun isDarkTheme(mode: String): Boolean? = when (mode) {
+        "light" -> false
+        "system" -> null
+        else -> true
+    }
+
+    private fun isSystemDark() = (resources.configuration.uiMode and
+        android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+    /** Force white system-bar icons in dark/OLED modes even when the OS is in light mode. */
+    private fun applySystemBars(dark: Boolean) {
+        val transparent = android.graphics.Color.TRANSPARENT
+        val style = if (dark) {
+            SystemBarStyle.dark(transparent)
+        } else {
+            SystemBarStyle.light(transparent, transparent)
+        }
+        enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    }
 }

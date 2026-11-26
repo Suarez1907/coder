@@ -2,9 +2,12 @@ package com.suarez.coder.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -14,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,7 +24,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,40 +53,41 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.suarez.coder.data.Provider
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
-private enum class Page(val title: String, val icon: String, val blurb: String) {
-    HOME("Ayarlar", "", ""),
-    PROVIDERS("Sağlayıcılar & API", "🔑", "Anahtarlar, varsayılan modeller, bağlantı testi"),
-    ARCHITECT("Mimar & Yönlendirme", "🧭", "Düşünme, çıktı sınırları, Decision 1, Flex"),
-    CACHE("Önbellek & Bağlam", "🗄", "Context Caching, sıkıştırma, geçmiş"),
-    GITHUB("GitHub & Bütçe", "💳", "Token, repo, onay, bütçe ve fiyatlar"),
-    TEMPLATES("Komut şablonları", "⌨", "Sohbette / ile açılan hazır istemler"),
-    SKILLS("Yetenekler (Skills)", "", "Skill kataloğu ve bulut araçları (Blender, Python/FFmpeg)"),
-    EVOLUTION("Öz-Gelişim", "", "Arka plan öğrenme, yönlendirme ve otomatik PR'lar"),
+private enum class Page(
+    val title: String,
+    val vectorIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    val blurb: String,
+) {
+    HOME("Ayarlar", Icons.Outlined.Tune, ""),
+    PROVIDERS("Sağlayıcılar & API", Icons.Outlined.Key, "Anahtarlar, varsayılan modeller, bağlantı testi"),
+    ARCHITECT("Mimar & Yönlendirme", Icons.Outlined.Tune, "Düşünme, çıktı sınırları, Decision 1, Flex"),
+    CACHE("Önbellek & Bağlam", Icons.Outlined.Layers, "Context Caching, sıkıştırma, geçmiş"),
+    GITHUB("GitHub & Bütçe", Icons.Outlined.AccountBalanceWallet, "Token, repo, onay, bütçe ve fiyatlar"),
+    TEMPLATES("Komut şablonları", Icons.Outlined.Terminal, "Sohbette / ile açılan hazır istemler"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -113,8 +122,6 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.CACHE -> CachePage(vm)
                 Page.GITHUB -> GitHubPage(vm)
                 Page.TEMPLATES -> TemplatesPage(vm)
-                Page.EVOLUTION -> EvolutionPage(vm)
-                Page.SKILLS -> SkillsPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -128,45 +135,73 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
 private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
     val s = vm.settings
     var theme by remember { mutableStateOf(s.themeMode) }
-    Group {
-        Title("Görünüm", "Koyu: IDE teması. OLED: saf siyah arka plan, AMOLED ekranlarda pil tasarrufu. Sistem: telefonun açık/koyu ayarını izler.")
-        Segmented(listOf("dark" to "Koyu", "oled" to "OLED", "light" to "Açık", "system" to "Sistem"), theme) {
-            theme = it; s.themeMode = it; vm.refreshSettings()
-        }
-    }
+    ViewSelector(
+        options = listOf("dark" to "Koyu", "oled" to "OLED", "light" to "Açık", "system" to "Sistem"),
+        selected = theme,
+    ) { theme = it; s.themeMode = it; vm.refreshSettings() }
     val status = listOf(
         "Gemini" to s.geminiKey.isNotBlank(),
         "DeepSeek" to s.deepseekKey.isNotBlank(),
         "OpenRouter" to s.openrouterKey.isNotBlank(),
         "GitHub" to s.githubToken.isNotBlank(),
     )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        status.forEach { (name, ok) -> Badge("$name ${if (ok) "✓" else "–"}", if (ok) coder.cacheGood else coder.muted) }
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        status.forEach { (name, ok) ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(6.dp).clip(RoundedCornerShape(3.dp))
+                        .background(if (ok) coder.cacheGood else coder.muted.copy(alpha = 0.35f)),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(name, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
-    LaunchedEffect(Unit) { vm.refreshEvolution() }
-    listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.SKILLS, Page.EVOLUTION).forEach { p ->
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, coder.border),
-            modifier = Modifier.fillMaxWidth().clickable { open(p) },
-        ) {
-            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (p == Page.EVOLUTION) Icon(AutoAwesomeOutlined, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.onSurface)
-                else if (p == Page.SKILLS) Icon(ExtensionOutlined, null, Modifier.size(26.dp), tint = MaterialTheme.colorScheme.onSurface)
-                else Text(p.icon, style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.width(14.dp))
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, shape),
+    ) {
+        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES)
+        pages.forEachIndexed { i, p ->
+            Row(
+                Modifier.fillMaxWidth().clickable { open(p) }.padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(p.vectorIcon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(p.title, style = MaterialTheme.typography.titleMedium)
-                    Text(p.blurb, style = MaterialTheme.typography.bodySmall, color = coder.muted)
+                    Text(p.title, style = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = MaterialTheme.colorScheme.onSurface)
+                    Text(p.blurb, style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp), color = coder.muted)
                 }
-                if (p == Page.EVOLUTION && vm.evoPending?.state == com.suarez.coder.evolution.PrState.PENDING) {
-                    Surface(shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline), color = Color.Transparent) {
-                        Text("1 PR bekliyor", style = Mono.tiny, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                    }
-                    Spacer(Modifier.width(6.dp))
-                }
-                Text("›", style = MaterialTheme.typography.titleLarge, color = coder.muted)
+                Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = coder.muted, modifier = Modifier.size(20.dp))
+            }
+            if (i < pages.lastIndex) HorizontalDivider(color = coder.border, thickness = 0.5.dp)
+        }
+    }
+}
+
+@Composable
+private fun ViewSelector(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface)
+            .border(1.dp, coder.border, RoundedCornerShape(10.dp)).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        options.forEach { (value, label) ->
+            val isSelected = value == selected
+            Box(
+                Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                    .background(if (isSelected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
+                    .clickable { onSelect(value) }.padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                )
             }
         }
     }
@@ -180,26 +215,12 @@ private fun ProvidersPage(vm: ChatViewModel) {
     val scope = rememberCoroutineScope()
     val uri = LocalUriHandler.current
     var provider by remember { mutableStateOf(s.provider) }
-    // The fetched lists are kept in the catalog: no need to press "Modelleri getir" every time.
-    fun cached(p: Provider) = s.modelCatalog.filter { it.startsWith(p.name.lowercase() + "/") }.map { it.substringAfter('/') }
-    var gModels by remember { mutableStateOf(cached(Provider.GEMINI)) }
-    var dModels by remember { mutableStateOf(cached(Provider.DEEPSEEK)) }
-    var oModels by remember { mutableStateOf(cached(Provider.OPENROUTER)) }
-    var pickFor by remember { mutableStateOf<com.suarez.coder.llm.ModelRef?>(null) }
-    @Suppress("UNUSED_VARIABLE") val version = vm.settingsVersion
+    var gModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var dModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var oModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var fetchStatus by remember { mutableStateOf("") }
     var modelVersion by remember { mutableIntStateOf(0) }
     var ping by remember { mutableStateOf("") }
-
-    Group {
-        Title("Etkin modeller", "Burada seçtiğin model hemen kullanılır (sohbetteki alt çubukla aynı ayar).")
-        val options = vm.modelOptions()
-        ModelSelect("Mimar", vm.agent.architectRef(), coder.architect, options, { vm.priceLabel(it) }) { vm.selectArchitect(it) }
-        ModelSelect("Uygulayıcı", vm.agent.editorRef(), coder.editor, options, { vm.priceLabel(it) }) { vm.selectEditor(it) }
-        ModelSelect("Tek model", vm.agent.singleRef(), coder.muted, options, { vm.priceLabel(it) }) { vm.selectSingle(it); provider = it.provider }
-        Text(if (s.architectMode) "Mimar Modu açık: Mimar ve Uygulayıcı kullanılır." else "Mimar Modu kapalı: Tek model kullanılır.",
-            style = MaterialTheme.typography.bodySmall, color = coder.muted)
-    }
 
     Group {
         Title("Varsayılan yapay zekâ", "Mimar Modu kapalıyken tek model ajanın sağlayıcısı.")
@@ -212,8 +233,8 @@ private fun ProvidersPage(vm: ChatViewModel) {
         Title("Gemini")
         TextSetting("API anahtarı", s.geminiKey, secret = true) { s.geminiKey = it }
         TextButton(onClick = { uri.openUri("https://aistudio.google.com/app/apikey") }) { Text("Anahtar al: aistudio.google.com") }
-        key(modelVersion) { TextSetting("Tek model (Mimar Modu kapalıyken)", s.geminiModel, mono = true) { s.geminiModel = it.ifBlank { "gemini-2.5-pro" }; vm.refreshSettings() } }
-        ModelFetch(gModels, onPick = { pickFor = com.suarez.coder.llm.ModelRef(Provider.GEMINI, it) }) {
+        key(modelVersion) { TextSetting("Model", s.geminiModel, mono = true) { s.geminiModel = it.ifBlank { "gemini-2.5-pro" }; vm.refreshSettings() } }
+        ModelFetch(gModels, onPick = { s.geminiModel = it; modelVersion++; vm.refreshSettings() }) {
             scope.launch {
                 fetchStatus = "Gemini modelleri alınıyor…"
                 fetchStatus = runCatching { gModels = vm.fetchModels(Provider.GEMINI); vm.mergeCatalog(Provider.GEMINI, gModels); "${gModels.size} Gemini modeli" }
@@ -226,9 +247,9 @@ private fun ProvidersPage(vm: ChatViewModel) {
         Title("DeepSeek", "OpenAI uyumlu herhangi bir API de kullanılabilir: adresi değiştirin.")
         TextSetting("API anahtarı", s.deepseekKey, secret = true) { s.deepseekKey = it }
         TextButton(onClick = { uri.openUri("https://platform.deepseek.com/api_keys") }) { Text("Anahtar al: platform.deepseek.com") }
-        key(modelVersion) { TextSetting("Tek model (Mimar Modu kapalıyken)", s.deepseekModel, mono = true) { s.deepseekModel = it.ifBlank { "deepseek-chat" }; vm.refreshSettings() } }
+        key(modelVersion) { TextSetting("Model", s.deepseekModel, mono = true) { s.deepseekModel = it.ifBlank { "deepseek-chat" }; vm.refreshSettings() } }
         TextSetting("API adresi", s.deepseekBaseUrl, mono = true) { s.deepseekBaseUrl = it.ifBlank { "https://api.deepseek.com" } }
-        ModelFetch(dModels, onPick = { pickFor = com.suarez.coder.llm.ModelRef(Provider.DEEPSEEK, it) }) {
+        ModelFetch(dModels, onPick = { s.deepseekModel = it; modelVersion++; vm.refreshSettings() }) {
             scope.launch {
                 fetchStatus = "DeepSeek modelleri alınıyor…"
                 fetchStatus = runCatching { dModels = vm.fetchModels(Provider.DEEPSEEK); vm.mergeCatalog(Provider.DEEPSEEK, dModels); "${dModels.size} DeepSeek modeli" }
@@ -243,11 +264,11 @@ private fun ProvidersPage(vm: ChatViewModel) {
         TextSetting("API anahtarı", s.openrouterKey, secret = true) { s.openrouterKey = it; vm.refreshSettings() }
         TextButton(onClick = { uri.openUri("https://openrouter.ai/settings/keys") }) { Text("Anahtar al: openrouter.ai") }
         key(modelVersion) {
-            TextSetting("Tek model (Mimar Modu kapalıyken)", s.openrouterModel, mono = true, placeholder = "anthropic/claude-sonnet-4.5") {
+            TextSetting("Model", s.openrouterModel, mono = true, placeholder = "anthropic/claude-sonnet-4.5") {
                 s.openrouterModel = it.ifBlank { "deepseek/deepseek-chat" }; vm.refreshSettings()
             }
         }
-        ModelFetch(oModels, onPick = { pickFor = com.suarez.coder.llm.ModelRef(Provider.OPENROUTER, it) }) {
+        ModelFetch(oModels, onPick = { s.openrouterModel = it; modelVersion++; vm.refreshSettings() }) {
             scope.launch {
                 fetchStatus = "OpenRouter modelleri alınıyor…"
                 fetchStatus = runCatching { oModels = vm.fetchModels(Provider.OPENROUTER); vm.mergeCatalog(Provider.OPENROUTER, oModels); "${oModels.size} OpenRouter modeli (araç destekli)" }
@@ -256,21 +277,6 @@ private fun ProvidersPage(vm: ChatViewModel) {
         }
     }
     if (fetchStatus.isNotBlank()) Text(fetchStatus, style = Mono.tiny, color = coder.muted)
-    pickFor?.let { ref ->
-        AlertDialog(
-            onDismissRequest = { pickFor = null },
-            title = { Text(ref.model, style = Mono.body) },
-            text = { Text("Bu model nerede kullanılsın? Seçim hemen etkin olur.") },
-            confirmButton = {
-                Column(horizontalAlignment = Alignment.End) {
-                    TextButton(onClick = { vm.selectArchitect(ref); pickFor = null; modelVersion++ }) { Text("Mimar") }
-                    TextButton(onClick = { vm.selectEditor(ref); pickFor = null; modelVersion++ }) { Text("Uygulayıcı") }
-                    TextButton(onClick = { vm.selectSingle(ref); provider = ref.provider; pickFor = null; modelVersion++ }) { Text("Tek model") }
-                }
-            },
-            dismissButton = { TextButton(onClick = { pickFor = null }) { Text("Vazgeç") } },
-        )
-    }
 
     Group {
         Title("Bağlantı", "Tekil, Mimar ve Uygulayıcı modellerine küçük bir istek gönderir; süreyi veya hatayı gösterir.")
@@ -319,8 +325,8 @@ private fun ArchitectPage(vm: ChatViewModel) {
 
     Group {
         Title("Mimar")
-        NumberSetting("Uygulayıcı onarım denemesi", s.maxExecutorRetries,
-            info = "Uygulayıcı hatalarını kendi düzeltir (dosyanın güncel halini yeniden okuyarak). Bu kadar denemede olmazsa iş durur ve size sorulur; Mimar otomatik çağrılmaz.") { s.maxExecutorRetries = it }
+        SwitchSetting("Tek seferde planla", "Önce araçsız tek çağrı", s.architectSingleShot,
+            "Mimar önce yalnızca harita ve bağlamla tek çağrıda plan yapar; bilgi yetmezse istediği dosyalar okunup araçlı adımlara geçilir.") { s.architectSingleShot = it }
         SwitchSetting("Repo Haritası", "Ham kod yerine imzalar", s.repoMapForArchitect,
             "Mimar'a dosya yolları, sınıflar ve fonksiyon imzalarından oluşan hafif bir harita gönderilir; en fazla 3 dosya okur.") { s.repoMapForArchitect = it }
         SwitchSetting("Sadece Diff", "Açıklamasız, kısa yanıtlar", s.terseMode,
@@ -329,132 +335,11 @@ private fun ArchitectPage(vm: ChatViewModel) {
             "Repodaki kalıcı proje notları sabit bağlama eklenir; ajan önemli değişikliklerde aynı commit'te günceller.") { s.projectNotes = it }
         SwitchSetting("Ekonomi modu (Flex)", "%50 ucuz, dakikalar sürebilir", s.economyMode,
             "Gemini istekleri Flex kademesinden gider: yarı fiyat, ama yanıtlar 1-15 dakika sürebilir ve kapasite dolabilir. Kapasite dolarsa standart fiyata geçmeden önce sorulur.") { s.economyMode = it; vm.refreshSettings() }
-        TextSetting("Orta zorlukta Mimar modeli", s.architectModelMedium, mono = true, placeholder = "boş = kapalı",
-            info = "Doluysa: Decision 1 zorluğu 1.5'in altında bulduğunda seçtiğin Mimar yerine bu model kullanılır. Boş (varsayılan) = her zaman seçtiğin Mimar.") { s.architectModelMedium = it; vm.refreshSettings() }
+        TextSetting("Orta zorlukta Mimar modeli", s.architectModelMedium, mono = true, placeholder = "gemini/gemini-3.8-flash",
+            info = "Decision 1 işin zorluğunu 0-3 arası puanlar; 1.5'in altındaysa bu model ve düşük düşünme kullanılır. Boş = kapalı.") { s.architectModelMedium = it }
         TextSetting("Yükseltme modeli", s.escalationModel, mono = true, placeholder = "boş = otomatik, none = kapalı",
-            info = "Uygulayıcı'nın son iki onarım denemesinde kullanılan ara model (sağlayıcı/model). Mimar hiçbir zaman onarım yapmaz.") { s.escalationModel = it; vm.refreshSettings() }
+            info = "Uygulayıcı iki kez başarısız olursa Mimar'dan önce denenen ara model (sağlayıcı/model).") { s.escalationModel = it }
     }
-
-    Group {
-        Title("Akıllı özellikler", "Hatayı azaltan yardımcılar. Hepsi ucuzdur; kapatmak araç listesini ve istemi kısaltır.")
-        SwitchSetting("Güncel belge (lookup_docs)", "Kütüphane API'sini sürüme göre kontrol eder", s.docsLookup,
-            "Projedeki sürümler (Gradle, package.json, pubspec, Godot) bağlama eklenir; model emin olmadığı API'yi Context7'den, " +
-                "olmazsa resmi siteden okur. Eski/var olmayan API hatalarını azaltır.") { s.docsLookup = it; vm.projectSettingsChanged() }
-        TextSetting("Context7 API anahtarı (isteğe bağlı)", s.context7Key, secret = true,
-            info = "Boşken de çalışır; anahtar yalnızca hız sınırını yükseltir (context7.com/dashboard).") { s.context7Key = it }
-        SwitchSetting("Görev listesi", "Çok adımlı işlerde canlı yapılacaklar kartı", s.todoList,
-            "Model 3+ adımlı işlerde önce listeyi çıkarır, her adımda işaretler. Adım atlamayı ve konudan sapmayı azaltır.") { s.todoList = it; vm.projectSettingsChanged() }
-        SwitchSetting("Commit öncesi öz-denetim", "Ucuz model diff'e bakar", s.selfReview,
-            "Kod commit edilmeden önce eksik import, silinen ama kullanılan kod, yarım değişiklik gibi kesin hataları arar. Bulursa commit " +
-                "yapılmaz ve model düzeltir; yanlış alarmda aynı değişiklik ikinci kez gönderilince denetlenmeden geçer.") { s.selfReview = it }
-        SwitchSetting("Benzer geçmiş görevler", "Başarılı eski çözümleri ipucu olarak verir", s.similarTasks,
-            "Öz-gelişimin kaydettiği başarılı görevlerden en benzer 1-2 tanesinin özeti isteğin yanına eklenir.") { s.similarTasks = it }
-        SwitchSetting("Kontrol noktaları", "Her görevden önce dal başını kaydeder", s.checkpoints,
-            "Sohbette \"Buraya geri dön\" düğmesi dalı o noktaya geri alır (onay ister).") { s.checkpoints = it }
-        SwitchSetting("Anlamsal kod araması", "Kodu anlamına göre bulur (Gemini anahtarı)", s.semanticSearch,
-            "Repo bir kez gömme modeliyle dizinlenir (telefonda saklanır, sonra yalnızca değişen dosyalar). Maliyet: 1M token başına " +
-                "yaklaşık 0,15 $; orta boy bir repo birkaç sent.") { s.semanticSearch = it; vm.projectSettingsChanged() }
-    }
-
-    Group { EscalationEditor(vm) }
-
-    Group {
-        Title("Doğrulama ve onarım", "Ajanın kodu kendisi çalıştıramamasını telafi eden kontroller.")
-        SwitchSetting("Yedek modele geçiş", "Model çökerse sıradakiyle devam", s.failover,
-            "Model 429/5xx, aşırı yük veya zaman aşımı verirse aynı istek yükseltme sıralamandaki sıradaki modelle tekrarlanır (en fazla 2 kez).") { s.failover = it }
-        SwitchSetting("Uyarlanan bütçe", "Düşük düşünmeyle başla, gerekince yüksel", s.adaptiveBudget,
-            "Uygulayıcı ilk denemeyi düşük düşünmeyle yapar; hata, kırmızı CI veya onarım gerekince ayarladığın seviyeye çıkar. Çıktı sınırı da " +
-                "gerçek yanıt boylarından öğrenilir (kesilen yanıt büyük sınırla bir kez tekrarlanır). Düşünme tokenları gizli maliyetin büyük kısmıdır.") { s.adaptiveBudget = it }
-        SwitchSetting("Arka plan işleri Flex'te", "Öz-gelişim ve kuyruk Gemini'de yarı fiyat", s.backgroundFlex,
-            "Acelesi olmayan işler (öz-gelişim, sınavlar, iş kuyruğu) Gemini modellerinde Flex katmanını kullanır; daha yavaş olabilir, kapasite yoksa standart fiyata geçer.") { s.backgroundFlex = it }
-        SwitchSetting("Yeşile kadar", "Kırmızı CI'da durmadan düzeltir", s.untilGreen,
-            "CI başarısızsa ajan düzeltmeye devam eder. Aynı hata ikinci kez gelirse yükseltme sıralamandaki bir sonraki modele geçer; " +
-                "sıranın sonunda sana sorar.") { s.untilGreen = it }
-        NumberSetting("Soru sormadan en fazla kırmızı CI turu", s.ciMaxRounds, info = "Bu sayıya ulaşınca devam edilsin mi diye sorar.") { s.ciMaxRounds = it }
-        SwitchSetting("Plan eleştirmeni", "Ucuz model Mimar planını kontrol eder", s.planCritic,
-            "Eksik çağıran, kayıt (manifest, navigasyon, DI), import veya test varsa not düşer; gereken dosyayı plana ekler.") { s.planCritic = it }
-        SwitchSetting("Hata → çözüm hafızası", "Aynı CI hatasında eski çözümü hatırlatır", s.fixMemory,
-            "Kırmızı CI'ı yeşile çeviren değişiklik kaydedilir; aynı hata tekrar gelince ajana \"geçen sefer şöyle düzeldi\" ipucu verilir.") { s.fixMemory = it }
-        SwitchSetting("Hızlı ön kontrol", "Her kod commit'inden önce derleme denetimi", s.quickCheck,
-            "Değişiklik [skip ci] ile geçici bir dala yazılır, GitHub Actions'ta yalnızca derleme/tür kontrolü çalışır (1-5 dk), dal silinir. " +
-                "Değişen dosyalarda hata varsa commit yapılmaz. İlk kullanımda repoya coder-quick.yml eklemek için izin ister. " +
-                "Kendi kontrolün için .coder/quick-check.sh yazabilirsin.") { s.quickCheck = it }
-        SwitchSetting("Ön kontrolü ısıt", "Günde bir kez önbellekleri doldurur", s.quickCheckWarm,
-            "Görev başlarken (repo başına günde en fazla bir kez) ön kontrol varsayılan dalda arka planda çalıştırılır; varsayılan daldaki " +
-                "önbellek tüm dallarca kullanılır, böylece ilk kontrol 1-2 dakikaya iner.") { s.quickCheckWarm = it }
-        SwitchSetting("Android ekran görüntüleri", "Tam modda emülatörle sınar", s.androidShots,
-            "Değerlendirici açıkken Android projelerinde uygulama GitHub Actions emülatöründe açılır, ekran görüntüsü sohbete gelir, çökme " +
-                "olursa düzeltme turu açılır. .coder/screens.txt'deki her satır (adb shell komutu) için ek ekran. Bir çalıştırma 10-20 dk.") { s.androidShots = it }
-        SwitchSetting("Android arayüz testleri", "Kabul ölçütleri Maestro ile denenir", s.androidUiTests,
-            "Android ekran görüntüleri açıkken ucuz bir model kabul ölçütlerinden Maestro akışları yazar (dokun, yaz, kaydır, metni gör); akışlar " +
-                "aynı emülatör çalıştırmasında koşar ve her biri ayrı ölçüt olarak raporlanır. Geçmeyen akış düzeltme turu açar.") { s.androidUiTests = it }
-        SwitchSetting("Etkilenen testler", "Ön kontrolde değişen kodun testleri de koşar", s.targetedTests,
-            "Hızlı ön kontrol derlemeye ek olarak yalnızca değişen dosyalara ait testleri çalıştırır (adlandırma kuralı ve kod dizinindeki " +
-                "kullanımlar). Gradle, Jest/Vitest ve pytest desteklenir. Tüm test paketini beklemekten çok daha hızlıdır.") { s.targetedTests = it }
-        SwitchSetting("Kod dizini", "Bulutta tanım ve kullanım dizini", s.codeIndex,
-            "Repo günde en fazla bir kez GitHub Actions'ta universal-ctags ile dizinlenir (coder-index.yml, ilk kullanımda izin ister). " +
-                "Referans bulma dizini kullanır ve ajan bir dosyanın tamamı yerine tek bir fonksiyonu okuyabilir (read_symbol). Derleyici kadar " +
-                "kesin değildir: aynı adı taşıyan farklı semboller ayırt edilemeyebilir.") { s.codeIndex = it }
-        SwitchSetting("Kararsız CI'ı yeniden dene", "Geçici hatada önce bir kez daha çalıştırır", s.flakyRetry,
-            "Kırmızı CI ağ, runner veya daha önce kararsız olduğu bilinen bir testten kaynaklanıyor gibiyse yalnızca başarısız işler bir kez yeniden " +
-                "çalıştırılır; ajan gereksiz yere kodu \"düzeltmeye\" kalkmaz. Kararsız testler repo başına hatırlanır.") { s.flakyRetry = it }
-        SwitchSetting("Tedarik zinciri denetimi", "Sır ve yeni bağımlılık kontrolü", s.supplyChainCheck,
-            "Her commit'ten önce: diff'te API anahtarı veya özel anahtar var mı; yeni eklenen paket gerçekten var mı (uydurma paket adı), " +
-                "popüler bir paketin taklidi mi, bilinen güvenlik açığı var mı (OSV). Bulursa commit yapılmaz.") { s.supplyChainCheck = it }
-        SwitchSetting("Bekleme sürelerini örtüştür", "CI beklerken sonraki işe başlar", s.pipelining,
-            "Yönlendirme sürerken dosya ağacı ve repo haritası yüklenir; Hafif Sıralı modda bir alt görevin CI'ı beklenirken sıradaki alt görev " +
-                "düzenlenir; Tam modda Değerlendirici CI ile birlikte çalışır.") { s.pipelining = it }
-        if (s.workflowDeclined.isNotEmpty() || s.quickCheckDeclined.isNotEmpty()) {
-            Text("Kurulmasını reddettiğin bulut iş akışları: " + (s.workflowDeclined + s.quickCheckDeclined.map { "$it|quick" }).joinToString { it.replace("|", ": ") },
-                style = MaterialTheme.typography.bodySmall, color = coder.muted)
-            TextButton(onClick = { s.workflowDeclined = emptySet(); s.quickCheckDeclined = emptySet() }) { Text("Yeniden sorulsun") }
-        }
-    }
-
-    Group {
-        Title("Tahmin ve aday düzenlemeler", "Telefon, kendi commit'lerinin CI sonuçlarından hangi değişikliklerin kırmızı CI'a yol açtığını öğrenir " +
-            "(cihazda lojistik regresyon, veri dışarı gönderilmez). Riskli değişikliklerde Uygulayıcı birkaç aday üretir; yerel kontrol, öz-denetim ve " +
-            "adaylar arası oylamadan geçen en iyi aday commit edilir.")
-        SwitchSetting("Risk modeli", "Kırmızı CI olasılığını tahmin eder", s.riskModel,
-            "Commit'lerin CI sonucu (yeşil/kırmızı) ve değişikliğin özellikleri (dosya türleri, yapı dosyası, yeni dosya, boyut, zorluk) kaydedilir; " +
-                "en az ${com.suarez.coder.agent.RiskModel.MIN_SAMPLES} etiketli commit'ten sonra model eğitilir.") { s.riskModel = it }
-        var trig by remember { mutableStateOf(s.candidateTrigger) }
-        Label("Aday düzenlemeler", coder.muted)
-        Segmented(listOf("risk" to "Riskliyse", "always" to "Her zaman", "off" to "Kapalı"), trig) { trig = it; s.candidateTrigger = it }
-        NumberSetting("Aday sayısı (1-5)", s.candidates,
-            info = "Her aday ayrı bir Uygulayıcı çağrısıdır (farklı sıcaklıkla): 3 aday, o dosya grubu için yaklaşık 3 kat Uygulayıcı maliyeti.") { s.candidates = it }
-        TextSetting("Risk eşiği (0,05-0,95)", String.format(java.util.Locale.US, "%.2f", s.riskThreshold), keyboard = KeyboardType.Decimal,
-            info = "Tahmin edilen kırmızı CI olasılığı bu değeri aşınca adaylar üretilir.") { v -> v.replace(',', '.').toDoubleOrNull()?.let { s.riskThreshold = it } }
-        SwitchSetting("Uyarlanır ön kontrol", "Çok güvenli değişikliklerde atlanır", s.quickCheckAdaptive,
-            "Eğitilmiş risk modeli bir değişikliğe %12'nin altında başarısızlık olasılığı verirse hızlı ön kontrol atlanır; normal CI yine çalışır.") { s.quickCheckAdaptive = it }
-        SwitchSetting("Plan belirsizliği", "Plan net değilse önce sorar", s.planUncertainty,
-            "Ucuz bir model, Mimar'ın planını görmeden hangi dosyaların değişeceğini 3 kez bağımsız tahmin eder. Tahminler planla uyuşmazsa " +
-                "istek birden fazla şekilde anlaşılabilir: devam etmeden önce sorulur (gözetimsiz işlerde yalnızca not düşülür).") { s.planUncertainty = it }
-        val riskInfo by produceState<String?>(null) { value = withContext(Dispatchers.IO) { runCatching { vm.agent.foresight.status() }.getOrNull() } }
-        riskInfo?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = coder.muted) }
-    }
-
-    Group {
-        Title("İş kuyruğu", "Sohbet çekmecesindeki \"İş kuyruğu\"na eklenen görevler gözetimsiz, sırayla çalışır. Her görev kendi " +
-            "coder/q-* dalında çalışır, PR açar ve asla merge etmez.")
-        SwitchSetting("Kuyruk açık", "Sıradaki görevler çalışsın", s.queueEnabled) { s.queueEnabled = it; vm.queueSettingsChanged() }
-        SwitchSetting("Yalnızca şarjdayken", "Pil için önerilir", s.queueRequiresCharging) { s.queueRequiresCharging = it }
-        SwitchSetting("Yalnızca Wi-Fi'da", "Mobil veriyi korur", s.queueRequiresWifi) { s.queueRequiresWifi = it }
-        TextSetting("Görev başı bütçe (USD)", String.format(java.util.Locale.US, "%.2f", s.queueTaskBudget), keyboard = KeyboardType.Decimal,
-            info = "Bir kuyruk görevi bu tutara ulaşınca durur.") { v -> v.replace(',', '.').toDoubleOrNull()?.let { s.queueTaskBudget = it } }
-        NumberSetting("Çalışma saati başlangıcı (-1 veya bitişe eşit = her zaman)", s.queueWindowStart,
-            info = "Kuyruk yalnızca bu saatten bitiş saatine kadar çalışır (yerel saat, gece yarısını aşabilir). Sağlayıcının ucuz saatlerine göre ayarla; " +
-                "örneğin DeepSeek'in indirimli saatlerini resmi fiyat sayfasından kontrol et.") { s.queueWindowStart = it }
-        NumberSetting("Çalışma saati bitişi (-1 = her zaman)", s.queueWindowEnd) { s.queueWindowEnd = it }
-        SwitchSetting("Issue takibi", "\"coder\" etiketli issue'lar kuyruğa girer", s.issueWatch,
-            "Repolarında coder etiketli açık issue'lar 6 saatte bir kontrol edilir ve kuyruğa eklenir; PR açıklamasına Closes #n yazılır.") {
-            s.issueWatch = it; vm.queueSettingsChanged()
-        }
-        SwitchSetting("PR yorumlarından öğren", "Haftalık: inceleme yorumların proje kuralı olur", s.learnFromReviews,
-            "PR'lara yazdığın inceleme yorumları ucuz bir modelle kısa kurallara çevrilir ve o reponun derslerine eklenir.") { s.learnFromReviews = it }
-    }
-
-    Group { ModesEditor(vm) }
 
     Group {
         Title("Orkestratör", "Yalnızca Mimar'a giden (çok dosyalı) işlerde kullanılır. Kapalı: normal akış, ek çağrı yok. " +
@@ -468,25 +353,11 @@ private fun ArchitectPage(vm: ChatViewModel) {
             info = "Mobil ağ ve hız sınırları için 2 önerilir.") { s.orchMaxParallel = it }
         NumberSetting("Tam mod: en fazla inceleme turu", s.orchMaxReviewRounds,
             info = "İnceleyici'nin açabileceği düzeltme turu; sınırda durup size sorar.") { s.orchMaxReviewRounds = it }
-        SwitchSetting("Tam mod: Değerlendirici", "Uygulamayı gerçekten çalıştırıp sınar", s.evaluatorEnabled,
-            "Web projelerinde sözleşmedeki (kabul ölçütleri) her maddeyi GitHub Actions'ta Playwright ile tarayıcıda dener; bir madde geçmez " +
-                "veya konsolda hata varsa düzeltme turu açar. Android projelerinde CI testleri esas alınır. Daha pahalıdır: test betiği yazma çağrısı + CI dakikaları.") {
-            s.evaluatorEnabled = it
-        }
-        SwitchSetting("Tam mod: İki aday", "Zor işlerde iki model yarışır", s.bestOfTwo,
-            "Mimar'ın planını iki farklı Uygulayıcı modeli (model havuzundan veya yükseltme modeli) ayrı ayrı uygular; ikisi geçici dallarda " +
-                "Değerlendirici veya CI ile sınanır, daha iyi (eşitse daha ucuz) olan devam eder. Yaklaşık iki kat maliyet ve süre.") {
-            s.bestOfTwo = it
-        }
     }
 
     Group {
         Title("Yönlendirme", "Akıllı Yönlendirme açıkken sıra: yerel kural ($0) → Decision 1 → ucuz model → manuel ayar.")
         SwitchSetting("Akıllı Yönlendirme", "Görevi otomatik sınıflandır", s.smartRouting) { s.smartRouting = it; vm.refreshSettings() }
-        SwitchSetting("Belirsizse önce sor", "Net olmayan isteklerde 1-3 kısa soru", s.clarifyFirst,
-            "Decision isteği belirsiz bulursa (netlik %35 altı) kod yazmadan önce varsayılanlı kısa sorular sorar. Cevabından sonra bir daha sormaz.") {
-            s.clarifyFirst = it
-        }
         SwitchSetting("Decision 1 kullan", "Sınıflandırma + dosya seçimi + zorluk", s.useDecision1,
             "Kapalıysa yalnızca yerel kural ve ucuz model kullanılır.") { s.useDecision1 = it }
         var dp by remember { mutableStateOf(s.decisionProvider) }
@@ -528,7 +399,7 @@ private fun CachePage(vm: ChatViewModel) {
             info = "Açık önbellek yalnızca sistem talimatı + araçlar + sabit bağlam bu boyutu aşarsa oluşturulur.") { s.cacheMinTokens = it }
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(onClick = { scope.launch { cacheMsg = runCatching { vm.agent.clearCache() }.getOrElse { it.message ?: "Hata" } } }) {
-                Text("🧹 Önbelleği Temizle")
+                Text("Önbelleği Temizle")
             }
         }
         Text(cacheMsg, style = Mono.tiny, color = coder.muted)
@@ -554,8 +425,8 @@ private fun GitHubPage(vm: ChatViewModel) {
         TextButton(onClick = { uri.openUri("https://github.com/settings/tokens/new?scopes=repo,workflow&description=Coder%20Android") }) {
             Text("Token oluştur: github.com")
         }
-        TextSetting("Varsayılan repo", s.defaultRepo, mono = true, placeholder = "sahip/isim") { s.defaultRepo = it; vm.projectSettingsChanged() }
-        TextSetting("Varsayılan branch", s.defaultBranch, mono = true, placeholder = "main") { s.defaultBranch = it; vm.projectSettingsChanged() }
+        TextSetting("Varsayılan repo", s.defaultRepo, mono = true, placeholder = "sahip/isim") { s.defaultRepo = it; vm.refreshSettings() }
+        TextSetting("Varsayılan branch", s.defaultBranch, mono = true, placeholder = "main") { s.defaultBranch = it; vm.refreshSettings() }
         Text("Repo, branch ve özel talimatlar etkin proje profiline kaydedilir. Profiller arasında üst çubuktaki repo rozetine dokunarak geçiş yapılır.",
             style = MaterialTheme.typography.bodySmall, color = coder.muted)
     }
@@ -566,7 +437,7 @@ private fun GitHubPage(vm: ChatViewModel) {
         NumberSetting("Bir istekte en fazla adım", s.maxSteps) { s.maxSteps = it }
         NumberSetting("İstek zaman aşımı (sn)", s.requestTimeoutSec,
             info = "Akış sırasında bu süre boyunca hiç veri gelmezse istek takıldı sayılır (Flex hariç).") { s.requestTimeoutSec = it }
-        TextSetting("Özel talimatlar", s.customInstructions, singleLine = false) { s.customInstructions = it; vm.refreshSettings() }
+        TextSetting("Özel talimatlar", s.customInstructions, singleLine = false) { s.customInstructions = it }
     }
 
     Group {
@@ -620,100 +491,6 @@ private fun TemplatesPage(vm: ChatViewModel) {
 }
 
 // ---- Building blocks ----
-
-/** The user's order of stronger models: repairs and repeated errors climb it one by one. */
-@Composable
-private fun EscalationEditor(vm: ChatViewModel) {
-    val s = vm.settings
-    var chain by remember { mutableStateOf(com.suarez.coder.agent.Escalation.parse(s.escalationChain)) }
-    var picking by remember { mutableStateOf(false) }
-    fun save(list: List<String>) { chain = list; s.escalationChain = list.joinToString("\n"); vm.refreshSettings() }
-    Title("Yükseltme sıralaması", "Uygulayıcı takılınca (onarım denemeleri, üst üste hatalar, aynı CI hatasının tekrarı) sırayla bu " +
-        "modellere geçilir: önce 1, sonra 2... Mimar hiçbir zaman onarım yapmaz. Boşsa tek \"Yükseltme modeli\" (veya otomatik seçim) kullanılır.")
-    if (chain.isEmpty()) Label("Sıralama boş: otomatik yükseltme modeli kullanılıyor.", coder.muted)
-    chain.forEachIndexed { i, key ->
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text("${i + 1}. $key", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            TextButton(onClick = { save(chain.toMutableList().also { java.util.Collections.swap(it, i, i - 1) }) }, enabled = i > 0) { Text("Yukarı") }
-            TextButton(onClick = { save(chain.toMutableList().also { java.util.Collections.swap(it, i, i + 1) }) }, enabled = i < chain.size - 1) { Text("Aşağı") }
-            TextButton(onClick = { save(chain.filterIndexed { j, _ -> j != i }) }) { Text("Sil") }
-        }
-    }
-    TextButton(onClick = { picking = true }) { Text("Model ekle") }
-    if (picking) {
-        val options = vm.modelOptions().filter { it.key !in chain && vm.settings.keyFor(it.provider).isNotBlank() }
-        AlertDialog(
-            onDismissRequest = { picking = false },
-            title = { Text("Sıralamaya model ekle") },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    if (options.isEmpty()) Text("Anahtarı girilmiş başka model yok. Model listesini güncelle.", color = coder.muted)
-                    options.forEach { m ->
-                        Column(Modifier.fillMaxWidth().clickable { save(chain + m.key); picking = false }.padding(vertical = 8.dp)) {
-                            Text(m.key, style = MaterialTheme.typography.bodyMedium)
-                            Text(vm.priceLabel(m), style = MaterialTheme.typography.bodySmall, color = coder.muted)
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { picking = false }) { Text("Kapat") } },
-        )
-    }
-}
-
-/** User-defined modes: name, instructions, tool access, model. Chosen from the chat's control sheet. */
-@Composable
-private fun ModesEditor(vm: ChatViewModel) {
-    var modes by remember { mutableStateOf(vm.customModes()) }
-    var editing by remember { mutableStateOf<Pair<Int, com.suarez.coder.agent.CustomMode>?>(null) }
-    Title("Özel modlar", "Kendi çalışma modun: talimat, araç izni ve model. Sohbetteki kontrol panelinden seçilir; seçiliyken " +
-        "yönlendirme atlanır ve her istek bu modla çalışır. Otomatik'e dönmek için panelden Otomatik'i seç.")
-    if (modes.isEmpty()) Label("Henüz mod yok.", coder.muted)
-    modes.forEachIndexed { i, m ->
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(m.name, style = MaterialTheme.typography.bodyMedium)
-                Text("${m.access.label}" + (if (m.model.isNotBlank()) " · ${m.model}" else ""), style = MaterialTheme.typography.bodySmall, color = coder.muted)
-            }
-            TextButton(onClick = { editing = i to m }) { Text("Düzenle") }
-            TextButton(onClick = { modes = modes.filterIndexed { j, _ -> j != i }; vm.saveModes(modes) }) { Text("Sil") }
-        }
-    }
-    Row {
-        TextButton(onClick = { editing = -1 to com.suarez.coder.agent.CustomMode("", "") }) { Text("Yeni mod") }
-        if (modes.isEmpty()) TextButton(onClick = { modes = com.suarez.coder.agent.CustomMode.EXAMPLES; vm.saveModes(modes) }) { Text("Örnekleri ekle") }
-    }
-    editing?.let { (idx, m) ->
-        var name by remember(idx) { mutableStateOf(m.name) }
-        var instr by remember(idx) { mutableStateOf(m.instructions) }
-        var access by remember(idx) { mutableStateOf(m.access) }
-        var model by remember(idx) { mutableStateOf(m.model) }
-        AlertDialog(
-            onDismissRequest = { editing = null },
-            title = { Text(if (idx < 0) "Yeni mod" else "Modu düzenle") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(name, { name = it.take(30) }, singleLine = true, label = { Text("Ad") })
-                    OutlinedTextField(instr, { instr = it }, minLines = 3, maxLines = 8, label = { Text("Talimat") })
-                    Segmented(com.suarez.coder.agent.CustomMode.Access.entries.map { it.name to it.label }, access.name) {
-                        access = com.suarez.coder.agent.CustomMode.Access.valueOf(it)
-                    }
-                    OutlinedTextField(model, { model = it.trim() }, singleLine = true, label = { Text("Model (boş = Uygulayıcı)") },
-                        placeholder = { Text("ör. gemini/gemini-2.5-flash") })
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = name.isNotBlank() && instr.isNotBlank() && modes.filterIndexed { j, _ -> j != idx }.none { it.name == name.trim() }, onClick = {
-                    val nm = com.suarez.coder.agent.CustomMode(name.trim(), instr.trim(), access, model)
-                    modes = if (idx < 0) modes + nm else modes.mapIndexed { j, o -> if (j == idx) nm else o }
-                    vm.saveModes(modes)
-                    editing = null
-                }) { Text("Kaydet") }
-            },
-            dismissButton = { TextButton(onClick = { editing = null }) { Text("Vazgeç") } },
-        )
-    }
-}
 
 @Composable
 private fun Group(content: @Composable ColumnScope.() -> Unit) {
@@ -808,15 +585,10 @@ private fun TextSetting(
     info: String? = null,
     onSave: (String) -> Unit,
 ) {
-    var text by remember(initial) { mutableStateOf(initial) }
-    var saved by remember(initial) { mutableStateOf(initial) }
+    var text by remember { mutableStateOf(initial) }
+    var saved by remember { mutableStateOf(initial) }
     var justSaved by remember { mutableStateOf(false) }
     var show by remember { mutableStateOf(false) }
-    // Leaving the page (or the field disappearing) within the debounce must not lose what was typed.
-    val latestText by rememberUpdatedState(text)
-    val latestSaved by rememberUpdatedState(saved)
-    val latestOnSave by rememberUpdatedState(onSave)
-    DisposableEffect(Unit) { onDispose { if (latestText != latestSaved) latestOnSave(latestText) } }
     LaunchedEffect(text) {
         if (text == saved) return@LaunchedEffect
         delay(700)

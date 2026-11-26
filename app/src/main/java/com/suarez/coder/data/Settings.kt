@@ -498,6 +498,22 @@ class Settings(context: Context) {
         get() = prefs.getInt("ci_max_rounds", 4).coerceIn(1, 10)
         set(v) = prefs.edit().putInt("ci_max_rounds", v.coerceIn(1, 10)).apply()
 
+    // Auto-Ship: for user-initiated tasks only, run code, PR, CI, merge, version bump and APK
+    // automatically. Never for evo-prefixed PRs. (Not a block comment: Kotlin nests /* */.)
+    var autoShip: Boolean
+        get() = bool("auto_ship", false)
+        set(v) = putBool("auto_ship", v)
+
+    /** Max automatic CI-fix rounds before giving up (1-5). */
+    var maxCiHealAttempts: Int
+        get() = prefs.getInt("max_ci_heal_attempts", 3).coerceIn(1, 5)
+        set(v) = prefs.edit().putInt("max_ci_heal_attempts", v.coerceIn(1, 5)).apply()
+
+    /** "auto" = bump version automatically on ship; "tag" = only tag a release on the existing tag flow. */
+    var versionBumpMode: String
+        get() = str("version_bump_mode", "auto")
+        set(v) = put("version_bump_mode", v)
+
     /** A cheap model checks the architect's plan for missing callers/registrations before code is written. */
     var planCritic: Boolean
         get() = bool("plan_critic", true)
