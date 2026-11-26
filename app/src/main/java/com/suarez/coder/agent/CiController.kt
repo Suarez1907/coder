@@ -40,6 +40,8 @@ internal class CiController(private val agent: Agent) {
                 agent.ciKnowledge?.record(st.pendingRepo, sig, fix)
             }
             st.pendingSig = null; st.fixes.clear()
+            // Auto-Ship: yeşil build sürüm yayınlamadıysa kullanıcıya tek satır uyarı.
+            if (!agent.isEvolutionSession) tools.takeShipNotice()?.let { history += it }
             return result to cur
         }
         if (!text.contains("\nHatalar (")) return result to cur

@@ -621,21 +621,18 @@ class GitHub(private val token: () -> String) {
      * A downloadable APK built for [sha]: a release asset of a release targeting that commit (or [branch]),
      * else the first artifact of the given runs. Returns a link the chat/installer understands, or null.
      */
-    suspend fun apkLinkFor(repo: String, sha: String, branch: String?, runIds: List<Long>): String? {
+    suspend fun apkLinkFor(repo: String, sha: String, branch: String?, runIds: List<Long>): String? =
+        shipFor(repo, sha, branch)?.apkUrl ?: artifactLink(repo, runIds)
+
+    /** The release published for [sha]/[branch] (Auto-Ship), with its tag and page for the chat. */
+    suspend fun shipFor(repo: String, sha: String, branch: String?): com.suarez.coder.ci.AutoShip.Ship? {
         val rel = call("GET", "/repos/$repo/releases?per_page=10")
-        if (rel.code in 200..299) {
-            val arr = JSONArray(rel.body)
-            for (i in 0 until arr.length()) {
-                val r = arr.getJSONObject(i)
-                val target = r.optString("target_commitish")
-                if (target != sha && (branch == null || target != branch)) continue
-                val assets = r.optJSONArray("assets") ?: continue
-                for (j in 0 until assets.length()) {
-                    val a = assets.getJSONObject(j)
-                    if (a.optString("name").endsWith(".apk")) return a.optString("browser_download_url").ifBlank { null }
-                }
-            }
-        }
+        if (rel.code !in 200..299) return null
+        return com.suarez.coder.ci.AutoShip.pick(rel.body, sha, branch)
+    }
+
+    /** First artifact of the given runs (the app downloads it with the token), or null. */
+    suspend fun artifactLink(repo: String, runIds: List<Long>): String? {
         for (id in runIds) {
             val res = call("GET", "/repos/$repo/actions/runs/$id/artifacts?per_page=10")
             if (res.code !in 200..299) continue

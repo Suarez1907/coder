@@ -39,6 +39,15 @@ class ToolRegistry(private val settings: Settings) {
 
     var ciListener: CiListener? = null
 
+    /** Auto-Ship: yeşil build'in yayınlamadığı sürüme dair uyarı (CiController bir kez Notice ekler). */
+    private var shipMissing: String? = null
+
+    fun takeShipNotice(): com.suarez.coder.llm.ChatMessage.Notice? {
+        val text = shipMissing ?: return null
+        shipMissing = null
+        return com.suarez.coder.llm.ChatMessage.Notice(text)
+    }
+
     /** Whether a path is part of the frozen stable context (so its copy there is now outdated). */
     var isInSnapshot: (String) -> Boolean = { false }
 
@@ -628,8 +637,10 @@ class ToolRegistry(private val settings: Settings) {
                 return sb.toString()
             }
             if (success) {
-                apk = runCatching { github.apkLinkFor(repo, sha, branch, runs.map { it.id }) }.getOrNull()
+                val ship = runCatching { github.shipFor(repo, sha, branch) }.getOrNull()
+                apk = ship?.apkUrl ?: runCatching { github.artifactLink(repo, runs.map { it.id }) }.getOrNull()
                 apk?.let { sb.append("\nAPK: ").append(it).append('\n') }
+                shipMissing = com.suarez.coder.ci.AutoShip.warning(ship, repo, branch ?: sha, runs.lastOrNull()?.url)
                 summary = runs.joinToString { "${it.name}: ${it.conclusion}" }
             } else {
                 failed.forEach { r ->
