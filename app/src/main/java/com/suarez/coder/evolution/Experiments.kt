@@ -37,6 +37,9 @@ data class Experiment(
     enum class Kind(val label: String) { MODEL("Model"), RULE("Kural"), SKILL("Yetenek"), PROMPT("İstem") }
     enum class State(val label: String) { QUEUED("Sırada"), RUNNING("Sınavda"), PROPOSED("Onay bekliyor"), ADOPTED("Kabul edildi"), REJECTED("Reddedildi"), FAILED("Ölçülemedi") }
 
+    /** True when this experiment would change the architect (planner) model, which is locked. */
+    fun isArchitectExperiment(): Boolean = kind == Kind.MODEL && payload.optString("role") == "architect"
+
     /** Identity of the change itself (the same change is never tested twice). */
     val key get() = "${kind.name}:" + when (kind) {
         Kind.MODEL -> payload.optString("role") + "=" + payload.optString("model")
@@ -59,9 +62,11 @@ data class Experiment(
             o.optNullableString("note"),
         )
 
-        fun model(role: String, model: String, source: String) =
-            Experiment(kind = Kind.MODEL, title = "${if (role == "architect") "Mimar" else "Uygulayıcı"} → ${model.substringAfter('/')}",
+        fun model(role: String, model: String, source: String): Experiment {
+            require(role != "architect") { "Mimar modeli kilitli: architect deneyi üretilemez" }
+            return Experiment(kind = Kind.MODEL, title = "Uygulayıcı → ${model.substringAfter('/')}",
                 payload = JSONObject().put("role", role).put("model", model), source = source)
+        }
 
         fun rule(text: String, source: String) =
             Experiment(kind = Kind.RULE, title = "Kural: " + text.take(80), payload = JSONObject().put("text", text.trim()), source = source)
