@@ -2,6 +2,9 @@ name: Kotlin diag
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/diag.yml
 
 permissions:
   contents: write
