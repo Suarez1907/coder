@@ -432,6 +432,12 @@ private fun GitHubPage(vm: ChatViewModel) {
     }
 
     Group {
+        Title("CI", "Yeşil build'den sonra APK ve sürüm bağlantısı sohbete eklenir.")
+        SwitchSetting("Kırmızı CI'yı yeniden dene", "Geçici hata veya bilinen flaky test", s.flakyRetry,
+            "Koşu yalnızca ağ/runner hatası ya da daha önce geçip düşen testler yüzünden kırmızıysa bir kez yeniden çalıştırılır; model çağrılmaz.") { s.flakyRetry = it }
+    }
+
+    Group {
         Title("Ajan")
         SwitchSetting("Değişiklikleri otomatik onayla", "Commit, PR, merge için sorma", s.autoApprove) { s.autoApprove = it }
         NumberSetting("Bir istekte en fazla adım", s.maxSteps) { s.maxSteps = it }
