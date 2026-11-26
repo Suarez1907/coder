@@ -19,6 +19,7 @@ class SkillRepository(
     private val globalFile = File(dir, "skills.json")
     private val disabledFile = File(dir, "skills_disabled.json")
     private val repoCache = HashMap<String, Pair<Long, List<Skill>>>()
+    private val dirtyRepos = HashSet<String>()
 
     init {
         dir.mkdirs()
@@ -141,14 +142,17 @@ class SkillRepository(
     suspend fun refreshRepo(repo: String, force: Boolean = false): List<Skill> {
         if (repo.isBlank()) return emptyList()
         val key = repo.lowercase()
-        synchronized(this) { repoCache[key]?.let { (at, list) -> if (!force && now() - at < REPO_TTL_MS) return list } }
+        synchronized(this) { repoCache[key]?.let { (at, list) -> if (!force && key !in dirtyRepos && now() - at < REPO_TTL_MS) return list } }
         val paths = runCatching { listPaths(repo) }.getOrNull() ?: return cachedRepo(repo)
         val skills = repoSkillPaths(paths).mapNotNull { (name, path) ->
             runCatching { readFile(repo, path) }.getOrNull()?.let { SkillParser.parse(it, name, Skill.Source.REPO, path) }
         }
-        synchronized(this) { repoCache[key] = now() to skills }
+        synchronized(this) { repoCache[key] = now() to skills; dirtyRepos -= key }
         return skills
     }
+
+    /** A skill file was committed: the next refresh re-reads the tree instead of trusting the TTL. */
+    @Synchronized fun invalidate(repo: String) { dirtyRepos += repo.lowercase() }
 
     @Synchronized fun cachedRepo(repo: String): List<Skill> = repoCache[repo.lowercase()]?.second.orEmpty()
 
