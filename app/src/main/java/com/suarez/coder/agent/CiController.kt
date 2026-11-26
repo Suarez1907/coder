@@ -50,6 +50,8 @@ internal class CiController(private val agent: Agent) {
         if (st.pendingSig == null) { st.pendingSig = sig; st.pendingRepo = repo }
         var out = result
         if (settings.fixMemory) agent.fixMemory?.let { m -> m.hint(m.lookup(repo, sig))?.let { out = result.copy(content = text + "\n\n" + it) } }
+        // Tekrarlayan hatada ders defteri ipucu (sınıf + geçen seferki çözüm); tek seferlikte gürültü yapmaz.
+        if (repeated && settings.fixMemory) agent.ciKnowledge?.let { kb -> kb.hint(kb.lookup(repo, sig))?.let { h -> out = out.copy(content = out.content + "\n\n" + h) } }
         var next: ModelRef? = cur
         if (settings.untilGreen && repeated && !agent.isEvolutionSession) {
             val up = Escalation.next(agent.escalationChain(), cur)
