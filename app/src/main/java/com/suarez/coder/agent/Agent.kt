@@ -35,10 +35,13 @@ import com.suarez.coder.llm.ToolSpec
 import com.suarez.coder.llm.Usage
 import com.suarez.coder.tools.ToolRegistry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
+import org.json.JSONObject
 
 /** What the agent needs from the screen. */
 interface AgentUi {
@@ -50,10 +53,158 @@ interface AgentUi {
 
 class StopException(message: String) : Exception(message)
 
-class Agent(val settings: Settings, filesDir: java.io.File? = null) {
+/** How a bounded architect turn ended. */
+sealed class ArchOutcome {
+    /** The plan tool was called with a usable plan (its ToolResult is added by the caller). */
+    data class Submitted(val call: ToolCall) : ArchOutcome()
+    /** The architect handed the work to the executor (its ToolResult is added by the caller). */
+    data class Delegated(val call: ToolCall, val instructions: String) : ArchOutcome()
+    /** Answered in text: no code change needed. */
+    object Answered : ArchOutcome()
+    data class Unusable(val why: String) : ArchOutcome()
+}
+
+class Agent(val settings: Settings, private val filesDir: java.io.File? = null) {
     val tools = ToolRegistry(settings)
     val context = ContextProvider(settings, tools.github)
     val repoMaps = com.suarez.coder.repomap.RepoMapService(tools.github, filesDir)
+
+    init {
+        if (filesDir != null) {
+            tools.skills = com.suarez.coder.skills.SkillRepository(
+                java.io.File(filesDir, "skills"),
+                listPaths = { repo -> tools.github.treeEntries(repo, null)?.second?.map { it.path } },
+                readFile = { repo, path -> tools.github.readFileRaw(repo, path, null) },
+            )
+            tools.cloud = com.suarez.coder.cloudtools.CloudToolRunner(
+                tools.github,
+                com.suarez.coder.apk.ApkDownloader({ settings.githubToken }, java.io.File(filesDir, "cloud-tmp"), com.suarez.coder.llm.Http.client),
+                java.io.File(filesDir, "cloud"),
+                ciErrors = { repo, id -> tools.ciErrors(repo, id) },
+            )
+            tools.flaky = com.suarez.coder.ci.Flaky.Store(java.io.File(filesDir, "flaky.json"))
+            tools.semantic = com.suarez.coder.context.SemanticIndex(tools.github, { r, ref -> tools.filteredTree(r, ref) },
+                java.io.File(filesDir, "semantic"), { settings.geminiKey })
+        }
+        tools.preCommit = { repo, branch, changes ->
+            guards.supplyChain(repo, branch, changes) // no model call: cheapest first
+            guards.selfReview(repo, branch, changes)
+            guards.quickCheck(repo, branch, changes)
+        }
+        tools.beforeWrite = { repo, branch -> guards.checkpoint(repo, branch) }
+        tools.afterCommit = { repo, result, paths, newFiles -> runCatching { foresight.recordCommit(repo, result, paths, newFiles) } }
+    }
+
+    // ---- Run-scoped helpers: self-review, checkpoints, @-mentions, similar tasks, custom modes ----
+
+    /** The conversation of the current run (hooks called from tools write their notices and costs here). */
+    internal var liveHistory: MutableList<ChatMessage>? = null
+    internal var liveUi: AgentUi? = null
+    internal val guards by lazy { CommitGuards(this) }
+    internal val foresight by lazy { Foresight(this) }
+    internal val cloudSkills by lazy { CloudSkills(this) }
+    init { if (filesDir != null) tools.cloudOps = cloudSkills }
+    /** Decision 1's difficulty for the current request (0..3), when routing produced one. */
+    var lastComplexity: Double? = null
+    internal fun filesDirOrNull() = filesDir
+    internal fun architectSnapshot(): String? = snapshots["architect"]
+    internal val safety by lazy { SafetyPolicy(this) }
+    private val ciController by lazy { CiController(this) }
+    private val requestContext by lazy { RequestContext(this) }
+    private val prompts by lazy { AgentPrompts(this) }
+
+    fun agentSystem() = prompts.agentSystem()
+    fun architectSystem(hasMap: Boolean, singleShot: Boolean = false) = prompts.architectSystem(hasMap, singleShot)
+    val editorSystem: String get() = prompts.editorSystem
+    fun questionSystem() = prompts.questionSystem()
+    fun securityQuestion(call: ToolCall, method: String?) = safety.securityQuestion(call, method)
+    fun unattendedDenied(name: String, method: String?) = safety.unattendedDenied(name, method)
+    /** Set by the app: a hint from similar successful earlier tasks, or null. */
+    var similarFor: ((repo: String, request: String) -> String?)? = null
+    /** CI error → fix memory (shared file; null without app storage). */
+    val fixMemory: FixMemory? = filesDir?.let { FixMemory(java.io.File(it, "fixes.json")) }
+
+    /** The user's ordered stronger models (keys present); falls back to the single escalation model. */
+    fun escalationChain(): List<ModelRef> {
+        if (modelOverride != null) return emptyList()
+        val chain = Escalation.parse(settings.escalationChain).mapNotNull { ModelRef.parse(it) }
+            .filter { settings.keyFor(it.provider).isNotBlank() }.distinctBy { it.key }
+        return chain.ifEmpty { listOfNotNull(escalationRef()) }
+    }
+
+    /** Plan critic: a cheap model looks for missing callers/registrations; issues go to the executor, missing files join the plan. */
+    suspend fun critiquePlan(history: MutableList<ChatMessage>, ui: AgentUi, plan: ParsedPlan): ParsedPlan {
+        if (!settings.planCritic || isEvolutionSession || plan.files.isEmpty()) return plan
+        val map = snapshots["architect"]?.substringAfter("REPO MAP", "")?.take(40_000)
+        val planText = "Repo ${plan.repo}, branch ${plan.branch}\nCommit: ${plan.message}\nNotes: ${plan.notes}\n" +
+            plan.files.joinToString("\n") { "## ${it.path} [${it.action}]\n${it.instructions}" }
+        ui.status("Plan eleştirmeni planı inceliyor")
+        val reply = try {
+            callModel(history, listOf(ChatMessage.User("PLAN:\n$planText" + (map?.takeIf { it.isNotBlank() }?.let { "\n\nREPO MAP$it" } ?: ""))),
+                routerRef() ?: editorRef(), "critic", PlanCritic.SYSTEM, emptyList(), ui, useCache = false, maxOut = 700, thinking = "low")
+        } catch (e: CancellationException) { throw e } catch (e: Exception) { return plan } finally { ui.status(null) }
+        val v = PlanCritic.parse(reply.text) ?: return plan
+        if (v.ok) { history += ChatMessage.Notice("Plan eleştirmeni: eksik bulmadı"); ui.update(); return plan }
+        val known = plan.files.map { it.path }.toSet()
+        // The plan's branch is often new: fall back to its base, then the default branch.
+        val tree = listOf(plan.branch.takeIf { it.isNotBlank() }, plan.base, null).distinct().firstNotNullOfOrNull { ref ->
+            runCatching { tools.filteredTree(plan.repo, ref) }.getOrNull()?.takeIf { it.isNotEmpty() }
+        }.orEmpty().map { it.path }.toSet()
+        val add = v.addFiles.filter { it.path !in known && (it.action == "create" || it.path in tree) }
+        history += ChatMessage.Notice("Plan eleştirmeni ${v.issues.size} not" + (if (add.isNotEmpty()) ", ${add.size} dosya ekledi" else ""),
+            (v.issues.map { "- $it" } + add.map { "+ ${it.path}: ${it.instructions}" }).joinToString("\n"))
+        ui.update()
+        val notes = (plan.notes + "\nReviewer concerns to address while implementing:\n" + v.issues.joinToString("\n") { "- $it" }).trim()
+        return plan.copy(notes = notes, files = plan.files + add)
+    }
+
+
+
+
+
+
+
+
+    /** Queue runs: nobody is watching, so nothing is installed or asked; confirmations are answered by the run's own rules. */
+    var unattended = false
+
+
+
+
+    /** Parallel reads: no per-call status flicker (one status line covers them). */
+    private class NoStatusUi(private val ui: AgentUi) : AgentUi {
+        override fun update() {}
+        override fun status(text: String?) {}
+        override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) = ui.confirm(title, body, okText, cancelText)
+    }
+
+    internal object NoUi : AgentUi {
+        override fun update() {}
+        override suspend fun confirm(title: String, body: String, okText: String, cancelText: String) = false
+    }
+
+
+    fun customModes(): List<CustomMode> = CustomMode.list(settings.customModes)
+    fun activeMode(): CustomMode? = settings.activeMode.takeIf { it.isNotBlank() }?.let { n -> customModes().firstOrNull { it.name == n } }
+
+    private suspend fun runMode(history: MutableList<ChatMessage>, ui: AgentUi, mode: CustomMode, task: String = "") {
+        val ref = ModelRef.parse(mode.model)?.takeIf { settings.keyFor(it.provider).isNotBlank() } ?: editorRef()
+        history += ChatMessage.RouteInfo("Mod: ${mode.name} (${ref.model}, ${mode.access.label})", mode.instructions.take(400), "MODE", false)
+        ui.update()
+        // READ_ONLY bir model kimliği değil, çalışma fazıdır: yazma niyetli görevde salt okunur moda düşmeyiz.
+        val writeIntent = ReadOnlyMismatchRecovery.hasWriteIntent(task)
+        val readOnly = mode.access == CustomMode.Access.READ_ONLY && !writeIntent
+        val access = if (mode.access == CustomMode.Access.READ_ONLY && !readOnly) CustomMode.Access.FULL else mode.access
+        val specs = when (access) {
+            CustomMode.Access.READ_ONLY -> tools.readOnlySpecs.filter { it.name != "submit_plan" }
+            CustomMode.Access.NO_OPS -> tools.specs.filter { it.name !in setOf("github_create_pull_request", "github_merge_pull_request", "github_run_workflow") }
+            CustomMode.Access.FULL -> tools.specs
+        }
+        val system = (if (readOnly) questionSystem() else agentSystem()) + "\nACTIVE MODE \"${mode.name}\" (follow it): ${mode.instructions}"
+        agentLoop(history, ui, ref, "agent", system, "agent", specs, readOnly = readOnly, stopTool = null,
+            maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel, writeIntent = writeIntent, writeSpecs = tools.specs)
+    }
+
     private val cache = GeminiCacheManager(settings)
     private var budgetApprovedUpTo = 0.0
     /** Frozen stable project context per kind ("agent" / "architect"); rebuilt only at checkpoints or after many commits. */
@@ -106,6 +257,24 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         const val MAX_CONSECUTIVE_FAILURES = 3
         const val SUMMARIZE_AFTER_CHARS = 24_000
         const val MAX_ARCHITECT_READS = 3
+        /** The architect is called at most this many times per task: plan, or ask for ≤3 files and then plan. */
+        const val MAX_ARCHITECT_CALLS = 2
+        const val CLARIFY_MARK = "❓"
+        /** Prefix of messages the "until green" controller adds in the user's place. */
+        const val AUTO_NUDGE = "[Otomatik denetleyici] "
+        const val MAX_FAILOVERS = 2
+        /** Read-only tools that may run at the same time. */
+        val PARALLEL_SAFE = setOf("github_read_file", "github_read_files", "github_get_tree", "github_search_code", "github_list_repos",
+            "web_search", "web_fetch", "lookup_docs", "find_references", "ci_errors", "load_skill")
+        /** Roles whose output cap is learned (adaptive budget). */
+        val ADAPTIVE_ROLES = setOf("agent", "editor", "escalation", "architect")
+
+        /** Overload, rate limit, server error, timeout or a dead stream: worth trying another model. */
+        fun isTransient(e: Exception): Boolean {
+            val m = e.message.orEmpty().lowercase()
+            return Regex("\\((429|500|502|503|504|520|522|524|529)\\)").containsMatchIn(m) ||
+                listOf("overload", "rate limit", "unavailable", "bağlantı hatası", "takıldı", "20 dakikayı aştı", "boş yanıt", "timeout").any { m.contains(it) }
+        }
         /** Decision 1 difficulty (0 trivial … 3 very hard) below which the medium architect is used. */
         const val MEDIUM_COMPLEXITY = 1.5
         const val SNAPSHOT_MAX_COMMITS = 6
@@ -145,14 +314,14 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     // ---- Models ----
 
-    fun singleRef(p: Provider = settings.provider) = ModelRef(p, settings.modelFor(p))
+    fun singleRef(p: Provider = settings.provider) = modelOverride ?: ModelRef(p, settings.modelFor(p))
     /** Per-request override chosen from Decision 1's difficulty score (cleared after each run). */
     private var architectOverride: ModelRef? = null
     private var architectThinkingOverride: String? = null
 
-    fun architectRef() = architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
+    fun architectRef() = modelOverride ?: roleOverrides["architect"] ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
     fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
-    fun editorRef() = ModelRef.parse(settings.editorModel) ?: singleRef()
+    fun editorRef() = modelOverride ?: roleOverrides["editor"] ?: ModelRef.parse(settings.editorModel) ?: singleRef()
     fun mainRef() = if (settings.architectMode) architectRef() else singleRef()
 
     fun client(ref: ModelRef): LlmClient = when (ref.provider) {
@@ -161,6 +330,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         Provider.OPENROUTER -> OpenAiCompatClient("OpenRouter", OpenRouterCatalog.BASE_URL, settings.openrouterKey, ref.model,
             vision = openRouterModels()[ref.model]?.vision == true,
             reasoning = openRouterModels()[ref.model]?.reasoning == true,
+            json = openRouterModels()[ref.model]?.json == true,
             openRouter = true,
             cacheControl = OpenRouterCatalog.needsCacheControl(ref.model),
             extraHeaders = mapOf("X-Title" to "Coder"))
@@ -201,6 +371,115 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     }
     fun sessionCost(history: List<ChatMessage>) = history.filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
     fun money(usd: Double) = "${Pricing.formatUsd(usd)} (${Pricing.formatTry(usd * settings.usdTry)})"
+
+    /**
+     * The architect's whole turn, bounded: at most [MAX_ARCHITECT_CALLS] calls with the same system prompt and the same
+     * tool list (so the prefix stays cacheable). Ask-for-files is served once from the repo; after that the architect must
+     * plan, delegate or answer. It never gets a tool loop, write tools or repository operations.
+     */
+    suspend fun architectTurns(
+        history: MutableList<ChatMessage>,
+        ui: AgentUi,
+        role: String,
+        system: String,
+        tools: List<ToolSpec>,
+        submitName: String,
+        validate: (ToolCall) -> String?,
+    ): ArchOutcome {
+        val stable = stableContext("architect", history, ui)
+        var lastError = "Mimar plan göndermedi."
+        for (step in 1..MAX_ARCHITECT_CALLS) {
+            val final = step == MAX_ARCHITECT_CALLS
+            val prepared = HistoryPruner.prepare(history, settings.keepTurns)
+            val reply = callModel(history, prepared.messages, architectRef(), role, system, tools, ui,
+                maxOut = settings.maxOutArchitect, thinking = architectThinking(), stable = stable)
+            history += reply
+            ui.update()
+            if (reply.toolCalls.isEmpty()) return ArchOutcome.Answered
+            val submit = reply.toolCalls.firstOrNull { it.name == submitName }
+            val delegate = reply.toolCalls.firstOrNull { it.name == "delegate_to_executor" }
+            val chosen = submit?.takeIf { validate(it) == null } ?: delegate
+            // Every call needs an answer before the next request; the chosen one is answered by the caller.
+            for (c in reply.toolCalls) {
+                if (c === chosen) continue
+                val text = when {
+                    c === submit -> "Plan kullanılamadı: ${validate(c)}".also { lastError = it }
+                    c.name == "need_more_info" && !final -> {
+                        val repo = context.repo.takeIf { it.isNotBlank() }?.let { this.tools.normalizeRepo(it) }
+                        val paths = com.suarez.coder.tools.Args.stringList(c.args, "paths").orEmpty().take(MAX_ARCHITECT_READS)
+                        val files = if (repo != null && paths.isNotEmpty()) {
+                            runCatching { this.tools.readFilesText(repo, paths, context.ref) }.getOrElse { "(okunamadı: ${it.message})" }
+                        } else "(dosya yolu verilmedi)"
+                        "İstenen dosyalar aşağıda. Bu SON adım: şimdi $submitName veya delegate_to_executor çağır ya da metinle cevap ver.\n\n$files"
+                    }
+                    else -> "Bu adımda kullanılamaz: ${c.name}. $submitName veya delegate_to_executor çağır.".also { lastError = it }
+                }
+                history += ChatMessage.ToolResult(c.id, c.name, text, isError = c === submit || c.name != "need_more_info")
+            }
+            ui.update()
+            when {
+                chosen != null && chosen === delegate -> return ArchOutcome.Delegated(delegate,
+                    delegate.args.optString("instructions").ifBlank { "Kullanıcının isteğini uygula." })
+                chosen != null -> return ArchOutcome.Submitted(chosen)
+            }
+        }
+        return ArchOutcome.Unusable(lastError)
+    }
+
+    /** Runs a delegated task with the executor (full tools); the architect is not involved any more. */
+    suspend fun runDelegated(history: MutableList<ChatMessage>, ui: AgentUi, call: ToolCall, instructions: String) {
+        history += ChatMessage.ToolResult(call.id, call.name, "Uygulayıcı'ya devredildi.")
+        history += ChatMessage.RouteInfo("Mimar → Uygulayıcı'ya devretti (${editorRef().model})", instructions.take(600), Route.SIMPLE_EDIT.name, false)
+        ui.update()
+        agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
+            maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
+    }
+
+    // ---- Self-improvement manager hooks ----
+
+    /** Per-role models for the current run (learned choice) or for a whole exam run (the variant under test). */
+    var roleOverrides: Map<String, ModelRef> = emptyMap()
+    /** Picks models for a route ("role" -> model); null/empty = keep the user's models. */
+    /** Set by the app: prompt sections adopted by self-improvement (PromptSections ids). */
+    var promptOverrides: (() -> Map<String, String>)? = null
+    var modelPicker: ((route: String, ctx: DoubleArray?) -> com.suarez.coder.evolution.SelfManager.Pick?)? = null
+    /** Context and propensities of the last learned model choice (recorded in the run's trace). */
+    var lastCtx: DoubleArray? = null
+    var lastProp: String? = null
+    private val langCache = HashMap<String, DoubleArray>()
+
+    /** The task context for a contextual model choice: difficulty, files involved, the repo's languages. */
+    private suspend fun routeContext(files: Int): DoubleArray? {
+        val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return null
+        val langs = langCache[repo] ?: runCatching { tools.filteredTree(repo, context.ref).map { it.path } }.getOrNull()
+            ?.let { com.suarez.coder.evolution.RouteContext.langShares(it) }?.also { langCache[repo] = it } ?: return null
+        return com.suarez.coder.evolution.RouteContext.features(lastComplexity, files, langs)
+    }
+    /** What the last run used, for its trace. */
+    var lastArm: String? = null
+    var lastRoute: String? = null
+    /** Working rules adopted by the manager (appended to every system prompt). */
+    var policyText: (() -> String?)? = null
+
+    // ---- Self-evolution hooks ----
+
+    /** Runs of the evolution engine: never recorded as traces, so they can never start another evolution. */
+    var isEvolutionSession = false
+    /** Evolution runs use one isolated model for every role, independent of the chat models. */
+    var modelOverride: ModelRef? = null
+    /** Called with the cost of every model call (evolution budget accounting). */
+    var onUsage: ((Double) -> Unit)? = null
+    /** Called before every model call; may throw [StopException] (evolution daily budget). */
+    var beforeCall: (() -> Unit)? = null
+    /** Locally learned lessons for a repo, added to the stable context (rarely changes, so it stays cacheable). */
+    var lessonsFor: ((String) -> String?)? = null
+    /** Routing parameters tuned by evolution tier 2. */
+    var adaptiveRouting: (() -> com.suarez.coder.evolution.AdaptiveRouting)? = null
+
+    private fun mediumThreshold() = adaptiveRouting?.invoke()?.complexityThreshold ?: MEDIUM_COMPLEXITY
+
+    /** Editor models that repeatedly fail switch to the escalation model earlier (tier-2 note). */
+    fun earlyEscalation(model: String) = adaptiveRouting?.invoke()?.earlyEscalation(model) == true
 
     /** Orchestrator: the budget is checked between subtasks (and the run paused) instead of asking mid-task. */
     var budgetDeferred = false
@@ -286,103 +565,13 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
 
     // ---- Prompts ----
 
-    /** Static per mode: no date or other per-request content, so the prompt prefix stays identical across requests. */
-    private fun header(): String {
-        val repo = settings.defaultRepo.takeIf { it.isNotBlank() }
-        return buildString {
-            appendLine("You are Coder, a software engineering agent inside an Android app. The user works only from a phone.")
-            appendLine("Tools give you GitHub (read, commit, branches, PRs, Actions) and the web (search, fetch).")
-            appendLine("You cannot run code on the device; builds and tests run in the repo's GitHub Actions.")
-            appendLine("Reply in the user's language (default Turkish). Keep answers short; the screen is small.")
-            if (repo != null) appendLine("Default repository: $repo.")
-            settings.defaultBranch.takeIf { it.isNotBlank() }?.let { appendLine("Default branch: $it.") }
-            if (settings.customInstructions.isNotBlank()) appendLine("User instructions: ${settings.customInstructions}")
-        }
-    }
 
-    private val tokenRules = """
-        Token economy (important, the user pays per token):
-        - Read only what you need. Request every file you need in ONE github_read_files call instead of one call per file;
-          read line ranges of large files with github_read_file.
-        - Change existing files with github_apply_diff (SEARCH/REPLACE blocks), never by rewriting the whole file.
-          Keep each SEARCH small but unique. For a long region you may write its first lines, a line with only `...`, then its last lines.
-        - Use github_write_files only for new files, full rewrites of tiny files, or deletions.
-        - After pushing, call ci_wait once (it waits for the build and returns the errors); never poll with github_api.
-          Use ci_errors for an older run. Fix the reported errors, then ci_wait again.
-        - With web_fetch pass a short `query` so only the relevant parts of the page come back.
-        - Do not repeat file contents or diffs in your answer; summarize what changed with links.
-    """.trimIndent()
 
-    private val terseCode = "Terse mode: no greetings, explanations, summaries or commentary. Make code changes only through " +
-        "github_apply_diff with SEARCH/REPLACE blocks. Final reply: at most 2 short lines (what changed + link)."
 
-    private val notesRule = "Project notes: the repo may keep .coder/NOTES.md (under 60 lines: purpose, structure, key files, conventions, " +
-        "build/test commands, pitfalls). If it is missing and you make a substantial change, create it; when a change alters " +
-        "architecture, conventions or build steps, update it in the same commit."
 
-    fun agentSystem() = buildString {
-        append(header()).append('\n').append(tokenRules).append('\n')
-        if (settings.terseMode) appendLine(terseCode)
-        appendLine("Workflow: understand first, then change; group related edits in one commit; unless told otherwise use the branch the user names, or a new feature branch and offer a PR.")
-        if (settings.projectNotes) appendLine(notesRule)
-    }
 
-    fun architectSystem(hasMap: Boolean, singleShot: Boolean = false) = buildString {
-        append(header()).append('\n')
-        appendLine(
-            """
-            You are the ARCHITECT. A cheaper EDITOR model will implement your plan. You must not write the code yourself.
-            1. Inspect only what you need with the read-only tools (tree, files in one github_read_files call, search, web).
-            2. If code must change, call submit_plan exactly once. For each file give short, precise, numbered logical steps:
-               which function/class/section changes, what to add/remove, exact names, signatures and behaviour.
-               Snippets only when essential and at most 5 lines. List every file that must change (action modify/create/delete).
-            3. If the request needs no code change (a question, explanation or research), answer directly and do not call submit_plan.
-            Branch: use the one the user names; otherwise choose a short new feature branch name.
-            4. Repository operations are yours to do directly (the user confirms each): create branches and pull requests,
-               merge pull requests (github_merge_pull_request), start workflows (github_run_workflow, then ci_wait), and other
-               GitHub API writes. Never tell the user to do these by hand. Only code changes must go through submit_plan.
-            """.trimIndent()
-        )
-        if (settings.terseMode) appendLine("Terse mode: no prose outside submit_plan; write plan steps as short imperative bullets.")
-        if (singleShot) {
-            appendLine(
-                "SINGLE-SHOT STEP: in this step you have no read or GitHub tools. If the repo map and the project context are " +
-                    "enough, call submit_plan now. If you need file contents, repository operations or anything else, call " +
-                    "need_more_info (with up to $MAX_ARCHITECT_READS file paths, which will be provided). If no code change is needed, answer directly."
-            )
-        }
-        if (hasMap) {
-            appendLine(
-                "Aim for a plan that touches 1-3 files. Use the REPO MAP in the project context first (paths, types, signatures; " +
-                    "bodies removed). Read at most $MAX_ARCHITECT_READS files, and only when the map is not enough."
-            )
-        }
-        if (settings.projectNotes) appendLine("$notesRule Include .coder/NOTES.md in the plan when that applies.")
-    }
 
-    val editorSystem: String get() = """
-        You are a code EDITOR. Implement the given plan in the given files by emitting SEARCH/REPLACE blocks ONLY.
-        Format for every change:
-        path/to/file
-        <<<<<<< SEARCH
-        exact existing lines
-        =======
-        new lines
-        >>>>>>> REPLACE
-        Rules:
-        - Put the file path alone on the line right above <<<<<<< SEARCH.
-        - SEARCH must copy existing lines character for character (indentation included) and must be unique in the file.
-        - Keep blocks small: only the lines that change plus 1-3 unchanged context lines. Use several blocks per file, in file order.
-        - To replace a long region you may abbreviate the middle of SEARCH: its first 2+ lines, a line with only `...`, its last 2+ lines.
-        - New file: leave SEARCH empty and put the whole file in REPLACE. To remove code, leave REPLACE empty.
-        - Write complete, working code; no placeholders. Only touch the files listed.
-        - Output nothing except the blocks: no explanations, no whole files.
-    """.trimIndent() + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
 
-    fun questionSystem() = buildString {
-        append(header()).append('\n').append(tokenRules).append('\n')
-        appendLine("This request needs no code change: answer it concisely, using read-only tools if needed. Do not modify the repository.")
-    }
 
     // ---- Stable project context ----
 
@@ -395,13 +584,18 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         ui.status(if (kind == "architect") "Proje bağlamı ve repo haritası hazırlanıyor" else "Proje bağlamı hazırlanıyor")
         val parts = ArrayList<String>()
         if (settings.projectNotes) context.loadNotes()?.let { parts += "PROJECT NOTES (.coder/NOTES.md):\n$it" }
+        context.repo.takeIf { it.isNotBlank() }?.let { r -> lessonsFor?.invoke(tools.normalizeRepo(r))?.takeIf { it.isNotBlank() } }
+            ?.let { parts += "LEARNED LESSONS (Coder's memory for this repo; follow them):\n$it" }
         var hasMap = false
         if (kind == "architect") repoMapFor(history, ui)?.let { parts += "REPO MAP (paths, types, signatures; bodies removed):\n$it"; hasMap = true }
         context.load()?.let { parts += it.text }
+        if (settings.docsLookup) runCatching { requestContext.dependencies() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
+            parts += "DEPENDENCIES (versions the project uses; write code for these, check unsure APIs with lookup_docs):\n" + it.joinToString(", ")
+        }
         if (kind == "architect") architectHasMap = hasMap
-        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        // No date in the prefix: an identical snapshot stays cacheable across days.
         val text = if (parts.isEmpty()) null else
-            "STABLE PROJECT CONTEXT (snapshot of $date; changes made after it appear later in the conversation).\n\n" + parts.joinToString("\n\n")
+            "STABLE PROJECT CONTEXT (snapshot; changes made after it appear later in the conversation).\n\n" + parts.joinToString("\n\n")
         snapshots[kind] = text
         commitsSinceSnapshot = 0
         return text
@@ -449,17 +643,79 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         maxOut: Int? = null,
         thinking: String? = null,
         stable: String? = null,
+        jsonMode: Boolean = false,
+        temperature: Double? = null,
     ): ChatMessage.Assistant {
+        var cur = ref
+        val tried = HashSet<String>()
+        while (true) {
+            tried += cur.key
+            val t0 = System.currentTimeMillis()
+            val mark = history.size
+            fun spent() = history.drop(mark).filterIsInstance<ChatMessage.UsageRecord>().sumOf { costOf(it) }
+            try {
+                return callModelOn(history, messages, cur, role, system, toolSpecs, ui, useCache, maxOut, thinking, stable, jsonMode, temperature)
+                    .also { span(Span.MODEL, "${cur.model} ($role)", t0, spent()) }
+            } catch (e: com.suarez.coder.llm.LlmException) {
+                span(Span.MODEL, "${cur.model} ($role)", t0, spent(), ok = false)
+                // Provider failover: an overloaded or failing model hands the same call to the next model in the user's chain.
+                val next = if (settings.failover && isTransient(e) && !isEvolutionSession && modelOverride == null && role !in setOf("router", "decision"))
+                    (escalationChain() + listOfNotNull(escalationRef())).firstOrNull { it.key !in tried && settings.keyFor(it.provider).isNotBlank() }
+                else null
+                if (next == null || tried.size > MAX_FAILOVERS) throw e
+                history += ChatMessage.Notice("${cur.model} yanıt vermedi; aynı istek ${next.model} ile tekrarlanıyor", e.message?.take(300))
+                ui.update()
+                cur = next
+            }
+        }
+    }
+
+    /** Set by the app: every timed step of a run (model calls, tools, CI waits, cloud runs) for the timeline. */
+    var onSpan: ((Span) -> Unit)? = null
+
+    internal fun span(kind: String, name: String, start: Long, cost: Double = 0.0, ok: Boolean = true) {
+        runCatching { onSpan?.invoke(Span(kind, name, start, System.currentTimeMillis(), cost, ok)) }
+    }
+
+    /** The output cap for a role: learned from real answers (adaptive budget) or the configured value. */
+    fun learnedMaxOut(role: String, configured: Int?): Int? {
+        if (configured == null || !settings.adaptiveBudget || role !in ADAPTIVE_ROLES) return configured
+        return outputStats?.cap(role, configured) ?: configured
+    }
+
+    private val outputStats: com.suarez.coder.cost.OutputStats? = filesDir?.let { com.suarez.coder.cost.OutputStats(java.io.File(it, "outstats.json")) }
+
+    private suspend fun callModelOn(
+        history: MutableList<ChatMessage>,
+        messages: List<ChatMessage>,
+        ref: ModelRef,
+        role: String,
+        system: String,
+        toolSpecs: List<ToolSpec>,
+        ui: AgentUi,
+        useCache: Boolean,
+        maxOutConfigured: Int?,
+        thinking: String?,
+        stable: String?,
+        jsonMode: Boolean,
+        temperature: Double? = null,
+    ): ChatMessage.Assistant {
+        val maxOut = learnedMaxOut(role, maxOutConfigured)
+        beforeCall?.invoke()
         checkBudget(history, ui)
         val client = client(ref)
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
         val full = prefix + messages
-        val flex = settings.economyMode && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
+        // Background work (self-improvement, queue) may wait: it uses Flex (half price) when enabled.
+        val background = settings.backgroundFlex && (isEvolutionSession || unattended)
+        val flex = (settings.economyMode || background) && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
         var opts = CallOptions(
             thinkingLevel = thinking?.takeIf { it != "minimal" },
             maxOutputTokens = maxOut,
             minimalThinking = thinking == "minimal",
             serviceTier = if (flex) "flex" else null,
+            jsonMode = jsonMode,
+            temperature = temperature,
         )
         var send = full
         if (useCache && client is GeminiClient) {
@@ -485,7 +741,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 cache.invalidate()
                 client.complete(system, full, toolSpecs, o.copy(cachedContent = null))
             } catch (e: GeminiClient.FlexUnavailableException) {
-                val ok = ui.confirm(
+                val ok = (isEvolutionSession || unattended) || ui.confirm(
                     "Flex kullanılamıyor",
                     "${e.message}\nFlex (%50 indirimli) kendiliğinden standart fiyata geçmez. Bu çalıştırma standart fiyatla devam etsin mi?",
                     "Standart fiyatla devam", "Durdur",
@@ -500,6 +756,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             val servedFlex = resp.serviceTier?.contains("flex") ?: (o.serviceTier == "flex" && !flexDisabledForRun)
             history += ChatMessage.UsageRecord(ref.model, role, resp.usage,
                 label = if (servedFlex) "flex" else "", discount = if (servedFlex) 0.5 else 1.0, actualUsd = resp.costUsd)
+            if (!resp.truncated && role in ADAPTIVE_ROLES) runCatching { outputStats?.add(role, resp.usage.output + resp.usage.thoughts) }
+            onUsage?.invoke(costOf(history.last() as ChatMessage.UsageRecord))
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
         }
 
@@ -544,7 +802,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         record(resp, opts)
         if (resp.truncated && maxOut != null && maxOut >= 64) {
             // A cut-off answer is useless (and a cut-off diff is dangerous): retry once with a larger cap.
-            val bigger = minOf(maxOut * 2, Settings.MAX_OUTPUT)
+            val bigger = minOf(maxOf(maxOut * 2, maxOutConfigured ?: 0), Settings.MAX_OUTPUT)
             history += ChatMessage.Notice("✂️ ${roleLabel(role)} yanıtı çıktı sınırına ($maxOut token) takıldı; $bigger ile bir kez yeniden deneniyor.")
             ui.update()
             val o2 = opts.copy(maxOutputTokens = bigger)
@@ -562,12 +820,40 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     /** [override] forces a route for this request (e.g. the user re-runs it in Architect mode). */
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, override: Route? = null) {
         flexDisabledForRun = false
+        lastArm = null
+        lastRoute = null
+        // Repo skills (.coder/skills/*/SKILL.md), cached for minutes so the catalog line stays stable.
+        tools.skills?.let { s -> runCatching { kotlinx.coroutines.withTimeout(8_000) { s.refreshRepo(tools.activeRepo()) } } }
         architectOverride = null
         architectThinkingOverride = null
         val start = history.size
+        liveHistory = history
+        liveUi = ui
+        lastComplexity = null
+        if (settings.quickCheck && settings.quickCheckWarm && !unattended && !isEvolutionSession) guards.prewarmQuickCheck(tools.activeRepo())
+        // Overlap: the tree, the repo map and the dependency versions load while routing decides (all cached afterwards).
+        val warm = if (settings.pipelining && !isEvolutionSession) kotlinx.coroutines.CoroutineScope(kotlin.coroutines.coroutineContext).launch {
+            val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return@launch
+            runCatching { tools.filteredTree(repo, context.ref) }
+            if (settings.riskModel) runCatching { foresight.labelPending() }
+            if (settings.docsLookup) runCatching { requestContext.dependencies() }
+            if (settings.repoMapForArchitect && (settings.architectMode || settings.smartRouting)) runCatching { repoMaps.get(repo, context.ref) }
+        } else null
+        guards.startRun()
         try {
             val requestIndex = history.indexOfLast { it is ChatMessage.User }
             val request = history.getOrNull(requestIndex) as? ChatMessage.User
+            // @-mentions and similar earlier tasks go right after the request (the volatile end, not the cached prefix).
+            if (request != null && requestIndex >= 0 && !isEvolutionSession) {
+                var at = requestIndex + 1
+                requestContext.mentionContext(request.text)?.let { history.add(at++, it); ui.update() }
+                val repoNow = tools.activeRepo()
+                if (settings.similarTasks) similarFor?.let { f -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { f(repoNow, request.text) } }?.let {
+                    history.add(at, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
+                }
+            }
+            val mode = if (override == null && !isEvolutionSession) activeMode() else null
+            if (mode != null) { runMode(history, ui, mode, request?.text.orEmpty()); return }
             var route: Route? = override
             var auto: com.suarez.coder.context.ContextProvider.Loaded? = null
             var autoPaths: List<String> = emptyList()
@@ -577,7 +863,8 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 ui.update()
             } else if (settings.smartRouting && request != null) {
                 // Tier 1: free local rules.
-                val local = LocalRouter.classify(request.text, settings.contextFiles.size)
+                val local = LocalRouter.classify(request.text, settings.contextFiles.size,
+                    adaptiveRouting?.invoke()?.localHints.orEmpty().map { it.pattern to it.route })
                 if (local != null) {
                     route = local.route
                     history += ChatMessage.RouteInfo("Yerel Kural → ${modeName(local.route)} • $0", "Gerekçe: ${local.reason}",
@@ -594,9 +881,16 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                                 history += ChatMessage.Notice("↪️ Yedek karar sağlayıcısı kullanıldı", s.joinToString("\n"))
                             }
                             route = d.route
+                            lastComplexity = d.complexity
+                            // A vague change request: ask 1-3 cheap questions instead of planning the wrong thing.
+                            if (needsClarification(d, history)) {
+                                history += routeInfo(d)
+                                askClarification(history, ui, request.text, d.clarity!!)
+                                return
+                            }
                             // Moderate work does not need the most expensive architect or deep thinking.
                             val medium = ModelRef.parse(settings.architectModelMedium)
-                            if (d.route == Route.COMPLEX_ARCHITECT && d.complexity != null && d.complexity < MEDIUM_COMPLEXITY &&
+                            if (d.route == Route.COMPLEX_ARCHITECT && d.complexity != null && d.complexity < mediumThreshold() &&
                                 medium != null && medium.key != (ModelRef.parse(settings.architectModel)?.key)
                             ) {
                                 architectOverride = medium
@@ -638,26 +932,69 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                 } else ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))
                 history.add(requestIndex + 1, block)
             }
+            // Learned model choice for this run (the user's pool; otherwise their fixed models).
+            lastRoute = (route ?: if (settings.architectMode) Route.COMPLEX_ARCHITECT else Route.SIMPLE_EDIT).name
+            lastCtx = null; lastProp = null
+            val ctx = if (modelPicker != null && settings.contextualRouting) routeContext(maxOf(autoPaths.size, settings.contextFiles.size)) else null
+            modelPicker?.invoke(lastRoute!!, ctx)?.takeIf { it.models.isNotEmpty() }?.let { pick ->
+                val picks = pick.models
+                lastCtx = pick.ctx; lastProp = pick.prop
+                roleOverrides = picks
+                lastArm = picks.entries.joinToString(";") { "${lastRoute}|${it.key}|${it.value.key}" }
+                history += ChatMessage.Notice("🎯 Yönetici seçimi: " + picks.entries.joinToString(", ") { "${roleLabel(it.key)} ${it.value.model}" },
+                    "Öğrenen model seçimi: geçmiş başarı ve maliyete göre seçildi (arada bir alternatif denenir).")
+                ui.update()
+            }
             val questionSpecs = tools.readOnlySpecs.filter { it.name != "submit_plan" }
             when (route) {
                 Route.COMPLEX_ARCHITECT -> architectFlow(history, ui)
                 Route.SIMPLE_EDIT ->
                     agentLoop(history, ui, editorRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
-                Route.QUESTION_ONLY ->
-                    agentLoop(history, ui, editorRef(), "agent", questionSystem(), "agent", questionSpecs, readOnly = true, stopTool = null,
-                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
+                Route.QUESTION_ONLY -> {
+                    // Salt okunur yalnızca gerçek bir soru görevinde; yazma niyeti varsa READ_WRITE başla.
+                    val ro = ReadOnlyMismatchRecovery.readOnlyForRoute(route, request?.text.orEmpty())
+                    agentLoop(history, ui, editorRef(), "agent", if (ro) questionSystem() else agentSystem(), "agent",
+                        if (ro) questionSpecs else tools.specs, readOnly = ro, stopTool = null,
+                        maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel,
+                        writeIntent = ReadOnlyMismatchRecovery.hasWriteIntent(request?.text.orEmpty()), writeSpecs = tools.specs)
+                }
                 null ->
                     if (settings.architectMode) architectFlow(history, ui)
                     else agentLoop(history, ui, singleRef(), "agent", agentSystem(), "agent", tools.specs, readOnly = false, stopTool = null,
                         maxOut = settings.maxOutAgent, thinking = settings.thinkingLevel)
             }
         } finally {
+            warm?.cancel()
+            liveHistory = null
+            liveUi = null
             usageSummary(history, start)?.let { history += it }
             architectOverride = null
             architectThinkingOverride = null
+            roleOverrides = emptyMap()
             ui.update()
         }
+    }
+
+    /** True for a vague change request when the user has not just answered our questions. */
+    fun needsClarification(d: RoutingDecision, history: List<ChatMessage>): Boolean {
+        if (!settings.clarifyFirst || isEvolutionSession || d.route == Route.QUESTION_ONLY) return false
+        val clarity = d.clarity ?: return false
+        if (clarity >= com.suarez.coder.decision.RouterLogic.CLARITY_MIN) return false
+        val lastUser = history.indexOfLast { it is ChatMessage.User }
+        val prev = history.subList(0, maxOf(lastUser, 0)).lastOrNull { it is ChatMessage.Assistant } as? ChatMessage.Assistant
+        return prev?.text?.startsWith(CLARIFY_MARK) != true
+    }
+
+    /** One short, cheap call (the executor model): at most 3 questions, each with a sensible default. */
+    private suspend fun askClarification(history: MutableList<ChatMessage>, ui: AgentUi, request: String, clarity: Double) {
+        val system = "The user's request to a coding assistant is too vague to implement well. Ask at most 3 short, numbered questions " +
+            "in the user's language whose answers would change what gets built (what, where, how it should behave). For each, offer a " +
+            "sensible default in parentheses so the user can just say \"varsayılanlarla devam\". No preamble."
+        val reply = callModel(history, listOf(ChatMessage.User(request.take(3_000) + (recentContext(history)?.let { "\n\nPrevious exchange:\n$it" } ?: ""))),
+            editorRef(), "agent", system, emptyList(), ui, useCache = false, maxOut = 500, thinking = "low")
+        history += ChatMessage.Assistant("$CLARIFY_MARK Başlamadan önce netleştirelim (istek netliği %${(clarity * 100).toInt()}):\n\n" + reply.text.trim(), model = reply.model)
+        ui.update()
     }
 
     /** The previous exchange as plain text, so follow-ups like "devam et" can be classified. */
@@ -684,6 +1021,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
      * the architect (e.g. a Flash model between Flash-Lite and Neon). Null when none fits or set to "none".
      */
     fun escalationRef(): ModelRef? {
+        if (modelOverride != null) return null
         if (settings.escalationModel.equals("none", true)) return null
         ModelRef.parse(settings.escalationModel)?.let { return it }
         val lo = Pricing.blended(price(editorRef().model))
@@ -717,8 +1055,9 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     private suspend fun cheapRoute(history: MutableList<ChatMessage>, request: String, ui: AgentUi): Triple<Route, ModelRef, Double>? {
         val ref = routerRef() ?: return null
         val system = "You classify requests sent to a coding assistant that edits a GitHub repository. Reply with exactly one word: " +
-            "SIMPLE (small change in one file: UI tweak, text fix, small logic update), COMPLEX (several files, new feature, " +
-            "refactoring, hard debugging) or QUESTION (no code change needed)."
+            "SIMPLE (single-file bug fix, UI/style/text change, small refactor, clearly scoped change, debugging a reported error, " +
+            "or a GitHub operation), COMPLEX (only a new feature or structural change across several files that needs design) " +
+            "or QUESTION (no code change needed). When unsure between SIMPLE and COMPLEX, answer SIMPLE."
         val prompt = (recentContext(history)?.let { "Previous exchange:\n$it\n\n" } ?: "") + "Request:\n" + request.take(2_000)
         val scratch = ArrayList<ChatMessage>()
         return try {
@@ -878,9 +1217,40 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         maxReads: Int? = null,
         thinking: String? = null,
         allowOps: Boolean = false,
+        writeIntent: Boolean = false,
+        writeSpecs: List<ToolSpec>? = null,
     ): ToolCall? {
         var consecutiveFailures = 0
         var reads = 0
+        var cur = ref
+        val ci = CiController.CiState()
+        // Yetki kurtarma: yazma niyetli görevde salt okunur yanıt gelirse oturumu bir kez READ_WRITE'a yükselt.
+        var ro = readOnly
+        var specs = toolSpecs
+        var upgrades = 0
+        fun tryUpgrade(why: String): Boolean {
+            if (!ro || !writeIntent) return false
+            val action = ReadOnlyMismatchRecovery.next(upgrades)
+            if (action == ReadOnlyMismatchRecovery.Action.HANDOFF) return false
+            upgrades++
+            ro = false
+            specs = writeSpecs ?: toolSpecs
+            history += ChatMessage.User(ReadOnlyMismatchRecovery.upgradePrompt(), isHarnessInternal = true)
+            history += ChatMessage.Notice(ReadOnlyMismatchRecovery.statusLine(action), why)
+            ui.update()
+            return true
+        }
+        // Adaptive budget: the executor starts with low thinking and goes back to the configured level once it struggles.
+        val adaptiveThink = settings.adaptiveBudget && role == "agent" && !ro && thinking in setOf("medium", "high", "xhigh")
+        var think = if (adaptiveThink) "low" else thinking
+        fun raiseThinking(why: String) {
+            if (think != thinking) { think = thinking; history += ChatMessage.Notice("Düşünme seviyesi $thinking'e yükseltildi ($why)") }
+        }
+        // Şeffaflık: salt okunur fazda başlayan görev zaman çizelgesine tek satırla kaydedilir.
+        if (ro) {
+            history += ChatMessage.Notice(ReadOnlyMismatchRecovery.phaseLine())
+            ui.update()
+        }
         for (step in 1..settings.maxSteps) {
             // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
             HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->
@@ -892,13 +1262,44 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, ref, role, system, toolSpecs, ui, maxOut = maxOut, thinking = thinking, stable = stable)
+            val reply = callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
             history += reply
             ui.update()
-            if (reply.toolCalls.isEmpty()) return null
+            if (reply.toolCalls.isEmpty()) {
+                // Yetki kurtarma: "yetkim yok" halüsinasyonu → yükselt ve aynı görevi bir kez daha dene.
+                if (ReadOnlyMismatchRecovery.isMismatch(reply.text, writeIntent, ro)) {
+                    if (tryUpgrade("model yazma yetkisi olmadığını söyledi")) continue
+                    // Yükseltme tükendi: salt okunur oturumu kapat, görev yazma yetkili Uygulayıcı'ya devredilir.
+                    history += ChatMessage.Notice(ReadOnlyMismatchRecovery.statusLine(ReadOnlyMismatchRecovery.Action.HANDOFF),
+                        "Görev yazma gerektiriyor; bu salt okunur oturum burada bırakıldı.")
+                    ui.update()
+                    return null
+                }
+                // Until green: the model may not stop on a red CI (twice at most, then the user decides).
+                if (settings.untilGreen && ci.lastFailed && !ro && !isEvolutionSession && ci.nudges < 2) {
+                    ci.nudges++
+                    history += ChatMessage.User(AUTO_NUDGE + "CI hâlâ kırmızı. Son hatayı düzelt, commit et ve ci_wait ile doğrula; " +
+                        "düzeltilemiyorsa nedenini kısaca açıkla.")
+                    ui.update()
+                    continue
+                }
+                return null
+            }
 
             var stopCall: ToolCall? = null
             val calls = reply.toolCalls
+            // Several read-only calls in one step run at the same time (results stay in order).
+            if (calls.size > 1 && calls.all { it.name in PARALLEL_SAFE } && maxReads == null) {
+                ui.status("${calls.size} okuma aynı anda çalışıyor")
+                val results = kotlinx.coroutines.coroutineScope {
+                    calls.map { c -> async { executeTool(c, ro, allowOps, NoStatusUi(ui), role) } }.map { it.await() }
+                }
+                ui.status(null)
+                results.forEach { (r, _) -> history += r }
+                consecutiveFailures = if (results.all { it.first.isError }) consecutiveFailures + 1 else 0
+                ui.update()
+                continue
+            }
             for ((i, call) in calls.withIndex()) {
                 if (call.name == stopTool) { stopCall = call; continue }
                 val readCount = if (call.name == "github_read_files") call.args.optJSONArray("paths")?.length() ?: 1 else 1
@@ -909,10 +1310,45 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
                     continue
                 }
                 if (call.name in setOf("github_read_file", "github_read_files")) reads += readCount
-                val (result, rejected) = executeTool(call, readOnly, allowOps, ui)
+                var (result, rejected) = executeTool(call, ro, allowOps, ui, role)
+                if (call.name == "ci_wait" && !result.isError) {
+                    val (r2, next) = ciController.afterCi(call, result, ci, cur, history, ui)
+                    result = r2
+                    if (ci.lastFailed) raiseThinking("kırmızı CI")
+                    if (next == null) {
+                        history += result
+                        calls.drop(i + 1).forEach { history += ChatMessage.ToolResult(it.id, it.name, "İptal edildi: kullanıcı durdurdu.", true) }
+                        history += ChatMessage.Notice("Kullanıcı kırmızı CI'dan sonra durdurdu.")
+                        return null
+                    }
+                    cur = next
+                }
+                if (ci.pendingSig != null && !result.isError && call.name in setOf("github_apply_diff", "github_write_files")) {
+                    ci.fixes += (call.args.optString("message").ifBlank { "değişiklik" }) + " [" +
+                        Regex("(?m)^([\\w./-]+\\.[\\w]+)\\s*$").findAll(call.args.optString("diff")).map { it.groupValues[1] }.distinct().take(4).joinToString() + "]"
+                }
                 history += result
                 ui.update()
+                // Araç salt okunur reddettiyse oturumu yükselt; kalan çağrılar bir sonraki adımda yeniden denenebilir.
+                if (result.isError && ReadOnlyMismatchRecovery.isMismatch(result.content, writeIntent, ro)) {
+                    calls.drop(i + 1).forEach { history += ChatMessage.ToolResult(it.id, it.name, "Yetki yükseltildi; sonraki adımda yeniden çağrılabilir.", true) }
+                    if (tryUpgrade("araç yazmayı salt okunur gerekçesiyle reddetti")) break
+                    history += ChatMessage.Notice(ReadOnlyMismatchRecovery.statusLine(ReadOnlyMismatchRecovery.Action.HANDOFF),
+                        "Araç yazmayı reddetti; görev yazma yetkili Uygulayıcı'ya devredildi.")
+                    ui.update()
+                    return null
+                }
                 consecutiveFailures = if (result.isError && !rejected) consecutiveFailures + 1 else 0
+                if (consecutiveFailures >= 2) raiseThinking("üst üste hata")
+                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !isEvolutionSession) {
+                    // Climb the user's model chain before asking.
+                    Escalation.next(escalationChain(), cur)?.let { up ->
+                        history += ChatMessage.Notice("$MAX_CONSECUTIVE_FAILURES başarısız deneme: daha güçlü modele geçiliyor (${up.model})")
+                        cur = up
+                        consecutiveFailures = 0
+                        ui.update()
+                    }
+                }
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
                     val ok = ui.confirm(
                         "$MAX_CONSECUTIVE_FAILURES deneme üst üste başarısız",
@@ -935,16 +1371,35 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
     }
 
     /** Returns the result and whether the user rejected it. */
-    private suspend fun executeTool(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi): Pair<ChatMessage.ToolResult, Boolean> {
+    private suspend fun executeTool(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi, role: String? = null): Pair<ChatMessage.ToolResult, Boolean> {
+        val t0 = System.currentTimeMillis()
+        return executeToolTimed(call, readOnly, allowOps, ui, role).also { (r, _) ->
+            val name = if (call.name == "run_cloud_tool") "run_cloud_tool:" + call.args.optString("tool") else call.name
+            span(Span.kindOfTool(call.name), name, t0, ok = !r.isError)
+        }
+    }
+
+    private suspend fun executeToolTimed(call: ToolCall, readOnly: Boolean, allowOps: Boolean, ui: AgentUi, role: String?): Pair<ChatMessage.ToolResult, Boolean> {
         ui.status(if (call.name == "ci_wait") "GitHub Actions derlemesi bekleniyor" else "Araç çalışıyor: ${call.name}")
         return try {
-            val denied = ToolRegistry.accessError(call.name, call.args.optString("method").ifBlank { null }, readOnly, allowOps)
+            val method = call.args.optString("method").ifBlank { null }
+            if (unattended) unattendedDenied(call.name, method)?.let { return ChatMessage.ToolResult(call.id, call.name, it, true) to false }
+            // Hard rules (prompt injection, auto-approve): dangerous API calls and writes to unknown repos always ask.
+            securityQuestion(call, method)?.let { (title, body) ->
+                if (unattended || isEvolutionSession) return ChatMessage.ToolResult(call.id, call.name, "Güvenlik: $title gözetimsiz çalışmada yapılamaz.", true) to false
+                if (!ui.confirm(title, body, "Yine de yap", "İptal")) {
+                    return ChatMessage.ToolResult(call.id, call.name, "Kullanıcı güvenlik onayı vermedi: $title. Bunu neden yapmak istediğini kullanıcıya açıkla.", true) to true
+                }
+                call.args.optString("repo").takeIf { it.isNotBlank() }?.let { safety.confirmedRepos += tools.normalizeRepo(it).lowercase() }
+            }
+            val denied = (if (role in ToolRegistry.ARCHITECT_ROLES) ToolRegistry.architectDenied(call.name, method) else null)
+                ?: ToolRegistry.accessError(call.name, method, readOnly, allowOps)
             if (denied == null && tools.needsApproval(call) && !settings.autoApprove &&
                 !ui.confirm("İzin ver: ${call.name}", "Bu işlem GitHub'da değişiklik yapacak.\n\n" + call.args.toString(2).take(20_000))
             ) {
                 ChatMessage.ToolResult(call.id, call.name, "Kullanıcı bu işlemi reddetti. Ne yapmak istediğini kullanıcıya sor.", true) to true
             } else {
-                ChatMessage.ToolResult(call.id, call.name, tools.execute(call, readOnly, allowOps)) to false
+                ChatMessage.ToolResult(call.id, call.name, tools.execute(call, readOnly, allowOps, role)) to false
             }
         } catch (e: CancellationException) {
             throw e
@@ -983,7 +1438,7 @@ class Agent(val settings: Settings, filesDir: java.io.File? = null) {
         val kind = if (settings.architectMode) "architect" else "agent"
         val stable = snapshots[kind] // only an already built snapshot; no network work for a preview
         val system = if (settings.architectMode) architectSystem(architectHasMap) else agentSystem()
-        val toolSpecs = if (settings.architectMode) tools.architectSpecs else tools.specs
+        val toolSpecs = if (settings.architectMode) tools.singleShotSpecs else tools.specs
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
         val msgs = prefix + HistoryPruner.prepare(history + ChatMessage.User(input), settings.keepTurns).messages
         val client = client(ref)

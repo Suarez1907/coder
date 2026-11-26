@@ -60,6 +60,7 @@ class Ledger(private val file: File) {
             "architect", "planner" -> "Mimar"
             "editor", "escalation" -> "Uygulayıcı"
             "reviewer" -> "İnceleyici"
+            "evolution" -> "Öz-gelişim"
             "router", "decision" -> "Yönlendirici"
             "summary" -> "Özet"
             "cache" -> "Önbellek depolama"

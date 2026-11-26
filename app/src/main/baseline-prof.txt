@@ -1,0 +1,5 @@
+# Coder's own code is precompiled at install (startup, chat screen, settings, agent loop) instead of running
+# interpreted/JIT on first use. Library profiles (Compose, AndroidX) come with the libraries; profileinstaller
+# (pulled in by Compose) installs them on sideloaded APKs too.
+HSPLcom/suarez/coder/**->**(**)**
+Lcom/suarez/coder/**;

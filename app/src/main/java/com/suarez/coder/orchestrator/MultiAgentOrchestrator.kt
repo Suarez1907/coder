@@ -18,6 +18,12 @@ import java.util.Collections
  * rounds remain).
  */
 class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : OrchestratorBase(agent, hooks) {
+    companion object {
+        /** Two candidates: B wins only with a higher score, or the same score at a lower cost. Unmeasurable B never wins. */
+        fun pickSecond(aScore: Double?, bScore: Double?, costA: Double, costB: Double): Boolean =
+            bScore != null && (aScore == null || bScore > aScore || (bScore == aScore && costB < costA))
+    }
+
 
     private class WorkerResult(val slot: Int, val task: SubTask, val outcome: ArchitectEditor.Outcome,
                                val local: List<ChatMessage>, val output: String)
@@ -32,6 +38,12 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
         for (p in plan.staged.keys) originals[p] = agent.tools.readForEdit(plan.repo, plan.branch, plan.base, p)
         plan = save(plan, ui)
         var ciReport: String? = null
+
+        // Two candidates: a fresh plan is built twice with two editor models; only the better one continues.
+        if (settings.bestOfTwo && plan.reviewRound == 0 && plan.staged.isEmpty() && plan.tasks.all { it.status == TaskStatus.PENDING }) {
+            bestOfTwo(history, ui, plan, maxParallel, originals, state)?.let { plan = it }
+            if (plan.state != PlanState.RUNNING) return plan
+        }
 
         while (true) {
             plan = runWaves(history, ui, plan, maxParallel, originals, state)
@@ -86,6 +98,7 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             val (changes, summary) = editor.changesFor(paths, originals, state)
             if (changes.isNotEmpty()) {
                 try {
+                    agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
                     val res = agent.tools.github.commitFiles(plan.repo, plan.branch, plan.commitMessage, changes, plan.base)
                     agent.tools.onRepoChanged()
                     history += ChatMessage.Notice("✅ Tek commit: ${changes.size} dosya", "$res\n$summary")
@@ -98,11 +111,17 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                 plan = save(plan.copy(staged = emptyMap()), ui)
             }
 
+            // Pipelining: the evaluator does not need CI's result, so it runs while CI does.
+            val evalEarly = if (settings.pipelining && settings.evaluatorEnabled && changes.isNotEmpty() && plan.tasks.any { it.requiresCi }) {
+                val p0 = plan
+                kotlinx.coroutines.CoroutineScope(kotlin.coroutines.coroutineContext).async { evaluateSafely(history, ui, p0) }
+            } else null
             if (plan.tasks.any { it.requiresCi } && changes.isNotEmpty()) {
                 val (failed, report) = waitCi(plan)
                 history += ChatMessage.Notice(if (failed) "❌ CI başarısız" else "🟢 CI geçti", report, isError = failed)
                 ui.update()
                 if (failed) {
+                    evalEarly?.cancel()
                     if (plan.reviewRound >= maxRounds) {
                         return save(plan.copy(state = PlanState.PAUSED, note = "CI başarısız ve inceleme turu sınırı doldu."), ui)
                     }
@@ -110,10 +129,129 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                     continue
                 }
             }
+            // Evaluator: the running app against the contract (web: Playwright in GitHub Actions). Failures go back to
+            // the reviewer as evidence and become fix tickets, within the same round limit.
+            if (settings.evaluatorEnabled && changes.isNotEmpty()) {
+                val (ev, evCost) = evalEarly?.await() ?: evaluateSafely(history, ui, plan)
+                plan = save(plan.addCost("Değerlendirici", evCost), ui)
+                if (ev != null) {
+                    history += ChatMessage.Notice(
+                        "🧪 Değerlendirici: " + (if (ev.criteria.isEmpty()) "ölçülemedi" else ev.summary) +
+                            (ev.visualChange?.takeIf { it >= VisualDiff.NOTICE }?.let { " · görünüm %${(it * 100).toInt()} değişti" } ?: ""),
+                        (ev.report() + "\n" + (ev.outputMarker ?: "")).trim(),
+                        isError = ev.criteria.isNotEmpty() && !ev.passed,
+                    )
+                    ui.update()
+                    if (ev.criteria.isNotEmpty() && !ev.passed) {
+                        if (plan.reviewRound >= maxRounds) {
+                            return save(plan.copy(state = PlanState.PAUSED, note = "Değerlendirici: ${ev.summary}; inceleme turu sınırı doldu."), ui)
+                        }
+                        ciReport = ev.report()
+                        continue
+                    }
+                }
+            }
             history += ChatMessage.Assistant("✅ Çoklu ajan planı tamamlandı: ${plan.tasks.size} alt görev, ${plan.reviewRound} düzeltme turu.\n\n" +
                 plan.roleCosts.entries.joinToString("\n") { "${it.key}: ${agent.money(it.value)}" }, model = "coder")
             return save(plan.copy(state = PlanState.DONE, note = null), ui)
         }
+    }
+
+    /** The evaluator with its cost (from the usage records it added); errors become an unmeasured result. */
+    private suspend fun evaluateSafely(history: MutableList<ChatMessage>, ui: AgentUi, plan: OrchestratorPlan): Pair<Evaluator.Result?, Double> {
+        val mark = history.size
+        val ev = try {
+            agent.budgetDeferred = true
+            runCatching { Evaluator(agent).evaluate(history, ui, plan) }.getOrElse { e ->
+                if (e is CancellationException) throw e
+                Evaluator.Result(emptyList(), emptyList(), "Değerlendirme hatası: ${e.message?.take(200)}")
+            }
+        } finally {
+            agent.budgetDeferred = false
+        }
+        val cost = history.drop(mark).filterIsInstance<ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
+        return ev to cost
+    }
+
+    /** The second editor for "two candidates": a pool model or the escalation model, never the same as the first. */
+    private fun altEditor(): com.suarez.coder.llm.ModelRef? {
+        val first = agent.editorRef().key
+        val pool = settings.modelPool.mapNotNull { com.suarez.coder.llm.ModelRef.parse(it) }.filter { settings.keyFor(it.provider).isNotBlank() && it.key != first }
+        return pool.firstOrNull() ?: agent.escalationRef()?.takeIf { it.key != first }
+    }
+
+    private suspend fun bestOfTwo(
+        history: MutableList<ChatMessage>, ui: AgentUi, start: OrchestratorPlan, maxParallel: Int,
+        originals: MutableMap<String, String?>, state: MutableMap<String, String?>,
+    ): OrchestratorPlan? {
+        val alt = altEditor() ?: run {
+            history += ChatMessage.Notice("İki aday atlandı: ikinci bir Uygulayıcı modeli yok (model havuzu veya yükseltme modeli gerekli).")
+            return null
+        }
+        val first = agent.editorRef()
+        history += ChatMessage.Notice("İki aday: ${first.model} ve ${alt.model} aynı planı ayrı ayrı uyguluyor")
+        ui.update()
+        val oA: MutableMap<String, String?> = Collections.synchronizedMap(HashMap()); val sA: MutableMap<String, String?> = Collections.synchronizedMap(HashMap())
+        var from = history.size
+        val planA = runWaves(history, ui, start, maxParallel, oA, sA)
+        val costA = costSince(history, from)
+        if (planA.state != PlanState.RUNNING) return planA
+        val oB: MutableMap<String, String?> = Collections.synchronizedMap(HashMap()); val sB: MutableMap<String, String?> = Collections.synchronizedMap(HashMap())
+        val saved = agent.roleOverrides
+        agent.roleOverrides = saved + ("editor" to alt)
+        from = history.size
+        val planB = try { runWaves(history, ui, start, maxParallel, oB, sB) } finally { agent.roleOverrides = saved }
+        val costB = costSince(history, from)
+        val (aScore, bScore) = if (planB.state != PlanState.RUNNING) (1.0 to null) else judge(history, ui, start, oA to sA, oB to sB)
+        val pickB = pickSecond(aScore, bScore, costA, costB)
+        val (w, wo, ws) = if (pickB) Triple(planB, oB, sB) else Triple(planA, oA, sA)
+        originals.clear(); originals.putAll(wo); state.clear(); state.putAll(ws)
+        fun fmt(x: Double?) = x?.let { String.format(java.util.Locale.US, "%.1f", it) } ?: "ölçülemedi"
+        history += ChatMessage.Notice("Seçilen aday: ${if (pickB) alt.model else first.model}",
+            "${first.model}: puan ${fmt(aScore)}, ${agent.money(costA)}\n${alt.model}: puan ${fmt(bScore)}, ${agent.money(costB)}")
+        ui.update()
+        return save(w.copy(staged = HashMap(state)).addCost("Diğer aday", if (pickB) costA else costB), ui)
+    }
+
+    /**
+     * Scores two candidates on throwaway branches: the evaluator's passed criteria (web, when enabled), else CI
+     * (1 pass / 0 fail). null = not measurable. Branches are deleted afterwards.
+     */
+    private suspend fun judge(
+        history: MutableList<ChatMessage>, ui: AgentUi, plan: OrchestratorPlan,
+        a: Pair<Map<String, String?>, Map<String, String?>>, b: Pair<Map<String, String?>, Map<String, String?>>,
+    ): Pair<Double?, Double?> {
+        val gh = agent.tools.github
+        val source = if (runCatching { gh.headSha(plan.repo, plan.branch) }.isSuccess) plan.branch else plan.base
+        val evaluator = if (settings.evaluatorEnabled) Evaluator(agent) else null
+        val paths = plan.tasks.flatMap { t -> t.files.map { it.path to (it.action == "delete") } }
+        suspend fun score(tag: String, o: Map<String, String?>, s: Map<String, String?>): Double? {
+            val (changes, _) = editor.changesFor(paths, o, s)
+            if (changes.isEmpty()) return 0.0
+            val tmp = "${plan.branch}-coder-$tag-${System.currentTimeMillis() % 100_000}"
+            return try {
+                gh.commitFiles(plan.repo, tmp, "coder: aday $tag", changes, source)
+                val ev = evaluator?.let { runCatching { it.evaluate(history, ui, plan.copy(branch = tmp)) }.getOrNull() }
+                if (ev != null && ev.criteria.isNotEmpty()) ev.criteria.count { it.pass } - 0.5 * ev.consoleErrors.size
+                else {
+                    val ci = agent.tools.execute(com.suarez.coder.llm.ToolCall("cand_ci", "ci_wait",
+                        org.json.JSONObject().put("repo", plan.repo).put("ref", tmp).put("timeout_minutes", 20)), readOnly = false, allowOps = true)
+                    when {
+                        com.suarez.coder.evolution.ExamRunner.ciMissing(ci) -> null
+                        com.suarez.coder.evolution.ExamRunner.ciPassed(ci) -> 1.0
+                        else -> 0.0
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            } finally {
+                runCatching { gh.deleteBranch(plan.repo, tmp) }
+            }
+        }
+        ui.status("İki aday sınanıyor")
+        return score("a", a.first, a.second) to score("b", b.first, b.second)
     }
 
     /** Runs every ready subtask in waves; returns the plan RUNNING when the queue is empty, otherwise PAUSED. */

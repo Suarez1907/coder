@@ -14,6 +14,9 @@ import org.json.JSONObject
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import org.junit.Rule
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -156,6 +159,84 @@ class ScreenshotTest {
         compose.onNode(androidx.compose.ui.test.hasText("Ork: Tam", substring = true)).performClick()
         compose.waitForIdle()
         compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].captureRoboImage("build/outputs/roborazzi/orchestrator_sheet.png")
+    }
+
+    @Test fun settingsProviders() {
+        val vm = vm()
+        compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasText("Sağlayıcılar", substring = true)).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/settings_providers.png")
+    }
+
+    @Test fun evolutionPage() {
+        val vm = vm()
+        vm.evoStore.savePending(com.suarez.coder.evolution.PendingSelfPr(42, "SEARCH elips eşleşmesi boşlukları yok saysın",
+            "https://github.com/Suarez1907/coder/pull/42", "evo/ellipsis-202611221200",
+            "`...` satırı girintili olduğunda SEARCH bloğu eşleşmiyordu; elips satırı trim edilmeden karşılaştırılıyordu.",
+            listOf("app/src/test/java/com/suarez/coder/EllipsisTest.kt", "app/src/main/java/com/suarez/coder/diff/SearchReplace.kt"),
+            true, 0.031, "ellipsis", 0))
+        vm.evoStore.addLog(com.suarez.coder.evolution.EvoTier.MEMORY, "Suarez1907/kay-p-kuleler: 1 ders öğrenildi: Seviye dosyaları tools/levels.src.mjs üzerinden üretilir.", 0.004)
+        vm.evoStore.addLog(com.suarez.coder.evolution.EvoTier.ROUTING, "1 yönlendirme ipucu (\"seviye rengi\" → SIMPLE)", 0.003, undo = "{}")
+        vm.evoStore.addLog(com.suarez.coder.evolution.EvoTier.SELF_PR, "PR #42 açıldı: SEARCH elips eşleşmesi boşlukları yok saysın. PR #42 açıldı.", 0.031)
+        vm.refreshEvolution()
+        compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/settings_home.png")
+        compose.onNode(androidx.compose.ui.test.hasText("Öz-Gelişim")).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/evolution.png")
+    }
+
+    @Test fun skillsAndCloudResult() {
+        val vm = vm()
+        compose.setContent { CoderTheme("dark") { SettingsScreen(vm) {} } }
+        compose.onNode(androidx.compose.ui.test.hasText("Yetenekler (Skills)")).performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/skills.png")
+    }
+
+    @Test fun cloudResultCard() {
+        val vm = vm()
+        val dir = java.io.File(androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>().filesDir, "cloud/demo").apply { mkdirs() }
+        val bmp = android.graphics.Bitmap.createBitmap(400, 400, android.graphics.Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(bmp).apply {
+            drawColor(android.graphics.Color.rgb(40, 40, 46))
+            drawCircle(200f, 210f, 120f, android.graphics.Paint().apply { color = android.graphics.Color.rgb(170, 170, 180); isAntiAlias = true })
+        }
+        java.io.File(dir, "preview.png").outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        java.io.File(dir, "model.glb").writeBytes(ByteArray(48_000))
+        java.io.File(dir, "model.blend").writeBytes(ByteArray(310_000))
+        vm.messages.clear()
+        vm.messages.addAll(listOf(
+            com.suarez.coder.llm.ChatMessage.User("Godot için alçak poligonlu bir sandık modeli yap"),
+            com.suarez.coder.llm.ChatMessage.Assistant("", listOf(com.suarez.coder.llm.ToolCall("c1", "run_cloud_tool",
+                org.json.JSONObject().put("tool", "blender").put("script_path", "tools/chest.py")))),
+            com.suarez.coder.llm.ChatMessage.ToolResult("c1", "run_cloud_tool", "Blender çalıştırması: success\nÇıktılar indirildi.\n" +
+                com.suarez.coder.cloudtools.CloudToolRunner.marker("blender", 7, dir)),
+            com.suarez.coder.llm.ChatMessage.Assistant("Sandık hazır: preview.png, model.glb ve model.blend."),
+        ))
+        compose.setContent { CoderTheme("dark") { ChatScreen(vm) {} } }
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/cloud_result.png")
+    }
+
+    @Test fun managerSection() {
+        val vm = vm()
+        vm.settings.modelPool = listOf("gemini/gemini-4-hydrogen", "gemini/gemini-3.8-flash", "deepseek/deepseek-chat")
+        vm.evoStore.saveExperiment(com.suarez.coder.evolution.Experiment.model("editor", "deepseek/deepseek-chat", "daha ucuz model denemesi")
+            .copy(state = com.suarez.coder.evolution.Experiment.State.PROPOSED, baseline = com.suarez.coder.evolution.ExamScore(2, 3, 0.21),
+                candidate = com.suarez.coder.evolution.ExamScore(2, 3, 0.06)))
+        vm.evoStore.saveExperiment(com.suarez.coder.evolution.Experiment.rule("Read the failing file before patching it", "öz-gelişim")
+            .copy(state = com.suarez.coder.evolution.Experiment.State.REJECTED, baseline = com.suarez.coder.evolution.ExamScore(3, 3, 0.2),
+                candidate = com.suarez.coder.evolution.ExamScore(2, 3, 0.2)))
+        compose.setContent { CoderTheme("dark") { androidx.compose.foundation.layout.Column(
+            androidx.compose.ui.Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(16.dp)) { com.suarez.coder.ui.ManagerSection(vm) } } }
+        compose.waitForIdle()
+        Thread.sleep(300)
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/manager.png")
+        vm.settings.modelPool = emptyList()
     }
 
     @Test fun settingsHome() {

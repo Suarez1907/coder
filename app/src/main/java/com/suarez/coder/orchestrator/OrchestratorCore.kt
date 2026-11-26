@@ -140,6 +140,18 @@ object OrchestratorTools {
         return sb.toString().take(maxChars + 200)
     }
 
+    /** A failed normal plan as a one-subtask paused card; "Tekrar Dene" re-runs only the executor. */
+    fun repairPlan(repo: String, branch: String, base: String?, message: String, planText: String,
+                   files: List<com.suarez.coder.agent.PlanFile>, error: String): OrchestratorPlan =
+        OrchestratorPlan(
+            mode = OrchestratorMode.LIGHT_SEQUENTIAL, request = planText.take(2_000), repo = repo, branch = branch, base = base,
+            commitMessage = message,
+            tasks = listOf(SubTask("fix", "Planı uygula", planText, files.map { TaskFile(it.path, it.action, it.instructions) },
+                status = TaskStatus.FAILED, error = error.take(1_500))),
+            state = PlanState.PAUSED, repair = true,
+            note = "Uygulayıcı denemelerini bitirdi. Mimar otomatik çağrılmadı.",
+        )
+
     fun handoffFor(task: SubTask, summary: String): String =
         ("${task.title}: " + summary.lines().filter { it.isNotBlank() }.joinToString("; ").ifBlank { "değişiklik yok" }).take(600)
 }
@@ -202,7 +214,8 @@ abstract class OrchestratorBase(protected val agent: Agent, protected val hooks:
             append("\nBİRLEŞİK DIFF:\n").append(diff)
             if (ci != null) append("\n\nCI SONUCU:\n").append(ci.take(8_000))
         }
-        val reply = agent.callModel(history, listOf(ChatMessage.User(prompt)), agent.architectRef(), "reviewer", REVIEWER_SYSTEM,
+        // After planning the architect is not woken again: review runs on an executor-class model.
+        val reply = agent.callModel(history, listOf(ChatMessage.User(prompt)), agent.escalationRef() ?: agent.editorRef(), "reviewer", REVIEWER_SYSTEM,
             listOf(OrchestratorTools.submitReview), ui, useCache = false, maxOut = settings.maxOutArchitect, thinking = "low")
         return OrchestratorTools.parseReview(reply.toolCalls.firstOrNull { it.name == "submit_review" }, reply.text)
     }
@@ -217,7 +230,6 @@ abstract class OrchestratorBase(protected val agent: Agent, protected val hooks:
 /** Planning step shared by both modes: the architect splits the request into subtasks. */
 class OrchestratorPlanner(private val agent: Agent) {
     companion object {
-        const val ATTEMPTS = 2
         fun system(base: String, mode: OrchestratorMode) = base + "\n\nORCHESTRATOR MODE (" + mode.label + "): do NOT call submit_plan. " +
             "Split the request into 2-6 small subtasks and call submit_task_plan once. Each subtask owns its files; never give the " +
             "same file to two subtasks unless one depends_on the other. Give every file precise step-by-step instructions, because " +
@@ -225,29 +237,26 @@ class OrchestratorPlanner(private val agent: Agent) {
             "Add acceptance_criteria a reviewer can check from the diff. Set requires_ci only when CI must pass before continuing."
     }
 
+    /** Bounded like the normal architect: at most two calls, read-only, same prefix; may delegate to the executor. */
     suspend fun plan(history: MutableList<ChatMessage>, ui: AgentUi, mode: OrchestratorMode): OrchestratorPlan? {
         val request = (history.lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
         val start = history.size
-        val stable = agent.stableContext("architect", history, ui)
-        val specs = agent.tools.readOnlySpecs.filter { it.name != "submit_plan" } + OrchestratorTools.submitTaskPlan
-        for (attempt in 0..ATTEMPTS) {
-            val call = agent.agentLoop(
-                history, ui, agent.architectRef(), "planner", system(agent.architectSystem(agent.architectHasMap), mode), "architect",
-                specs, readOnly = true, stopTool = "submit_task_plan", maxOut = agent.settings.maxOutArchitect,
-                maxReads = if (agent.architectHasMap && stable != null) Agent.MAX_ARCHITECT_READS else null,
-                thinking = agent.architectThinking(),
-            ) ?: return null
-            val (plan, error) = PlanJson.parse(call.args, agent.settings.defaultRepo, mode, request)
-            if (plan != null) {
-                history += ChatMessage.ToolResult(call.id, call.name, "Plan alındı: ${plan.tasks.size} alt görev.")
+        val specs = agent.tools.singleShotSpecs.filter { it.name != "submit_plan" } + OrchestratorTools.submitTaskPlan
+        val outcome = agent.architectTurns(history, ui, "planner", system(agent.architectSystem(agent.architectHasMap), mode), specs,
+            "submit_task_plan") { call -> PlanJson.parse(call.args, agent.settings.defaultRepo, mode, request).second }
+        return when (outcome) {
+            is com.suarez.coder.agent.ArchOutcome.Submitted -> {
+                val plan = PlanJson.parse(outcome.call.args, agent.settings.defaultRepo, mode, request).first!!
+                history += ChatMessage.ToolResult(outcome.call.id, outcome.call.name, "Plan alındı: ${plan.tasks.size} alt görev.")
                 val cost = history.drop(start).filterIsInstance<ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
-                return plan.addCost("Planlayıcı", cost)
+                plan.addCost("Planlayıcı", cost)
             }
-            history += ChatMessage.ToolResult(call.id, call.name, "Plan kullanılamadı: $error", isError = true)
-            history += ChatMessage.Notice("⚠️ Planlayıcı'nın görev listesi okunamadı; düzeltmesi istendi.", error, isError = true)
-            ui.update()
+            is com.suarez.coder.agent.ArchOutcome.Delegated -> { agent.runDelegated(history, ui, outcome.call, outcome.instructions); null }
+            is com.suarez.coder.agent.ArchOutcome.Answered -> null
+            is com.suarez.coder.agent.ArchOutcome.Unusable -> {
+                history += ChatMessage.Assistant("⚠️ Planlayıcı ${Agent.MAX_ARCHITECT_CALLS} çağrıda kullanılabilir bir görev listesi vermedi; değişiklik yapılmadı.\n\n${outcome.why.take(400)}", model = "coder")
+                null
+            }
         }
-        history += ChatMessage.Assistant("⚠️ Görev listesi ${ATTEMPTS + 1} denemede düzeltilemedi; değişiklik yapılmadı.", model = "coder")
-        return null
     }
 }

@@ -171,6 +171,11 @@ class Settings(context: Context) {
         set(v) = putBool("token_preview", v)
 
     /** Models fetched from the APIs, as "provider/model" lines. */
+    /** When the model lists were last fetched (daily background refresh). */
+    var catalogAt: Long
+        get() = prefs.getLong("catalog_at", 0L)
+        set(v) = prefs.edit().putLong("catalog_at", v).apply()
+
     var modelCatalog: List<String>
         get() = str("model_catalog").lines().filter { it.isNotBlank() }
         set(v) = put("model_catalog", v.distinct().joinToString("\n"))
@@ -218,13 +223,18 @@ class Settings(context: Context) {
         set(v) = prefs.edit().putInt("request_timeout_sec", v.coerceIn(30, 900)).apply()
 
     /** Architect first tries to plan in one call (map + context, no read tools). */
+    /** Executor self-repair attempts per file group before the run pauses for the user (never the architect). */
+    var maxExecutorRetries: Int
+        get() = prefs.getInt("max_executor_retries", 5).coerceIn(1, 10)
+        set(v) = prefs.edit().putInt("max_executor_retries", v.coerceIn(1, 10)).apply()
+
     var architectSingleShot: Boolean
         get() = bool("architect_single_shot", true)
         set(v) = putBool("architect_single_shot", v)
 
     /** "provider/model" used as architect for requests Decision 1 rates below medium difficulty; blank = off. */
     var architectModelMedium: String
-        get() = str("architect_model_medium", "gemini/gemini-3.8-flash")
+        get() = str("architect_model_medium", "")
         set(v) = put("architect_model_medium", v.trim())
 
     /** Slash-command prompt templates (name without "/", text). Defaults until the user edits them. */
@@ -296,6 +306,321 @@ class Settings(context: Context) {
     var decisionModel: String
         get() = str("decision_model", "gemini-decision-1")
         set(v) = put("decision_model", v.trim())
+
+    // ---- Self-improvement manager (learned model choice, exams, earned autonomy) ----
+
+    /** 1 = only proposes; 2 = applies data changes (models, prompts, skills) that won an exam; 3 = also merges self-PRs that pass the gates. */
+    var autonomyLevel: Int
+        get() = prefs.getInt("autonomy_level", 1).coerceIn(1, 3)
+        set(v) = prefs.edit().putInt("autonomy_level", v.coerceIn(1, 3)).apply()
+    /** 0 = best quality whatever it costs … 1 = cheapest that still works. */
+    var costWeight: Double
+        get() = str("cost_weight", "0.5").toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 0.5
+        set(v) = put("cost_weight", v.coerceIn(0.0, 1.0).toString())
+    /** Models the manager may choose from ("provider/model"); fewer than two = the user's fixed choice. */
+    var modelPool: List<String>
+        get() = str("model_pool").lines().map { it.trim() }.filter { it.isNotBlank() }
+        set(v) = put("model_pool", v.map { it.trim() }.filter { it.isNotBlank() }.distinct().joinToString("\n"))
+    var learnedRouting: Boolean
+        get() = bool("learned_routing", true)
+        set(v) = putBool("learned_routing", v)
+    var examWeeklyBudget: Double
+        get() = str("exam_budget", "1.0").toDoubleOrNull()?.coerceIn(0.0, 20.0) ?: 1.0
+        set(v) = put("exam_budget", v.coerceIn(0.0, 20.0).toString())
+    var scoutEnabled: Boolean
+        get() = bool("scout_enabled", true)
+        set(v) = putBool("scout_enabled", v)
+    /** The user's goal in their own words (shown in the manager card). */
+    var managerGoal: String
+        get() = str("manager_goal")
+        set(v) = put("manager_goal", v.trim())
+
+    // ---- Self-evolution ----
+
+    var evoEnabled: Boolean
+        get() = bool("evo_enabled", false)
+        set(v) = putBool("evo_enabled", v)
+    var evoMemory: Boolean
+        get() = bool("evo_k1", true)
+        set(v) = putBool("evo_k1", v)
+    var evoRouting: Boolean
+        get() = bool("evo_k2", true)
+        set(v) = putBool("evo_k2", v)
+    var evoSelfPr: Boolean
+        get() = bool("evo_k3", true)
+        set(v) = putBool("evo_k3", v)
+    /** OpenRouter id of the isolated evolution model (all evolution roles use only this). */
+    var evoModel: String
+        get() = str("evo_model", "nvidia/nemotron-3-ultra")
+        set(v) = put("evo_model", v.trim().removePrefix("openrouter/"))
+    var evoDailyBudget: Double
+        get() = str("evo_budget", "0.15").toDoubleOrNull() ?: 0.15
+        set(v) = put("evo_budget", v.coerceIn(0.0, 10.0).toString())
+    var evoWifiOnly: Boolean
+        get() = bool("evo_wifi", false)
+        set(v) = putBool("evo_wifi", v)
+
+    /** Vague change requests get 1-3 short clarifying questions before any expensive planning. */
+    var clarifyFirst: Boolean
+        get() = bool("clarify_first", true)
+        set(v) = putBool("clarify_first", v)
+
+    /** Repo|tool pairs whose cloud workflow the user declined to install. */
+    var workflowDeclined: Set<String>
+        get() = str("workflow_declined").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("workflow_declined", v.joinToString("\n"))
+    /** Code index in GitHub Actions (ctags + usages) for precise references and reading single symbols. */
+    var codeIndex: Boolean
+        get() = bool("code_index", true)
+        set(v) = putBool("code_index", v)
+    /** Quick check also runs the tests that exercise the changed files. */
+    var targetedTests: Boolean
+        get() = bool("targeted_tests", true)
+        set(v) = putBool("targeted_tests", v)
+    /** Android evaluation drives the app with Maestro flows written from the acceptance criteria. */
+    var androidUiTests: Boolean
+        get() = bool("android_ui_tests", true)
+        set(v) = putBool("android_ui_tests", v)
+
+    /** Self-improvement may rewrite evolvable prompt sections (each rewrite must win an exam). */
+    var promptEvolution: Boolean
+        get() = bool("prompt_evolution", true)
+        set(v) = putBool("prompt_evolution", v)
+    /** Recurring successful procedures become skill candidates (tested by exams). */
+    var procedureMining: Boolean
+        get() = bool("procedure_mining", true)
+        set(v) = putBool("procedure_mining", v)
+
+    /** Choose models with the task context (contextual bandit) instead of per route only. */
+    var contextualRouting: Boolean
+        get() = bool("contextual_routing", true)
+        set(v) = putBool("contextual_routing", v)
+
+    /** Candidate edits per file group (1 = off) and when to make them: "risk" (predicted CI failure), "always", "off". */
+    var candidates: Int
+        get() = prefs.getInt("candidates", 3).coerceIn(1, 5)
+        set(v) = prefs.edit().putInt("candidates", v.coerceIn(1, 5)).apply()
+    var candidateTrigger: String
+        get() = str("candidate_trigger", "risk")
+        set(v) = put("candidate_trigger", v)
+
+    /** Learn the risk of a red CI from the user's own commits (logistic regression on the phone). */
+    var riskModel: Boolean
+        get() = bool("risk_model", true)
+        set(v) = putBool("risk_model", v)
+    /** Predicted failure probability from which candidates are made. */
+    var riskThreshold: Double
+        get() = str("risk_threshold", "0.35").toDoubleOrNull()?.coerceIn(0.05, 0.95) ?: 0.35
+        set(v) = put("risk_threshold", v.coerceIn(0.05, 0.95).toString())
+    /** Skip the quick check for changes the trained risk model rates very safe. */
+    var quickCheckAdaptive: Boolean
+        get() = bool("quick_check_adaptive", true)
+        set(v) = putBool("quick_check_adaptive", v)
+    /** Measure how sure a plan is (independent guesses of the files) and ask when it is unclear. */
+    var planUncertainty: Boolean
+        get() = bool("plan_uncertainty", true)
+        set(v) = putBool("plan_uncertainty", v)
+
+    /** Overlap waits: tree/repo map load during routing, the next subtask is edited while CI runs, the evaluator runs with CI. */
+    var pipelining: Boolean
+        get() = bool("pipelining", true)
+        set(v) = putBool("pipelining", v)
+
+    /** Secrets and new dependencies (existence, look-alike names, known vulnerabilities) are checked before each commit. */
+    var supplyChainCheck: Boolean
+        get() = bool("supply_chain", true)
+        set(v) = putBool("supply_chain", v)
+
+    /** A red CI that looks transient (network, runner, a test known to flip) is re-run once before the agent "fixes" anything. */
+    var flakyRetry: Boolean
+        get() = bool("flaky_retry", true)
+        set(v) = putBool("flaky_retry", v)
+
+    /** Run the fixed evaluation set once after each app update (inside the weekly exam budget). */
+    var evalOnUpdate: Boolean
+        get() = bool("eval_on_update", true)
+        set(v) = putBool("eval_on_update", v)
+
+    /** A failing or overloaded model hands the call to the next model in the escalation order. */
+    var failover: Boolean
+        get() = bool("failover", true)
+        set(v) = putBool("failover", v)
+
+    /** Background work (self-improvement, queue) uses Gemini Flex (half price, may be slower). */
+    var backgroundFlex: Boolean
+        get() = bool("background_flex", true)
+        set(v) = putBool("background_flex", v)
+
+    /** Executor starts with low thinking and learned output caps; raised when it struggles. */
+    var adaptiveBudget: Boolean
+        get() = bool("adaptive_budget", true)
+        set(v) = putBool("adaptive_budget", v)
+
+    /** Queue runs only between these local hours (start..end, may wrap midnight); -1 = any time. */
+    var queueWindowStart: Int
+        get() = prefs.getInt("queue_win_start", -1).coerceIn(-1, 23)
+        set(v) = prefs.edit().putInt("queue_win_start", v.coerceIn(-1, 23)).apply()
+    var queueWindowEnd: Int
+        get() = prefs.getInt("queue_win_end", -1).coerceIn(-1, 23)
+        set(v) = prefs.edit().putInt("queue_win_end", v.coerceIn(-1, 23)).apply()
+
+    /** Warm the quick-check caches on the default branch once a day per repo. */
+    var quickCheckWarm: Boolean
+        get() = bool("quick_check_warm", true)
+        set(v) = putBool("quick_check_warm", v)
+    var quickCheckWarmedAt: String
+        get() = str("quick_check_warmed")
+        set(v) = put("quick_check_warmed", v)
+
+    /** Prices of the watched models at the last check (PriceWatch JSON) and alerts the user dismissed. */
+    var priceSnapshot: String
+        get() = str("price_snapshot")
+        set(v) = put("price_snapshot", v)
+    var activePriceAlerts: Set<String>
+        get() = str("price_alerts_active").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("price_alerts_active", v.joinToString("\n"))
+    var dismissedPriceAlerts: Set<String>
+        get() = str("price_alerts_dismissed").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("price_alerts_dismissed", v.joinToString("\n"))
+
+    /** The user's ordered list of stronger models ("provider/model" per line): repairs climb it one by one. */
+    var escalationChain: String
+        get() = str("escalation_chain")
+        set(v) = put("escalation_chain", v)
+
+    /** "Until green": a red CI keeps the agent fixing; the same error twice moves up the escalation chain. */
+    var untilGreen: Boolean
+        get() = bool("until_green", true)
+        set(v) = putBool("until_green", v)
+
+    /** Red CI rounds in one task before the user is asked whether to go on. */
+    var ciMaxRounds: Int
+        get() = prefs.getInt("ci_max_rounds", 4).coerceIn(1, 10)
+        set(v) = prefs.edit().putInt("ci_max_rounds", v.coerceIn(1, 10)).apply()
+
+    // Auto-Ship: for user-initiated tasks only, run code, PR, CI, merge, version bump and APK
+    // automatically. Never for evo-prefixed PRs. (Not a block comment: Kotlin nests /* */.)
+    var autoShip: Boolean
+        get() = bool("auto_ship", false)
+        set(v) = putBool("auto_ship", v)
+
+    /** Max automatic CI-fix rounds before giving up (1-5). */
+    var maxCiHealAttempts: Int
+        get() = prefs.getInt("max_ci_heal_attempts", 3).coerceIn(1, 5)
+        set(v) = prefs.edit().putInt("max_ci_heal_attempts", v.coerceIn(1, 5)).apply()
+
+    /** "auto" = bump version automatically on ship; "tag" = only tag a release on the existing tag flow. */
+    var versionBumpMode: String
+        get() = str("version_bump_mode", "auto")
+        set(v) = put("version_bump_mode", v)
+
+    /** A cheap model checks the architect's plan for missing callers/registrations before code is written. */
+    var planCritic: Boolean
+        get() = bool("plan_critic", true)
+        set(v) = putBool("plan_critic", v)
+
+    /** Remember how CI errors were fixed and hint the fix when the same error comes back. */
+    var fixMemory: Boolean
+        get() = bool("fix_memory", true)
+        set(v) = putBool("fix_memory", v)
+
+    /** Compile/type-check on a throwaway [skip ci] branch before each code commit (GitHub Actions, 1-5 min). */
+    var quickCheck: Boolean
+        get() = bool("quick_check", false)
+        set(v) = putBool("quick_check", v)
+
+    /** Repos where the user declined installing the quick-check workflow. */
+    var quickCheckDeclined: Set<String>
+        get() = str("quick_check_declined").split('\n').filter { it.isNotBlank() }.toSet()
+        set(v) = put("quick_check_declined", v.joinToString("\n"))
+
+    /** Full orchestrator on Android projects: emulator screenshots in GitHub Actions after CI passes. */
+    var androidShots: Boolean
+        get() = bool("android_shots", false)
+        set(v) = putBool("android_shots", v)
+
+    /** Run queued tasks unattended. */
+    var queueEnabled: Boolean
+        get() = bool("queue_enabled", true)
+        set(v) = putBool("queue_enabled", v)
+
+    var queueRequiresCharging: Boolean
+        get() = bool("queue_charging", true)
+        set(v) = putBool("queue_charging", v)
+
+    var queueRequiresWifi: Boolean
+        get() = bool("queue_wifi", true)
+        set(v) = putBool("queue_wifi", v)
+
+    /** Spending cap for one queued task. */
+    var queueTaskBudget: Double
+        get() = str("queue_task_budget", "0.5").toDoubleOrNull()?.coerceIn(0.05, 10.0) ?: 0.5
+        set(v) = put("queue_task_budget", v.coerceIn(0.05, 10.0).toString())
+
+    /** Issues labelled "coder" in the user's repos become queued tasks. */
+    var issueWatch: Boolean
+        get() = bool("issue_watch", false)
+        set(v) = putBool("issue_watch", v)
+
+    /** Weekly: the user's PR review comments become project rules (lessons). */
+    var learnFromReviews: Boolean
+        get() = bool("learn_reviews", true)
+        set(v) = putBool("learn_reviews", v)
+
+    /** lookup_docs: current library documentation (Context7, then the web). */
+    var docsLookup: Boolean
+        get() = bool("docs_lookup", true)
+        set(v) = putBool("docs_lookup", v)
+
+    /** Optional Context7 API key (higher rate limits). */
+    var context7Key: String
+        get() = str("context7_key")
+        set(v) = put("context7_key", v.trim())
+
+    /** update_todos: the agent keeps a visible task list on multi-step work. */
+    var todoList: Boolean
+        get() = bool("todo_list", true)
+        set(v) = putBool("todo_list", v)
+
+    /** A cheap model checks every change right before it is committed. */
+    var selfReview: Boolean
+        get() = bool("self_review", true)
+        set(v) = putBool("self_review", v)
+
+    /** Successful earlier tasks similar to the request are given as a hint. */
+    var similarTasks: Boolean
+        get() = bool("similar_tasks", true)
+        set(v) = putBool("similar_tasks", v)
+
+    /** The branch head before the agent's first write is saved, so the chat can rewind to it. */
+    var checkpoints: Boolean
+        get() = bool("checkpoints", true)
+        set(v) = putBool("checkpoints", v)
+
+    /** semantic_search over an embedding index of the repo (Gemini key needed). */
+    var semanticSearch: Boolean
+        get() = bool("semantic_search", true)
+        set(v) = putBool("semantic_search", v)
+
+    /** User-defined modes (JSON list of CustomMode). */
+    var customModes: String
+        get() = str("custom_modes")
+        set(v) = put("custom_modes", v)
+
+    /** Name of the active custom mode; empty = automatic routing. */
+    var activeMode: String
+        get() = str("active_mode")
+        set(v) = put("active_mode", v)
+
+    /** Full orchestrator: two models build the same plan; the evaluator (or CI / reviewer) keeps the better one. */
+    var bestOfTwo: Boolean
+        get() = bool("best_of_two", false)
+        set(v) = putBool("best_of_two", v)
+
+    /** Full orchestrator: an evaluator tests the running app (web: Playwright in GitHub Actions) against the contract. */
+    var evaluatorEnabled: Boolean
+        get() = bool("evaluator_enabled", false)
+        set(v) = putBool("evaluator_enabled", v)
 
     /** OrchestratorMode name; OFF keeps the normal flow untouched. */
     var orchestratorMode: String

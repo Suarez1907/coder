@@ -121,11 +121,116 @@ class ToolRegistry(private val settings: Settings) {
             "notes" to str("Tüm dosyalar için ortak notlar (isteğe bağlı)"),
             required = listOf("repo", "branch", "commit_message", "files")))
 
-    val specs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
-        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi)
+    /** Full instructions of a skill from the catalog in the system prompt (progressive disclosure). */
+    private val loadSkill = ToolSpec("load_skill",
+        "Sistem talimatındaki SKILLS listesinden bir yeteneğin tam talimatlarını yükler. Böyle bir işe başlamadan önce çağır.",
+        obj("name" to str("Yetenek adı, ör. blender-3d"),
+            "file" to str("İsteğe bağlı: yeteneğin yanında gelen bir dosya (ör. references/api.md)"), required = listOf("name")))
+
+    /** Runs a script in GitHub Actions (Blender headless or Python/FFmpeg); no local computer is involved. */
+    private val runCloudTool = ToolSpec("run_cloud_tool",
+        "Repodaki bir betiği GitHub Actions'ta çalıştırır: tool=blender (Blender --background --python), toolbox " +
+            "(Python 3.12 + FFmpeg), manim (toolbox + Manim/LaTeX; betik manim'i kendisi çağırır), video (Remotion: " +
+            "script_path giriş dosyası, ör. src/index.ts; video.mp4 + preview.png üretir) veya android (debug APK'yı emülatörde açar, " +
+            "ilk ekranın ve .coder/screens.txt'deki her adb shell komutundan sonraki ekranın görüntüsünü alır, çökmede başarısız olur; 10-20 dk). Workflow yoksa kurar, bitmesini bekler. " +
+            "Hata olursa traceback döner: betiği düzeltip tekrar çağır. Başarılıysa çıktılar (preview.png, .glb, .mp4) indirilir ve " +
+            "sohbette gösterilir. Önce betiği commit et.",
+        obj("repo" to str(repoDesc), "tool" to str("blender, toolbox, manim, video veya android"), "script_path" to str("Betiğin (video: giriş dosyasının) repo içi yolu"),
+            "output_dir" to str("Çıktı klasörü (varsayılan coder-out; betik CODER_OUTPUT_DIR ortam değişkenini kullanmalı)"),
+            "branch" to str("Betiğin bulunduğu dal (boş = varsayılan dal)"),
+            "blender_version" to str("Blender major.minor (varsayılan 4.2)"),
+            "app_dir" to str("video: package.json'ın olduğu klasör (varsayılan .)"),
+            "composition" to str("video: Remotion kompozisyon kimliği (boş = ilk)"),
+            "requirements" to str("toolbox/manim: pip gereksinim dosyası (isteğe bağlı)"),
+            required = listOf("tool", "script_path")))
+
+    private val lookupDocs = ToolSpec("lookup_docs",
+        "Bir kütüphanenin GÜNCEL belgesini getirir (Context7, yoksa resmi site). Emin olmadığın bir API'yi, yeni bir sürümü veya " +
+            "hata veren bir çağrıyı kullanmadan ÖNCE çağır; projedeki sürümü (DEPENDENCIES satırı) version olarak ver.",
+        obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
+            "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
+            "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
+    private val findReferences = ToolSpec("find_references",
+        "Bir sembolün (fonksiyon, sınıf, alan) TANIMINI ve onu KULLANAN tüm satırları dosya:satır olarak bulur. Bir imzayı, adı veya " +
+            "davranışı değiştirmeden ÖNCE çağır ve etkilenen her çağıranı da güncelle.",
+        obj("repo" to str(repoDesc), "symbol" to str("Tam ad, ör. saveScore veya ScoreRepository"), "ref" to str("Branch (boşsa varsayılan)"),
+            required = listOf("symbol")))
+    private val readSymbol = ToolSpec("read_symbol",
+        "Bir fonksiyonu/sınıfı/metodu tüm dosya yerine yalnızca kendi kodu (belge yorumu dahil, satır numaralı) olarak okur. Dosyanın " +
+            "tamamı gerekmiyorsa github_read_file yerine bunu kullan: çok daha az token. path verilmezse kod dizininden bulunur.",
+        obj("repo" to str(repoDesc), "symbol" to str("Ad, ör. saveScore"), "path" to str("Dosya (biliniyorsa)"), "ref" to str("Branch (boşsa varsayılan)"),
+            required = listOf("symbol")))
+    private val codemod = ToolSpec("codemod",
+        "Çok dosyalı MEKANİK değişiklikleri (yeniden adlandırma, API göçü, kalıp değişimi) tek yapısal kuralla yapar: ast-grep GitHub Actions'ta " +
+            "tüm repoya uygulanır, değişen dosyalar commit denetimlerinden geçip tek commit olur. Her dosyaya ayrı diff yazmaktan çok daha ucuz " +
+            "ve hatasız. Kalıpta \$A gibi meta değişkenler kullanılır, ör. pattern 'oldName(\$A)', rewrite 'newName(\$A)'.",
+        obj("repo" to str(repoDesc), "branch" to str("Hedef branch"), "base_branch" to str("Branch yoksa kaynağı"),
+            "lang" to str("kotlin, java, typescript, tsx, javascript, python, ..."), "pattern" to str("Aranan kod kalıbı"),
+            "rewrite" to str("Yerine yazılacak kalıp"), "rule" to str("pattern yerine ast-grep YAML kuralı (isteğe bağlı)"),
+            "paths" to str("Yalnızca bu klasör (isteğe bağlı)"), "message" to str("Commit mesajı"), required = listOf("branch")))
+    private val mutationTest = ToolSpec("mutation_test",
+        "Testlerin gerçekten koruduğunu ölçer: değişen koda bilerek küçük hatalar (mutant) sokar, ilgili testleri her birine karşı çalıştırır " +
+            "(GitHub Actions). Yakalanmayan mutantlar testlerdeki boşluklardır. Test yazdıktan sonra çağır; düşük skorda eksik testleri ekle.",
+        obj("repo" to str(repoDesc), "branch" to str("Kodun olduğu branch"), "path" to str("Mutasyona uğrayacak kaynak dosya"),
+            "start_line" to int("Aralık başı (isteğe bağlı)"), "end_line" to int("Aralık sonu"),
+            "tests" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Test dosyaları (boşsa otomatik seçilir)"),
+            required = listOf("branch", "path")))
+    private val updateTodos = ToolSpec("update_todos",
+        "Kullanıcının gördüğü görev listesini yazar/günceller. 3+ adımlı işlerde ilk iş olarak listeyi çıkar; her adımda tam listeyi " +
+            "tekrar gönder, aynı anda yalnızca bir madde in_progress olsun, biten maddeyi hemen done yap.",
+        obj("items" to JSONObject().put("type", "array").put("description", "Tüm maddeler, sırayla")
+            .put("items", obj("text" to str("Kısa madde"),
+                "status" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("pending", "in_progress", "done"))),
+                required = listOf("text", "status"))), required = listOf("items")))
+    private val semanticSearch = ToolSpec("semantic_search",
+        "Kodu ANLAMINA göre arar (ör. 'ödeme akışı nerede', 'skor nasıl kaydediliyor'). Dosya adını bilmediğinde github_search_code " +
+            "yerine kullan. İlk çağrıda repo dizinlenir (sonra yalnızca değişen dosyalar). En ilgili kod parçalarını satır aralığıyla döndürür.",
+        obj("repo" to str(repoDesc), "query" to str("Ne aradığın, doğal dilde"), "ref" to str("Branch (boşsa varsayılan)"),
+            required = listOf("query")))
+
+    val specs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
+        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool) + extraSpecs(true)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
-    val readOnlySpecs: List<ToolSpec> = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors, githubApi, submitPlan)
+    val readOnlySpecs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors,
+        githubApi, submitPlan, loadSkill) + extraSpecs(false)
+
+    /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
+    private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
+        if (settings.docsLookup) add(lookupDocs)
+        add(findReferences)
+        add(readSymbol)
+        if (writer && cloudOps != null) { add(codemod); add(mutationTest) }
+        if (settings.semanticSearch && semantic != null && settings.geminiKey.isNotBlank()) add(semanticSearch)
+        if (writer && settings.todoList) add(updateTodos)
+    }
+
+    private val docs = DocsLookup(web) { settings.context7Key }
+    /** Set by the Agent when it has app storage. */
+    var semantic: com.suarez.coder.context.SemanticIndex? = null
+
+    /** Runs before a commit with (path, before, after); throws ToolException to block it (self-review). */
+    var preCommit: (suspend (repo: String, branch: String, changes: List<Triple<String, String?, String?>>) -> Unit)? = null
+    /** Called after every commit with (repo, commit result text, changed paths, new files): the risk model's data. */
+    var afterCommit: ((repo: String, result: String, paths: List<String>, newFiles: Int) -> Unit)? = null
+
+    /** Warnings from the commit checks, appended to the commit result so the model sees them. */
+    val commitNotes = ArrayList<String>()
+
+    private fun notes(): String = if (commitNotes.isEmpty()) "" else "\n" + commitNotes.joinToString("\n").also { commitNotes.clear() }
+
+    /** Runs before the first write to a branch (checkpoint). */
+    var beforeWrite: (suspend (repo: String, branch: String) -> Unit)? = null
+
+    /** Set by the Agent when it has app storage (not for evolution agents). */
+    var skills: com.suarez.coder.skills.SkillRepository? = null
+    var cloud: com.suarez.coder.cloudtools.CloudToolRunner? = null
+
+    /** The repository skills belong to: the pinned context repo, else the default repo. */
+    fun activeRepo(): String = normalizeRepo(repoOverride ?: settings.contextRepo.ifBlank { settings.defaultRepo })
+
+    /** Exam runs: the repo to use when a tool call names none. */
+    var repoOverride: String? = null
 
     private val needMoreInfo = ToolSpec("need_more_info",
         "Plan için harita ve bağlam yetmiyorsa çağır: istediğin dosyalar (en fazla 3) verilir ve okuma/GitHub araçların açılır.",
@@ -133,16 +238,40 @@ class ToolRegistry(private val settings: Settings) {
             "paths" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Okunacak dosya yolları (en fazla 3)"),
             required = listOf("reason")))
 
-    /** Architect's first, single-shot call: plan now, or ask for more. */
-    val singleShotSpecs: List<ToolSpec> = listOf(submitPlan, needMoreInfo)
+    /** The architect hands small changes and repository operations (PRs, merges, workflows) to the executor. */
+    val delegateToExecutor = ToolSpec("delegate_to_executor",
+        "İşi planlamadan doğrudan Uygulayıcı'ya verir: tek dosyalık düzeltmeler, küçük değişiklikler ve GitHub işlemleri " +
+            "(branch, PR, merge, workflow) için. Uygulayıcı tüm araçlara sahiptir.",
+        obj("instructions" to str("Uygulayıcı'ya kısa ve net talimat: ne yapılacak, hangi dosya/PR"), required = listOf("instructions")))
 
-    /** Architect: read tools + repository operations (PRs, merges, workflows, API writes), but no direct code edits. */
-    val architectSpecs: List<ToolSpec> = readOnlySpecs + listOf(createBranch, createPr, mergePr, runWorkflow, ciWait)
+    /**
+     * Everything the architect ever sees, in one fixed list (same tools on every call keep the prompt prefix cacheable):
+     * plan, ask for up to 3 files, or delegate. No read loop, no write, no repository operation.
+     */
+    val singleShotSpecs: List<ToolSpec> = listOf(submitPlan, needMoreInfo, delegateToExecutor)
 
     companion object {
+        /** Planning roles: read-only, whatever a caller passes (enforced in [execute], not only in the prompt). */
+        val ARCHITECT_ROLES = setOf("architect", "planner")
+        const val REF_SCAN_FILES = 150
+        /** CI polling interval; tests shorten it. */
+        @Volatile var CI_POLL_MS = 15_000L
+
+        /** Tools that change files, run things or change the repository. */
+        val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
+            "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool", "codemod", "mutation_test")
+
+        /** Hard guard for planning roles: only read tools, and github_api only with GET. */
+        fun architectDenied(name: String, method: String?): String? {
+            if (name in WRITE_TOOLS || name !in READ_TOOLS) return "Mimar salt okunurdur: '$name' kullanılamaz. Kod ve GitHub işlemleri Uygulayıcı'nındır."
+            if (name == "github_api" && (method ?: "GET").uppercase() != "GET") return "Mimar salt okunurdur: yalnızca GET istekleri."
+            return null
+        }
+
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
-            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan")
+            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill",
+            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -161,7 +290,7 @@ class ToolRegistry(private val settings: Settings) {
 
     fun needsApproval(call: ToolCall): Boolean = when (call.name) {
         "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-        "github_merge_pull_request", "github_run_workflow" -> true
+        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool", "codemod", "mutation_test" -> true
         "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
         else -> false
     }
@@ -181,15 +310,16 @@ class ToolRegistry(private val settings: Settings) {
 
     fun normalizeRepo(r: String) = r.trim().removePrefix("https://github.com/").trim('/').removeSuffix(".git")
 
-    suspend fun execute(call: ToolCall, readOnly: Boolean = false, allowOps: Boolean = false): String {
+    suspend fun execute(call: ToolCall, readOnly: Boolean = false, allowOps: Boolean = false, role: String? = null): String {
         val a = call.args
         fun s(k: String) = a.optString(k).takeIf { a.has(k) && !a.isNull(k) && it.isNotBlank() }
         fun req(k: String) = s(k) ?: throw ToolException("'$k' parametresi gerekli")
         fun i(k: String) = if (a.has(k) && !a.isNull(k)) a.optInt(k) else null
         fun repo(): String {
-            val r = s("repo") ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
+            val r = s("repo") ?: repoOverride ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
             return normalizeRepo(r)
         }
+        if (role in ARCHITECT_ROLES) architectDenied(call.name, s("method"))?.let { throw ToolException(it) }
         accessError(call.name, s("method"), readOnly, allowOps)?.let { throw ToolException(it) }
 
         val result = when (call.name) {
@@ -220,12 +350,17 @@ class ToolRegistry(private val settings: Settings) {
                     GitHub.FileChange(f.getString("path"), if (f.isNull("content")) null else f.optString("content"), f.optBoolean("delete"))
                 }
                 val repo = repo(); val branch = req("branch"); val base = s("base_branch")
+                val befores = files.associate { f -> f.path to runCatching { readForEdit(repo, branch, base, f.path) }.getOrNull() }
                 val problems = files.filter { !it.delete && it.content != null }.mapNotNull { f ->
-                    val before = runCatching { readForEdit(repo, branch, base, f.path) }.getOrNull()
-                    CodeValidator.validate(f.path, before, f.content!!)?.let { "${f.path}: $it" }
+                    CodeValidator.validate(f.path, befores[f.path], f.content!!)?.let { "${f.path}: $it" }
                 }
                 if (problems.isNotEmpty()) throw ToolException("Yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n"))
-                github.commitFiles(repo, branch, req("message"), files, base) + staleNote(files.map { it.path })
+                commitNotes.clear()
+                preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
+                beforeWrite?.invoke(repo, branch)
+                github.commitFiles(repo, branch, req("message"), files, base).also { r ->
+                    afterCommit?.invoke(repo, r, files.map { it.path }, files.count { !it.delete && befores[it.path] == null })
+                } + staleNote(files.map { it.path }) + notes()
             }
             "github_create_branch" -> github.createBranch(repo(), req("branch"), s("from"))
             "github_create_pull_request" -> github.createPullRequest(repo(), req("title"), req("head"), s("base"), s("body"))
@@ -235,6 +370,27 @@ class ToolRegistry(private val settings: Settings) {
                 s("inputs_json")?.let { runCatching { JSONObject(it) }.getOrElse { throw ToolException("inputs_json geçerli bir JSON nesnesi değil") } })
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
+            "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
+            "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
+            "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
+            "read_symbol" -> readSymbol(repo(), s("ref"), req("symbol").trim(), s("path"))
+            "codemod" -> (cloudOps ?: throw ToolException("Codemod bu oturumda kullanılamıyor.")).codemod(repo(), req("branch"), s("base_branch"), a)
+            "mutation_test" -> (cloudOps ?: throw ToolException("Mutasyon testi bu oturumda kullanılamıyor.")).mutation(repo(), req("branch"), req("path"),
+                i("start_line"), i("end_line"), Args.stringList(a, "tests"))
+            "update_todos" -> com.suarez.coder.agent.Todos.ack(com.suarez.coder.agent.Todos.parse(a))
+            "semantic_search" -> (semantic ?: throw ToolException("Anlamsal arama bu oturumda kullanılamıyor.")).search(repo(), s("ref"), req("query"))
+            "run_cloud_tool" -> {
+                val runner = cloud ?: throw ToolException("Bulut araçları bu oturumda kullanılamıyor.")
+                val r = repo()
+                ciListener?.started(r, "Bulut aracı: ${s("tool") ?: ""}")
+                var ok = false
+                try {
+                    runner.run(r, req("tool"), req("script_path"), s("output_dir"), s("branch"), s("blender_version"),
+                        listOf("app_dir", "composition", "requirements").mapNotNull { k -> s(k)?.let { k to it } }.toMap()).also { ok = !it.contains("BAŞARISIZ") }
+                } finally {
+                    ciListener?.finished(r, ok, if (ok) "Bulut aracı bitti" else "Bulut aracı başarısız", null)
+                }
+            }
             else -> throw ToolException("Bilinmeyen araç: ${call.name}")
         }
         if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request") ||
@@ -282,7 +438,12 @@ class ToolRegistry(private val settings: Settings) {
             throw ToolException("Diff uygulandı ama yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n") +
                 "\nDüzeltilmiş blokları tekrar gönder.")
         }
-        return github.commitFiles(repo, branch, message, changes, base) + "\n" + summary + staleNote(changes.map { it.path })
+        commitNotes.clear()
+        preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
+        beforeWrite?.invoke(repo, branch)
+        return github.commitFiles(repo, branch, message, changes, base).also { r ->
+            afterCommit?.invoke(repo, r, changes.map { it.path }, changes.count { originals[it.path] == null })
+        } + "\n" + summary + staleNote(changes.map { it.path }) + notes()
     }
 
     private fun staleNote(paths: List<String>): String {
@@ -292,7 +453,86 @@ class ToolRegistry(private val settings: Settings) {
 
     suspend fun readFilesText(repo: String, paths: List<String>, ref: String?): String = readMany(repo, paths, ref)
 
+    suspend fun fetchUrl(url: String): String = web.fetch(url, 0, 12_000)
+
+    /** Set by the Agent: cloud-backed code tools (index, codemod, mutation). */
+    var cloudOps: CloudOps? = null
+
+    /** Files to look in for [name] from the code index, plus files changed since it was built; null without an index. */
+    private suspend fun indexCandidates(repo: String, ref: String?, name: String): List<String>? {
+        val idx = runCatching { cloudOps?.codeIndex(repo, false) }.getOrNull() ?: return null
+        val changed = if (idx.sha.isBlank()) emptyList() else runCatching {
+            github.changedSince(repo, idx.sha, ref ?: github.defaultBranch(repo))
+        }.getOrDefault(emptyList())
+        return (idx.filesFor(name) + changed).toList()
+    }
+
+    /** One symbol's code: from the index's definition (or [path]), cut with brace/indent matching. */
+    private suspend fun readSymbol(repo: String, ref: String?, symbol: String, path: String?): String {
+        val name = symbol.substringAfterLast('.')
+        val idx = runCatching { cloudOps?.codeIndex(repo, false) }.getOrNull()
+        val defs = idx?.defs?.get(name).orEmpty().filter { path == null || it.path == path.trimStart('/') }
+        val cands: List<Pair<String, Int?>> = when {
+            defs.isNotEmpty() -> defs.map { it.path to it.line }
+            path != null -> listOf(path.trimStart('/') to null)
+            else -> (indexCandidates(repo, ref, name) ?: filteredTree(repo, ref).map { it.path }.filter { com.suarez.coder.context.SemanticIndex.indexable(GitHub.TreeEntry(it, 1)) }.take(REF_SCAN_FILES))
+                .map { it to null }
+        }
+        runCatching { github.readFilesBatch(repo, ref, cands.map { it.first }.distinct().take(GitHub.GRAPHQL_BATCH)) }
+        val out = StringBuilder()
+        var found = 0
+        for ((p, hint) in cands.distinctBy { it.first }) {
+            val text = github.readFileRaw(repo, p, ref) ?: continue
+            val r = com.suarez.coder.agent.SymbolExtractor.find(text, name, hint) ?: continue
+            val lines = text.lines()
+            out.append("### $p:${r.start}-${r.end} (dosya ${lines.size} satır)\n")
+            for (n in r.start..r.end) out.append(n).append(": ").append(lines[n - 1]).append('\n')
+            out.append('\n')
+            if (++found >= 3) break
+        }
+        return if (found == 0) "'$name' tanımı bulunamadı" + (if (idx == null) " (kod dizini henüz yok)" else "") + "; github_read_file ile dosyayı oku." else out.toString()
+    }
+
+    /** Definition and uses of a symbol: the code index when there is one, else GitHub code search, else a bounded scan. */
+    private suspend fun findReferences(repo: String, ref: String?, symbol: String): String {
+        if (!Regex("[\\w$.]{2,80}").matches(symbol)) throw ToolException("Geçersiz sembol: $symbol")
+        val code = Regex("\\.(kt|kts|java|py|js|jsx|ts|tsx|mjs|go|rs|swift|dart|gd|cs|c|cc|cpp|h|hpp|rb|php|lua|vue|svelte|xml)$", RegexOption.IGNORE_CASE)
+        val tree = filteredTree(repo, ref).filter { code.containsMatchIn(it.path) && it.size < 200_000 }
+        val name = symbol.substringAfterLast('.')
+        var source = "kod araması"
+        val fromIndex = indexCandidates(repo, ref, name)?.filter { p -> tree.any { it.path == p } }
+        var paths: List<String> = if (fromIndex != null) { source = "kod dizini"; fromIndex } else runCatching {
+            val body = github.raw("GET", "/search/code?q=${java.net.URLEncoder.encode("$name repo:$repo", "UTF-8")}&per_page=30", null)
+            if (!body.startsWith("HTTP 200")) emptyList() else {
+                val items = JSONObject(body.substringAfter('\n')).optJSONArray("items") ?: JSONArray()
+                (0 until items.length()).map { items.getJSONObject(it).optString("path") }
+            }
+        }.getOrDefault(emptyList()).filter { p -> tree.any { it.path == p } }
+        if (fromIndex == null && (paths.isEmpty() || ref != null)) {
+            // The search index only covers the default branch: scan the tree (bounded).
+            source = "dal taraması"
+            paths = tree.sortedBy { it.size }.take(REF_SCAN_FILES).map { it.path }
+        }
+        val defs = ArrayList<String>(); val uses = ArrayList<String>()
+        runCatching { github.readFilesBatch(repo, ref, paths.take(GitHub.GRAPHQL_BATCH * 3)) }
+        for (p in paths) {
+            val text = github.readFileRaw(repo, p, ref) ?: continue
+            for ((n, line) in com.suarez.coder.agent.References.lines(text, name)) {
+                val row = "$p:$n  $line"
+                if (com.suarez.coder.agent.References.isDefinition(line, name)) defs += row else uses += row
+            }
+            if (defs.size + uses.size > 120) break
+        }
+        if (defs.isEmpty() && uses.isEmpty()) return "'$name' bulunamadı ($source, ${paths.size} dosya)."
+        val files = (defs + uses).map { it.substringBefore(':') }.distinct().size
+        return "'$name': ${defs.size} tanım, ${uses.size} kullanım, $files dosya ($source)\n" +
+            (if (defs.isNotEmpty()) "TANIM:\n" + defs.joinToString("\n") + "\n" else "") +
+            (if (uses.isNotEmpty()) "KULLANIM:\n" + uses.take(100).joinToString("\n") else "") +
+            (if (paths.size >= REF_SCAN_FILES && source == "dal taraması") "\n(İlk $REF_SCAN_FILES dosya tarandı.)" else "")
+    }
+
     private suspend fun readMany(repo: String, paths: List<String>, ref: String?): String {
+        runCatching { github.readFilesBatch(repo, ref, paths.filter { !FileFilter.isBinaryOrLock(it) }) }
         val sb = StringBuilder()
         val limit = 120_000
         for (p in paths) {
@@ -305,7 +545,7 @@ class ToolRegistry(private val settings: Settings) {
         return sb.toString()
     }
 
-    private suspend fun ciErrors(repo: String, runId: Long): String {
+    internal suspend fun ciErrors(repo: String, runId: Long): String {
         val failed = github.jobs(repo, runId).filter { it.conclusion != null && it.conclusion != "success" && it.conclusion != "skipped" }
         if (failed.isEmpty()) return "Bu çalıştırmada başarısız iş yok."
         val sb = StringBuilder()
@@ -317,6 +557,9 @@ class ToolRegistry(private val settings: Settings) {
     }
 
     /** Waits inside the app (no model steps) until every workflow run for the commit has finished. */
+    /** Set by the Agent: tests that flipped before (per repo). */
+    var flaky: com.suarez.coder.ci.Flaky.Store? = null
+
     private suspend fun ciWait(repo: String, ref: String?, timeoutMinutes: Int): String {
         val isSha = ref != null && Regex("^[0-9a-f]{40}$").matches(ref)
         val sha = if (isSha) ref!! else github.headSha(repo, ref)
@@ -341,16 +584,44 @@ class ToolRegistry(private val settings: Settings) {
                         return summary
                     }
                 } else if (runs.all { it.status == "completed" }) break
-                delay(15_000)
+                delay(CI_POLL_MS)
             }
             if (runs.isEmpty() || runs.any { it.status != "completed" }) {
                 summary = "Zaman aşımı ($timeoutMinutes dk): " + runs.joinToString { "${it.name}: ${it.status}" }
                 return "$summary. Daha sonra tekrar ci_wait çağır."
             }
-            val sb = StringBuilder("Commit ${sha.take(7)}:\n")
+            var failed = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" && it.conclusion != "cancelled" }
+            var rerunNote = ""
+            // A failure that looks transient (network, runner) or comes only from tests known to flip: re-run once, no model call.
+            if (failed.isNotEmpty() && settings.flakyRetry) {
+                val logs = failed.associate { it.id to runCatching { ciErrors(repo, it.id) }.getOrDefault("") }
+                val known = flaky?.known(repo).orEmpty()
+                val retry = failed.filter { r -> logs[r.id].orEmpty().let { com.suarez.coder.ci.Flaky.isTransient(it) || com.suarez.coder.ci.Flaky.onlyKnownFlaky(it, known) } }
+                if (retry.isNotEmpty() && retry.all { runCatching { github.rerunFailedJobs(repo, it.id) }.getOrDefault(false) }) {
+                    listener?.started(repo, "geçici hata: yeniden çalıştırılıyor")
+                    delay(CI_POLL_MS)
+                    while (System.currentTimeMillis() < deadline) {
+                        runs = github.runsForSha(repo, sha)
+                        if (runs.all { it.status == "completed" }) break
+                        delay(CI_POLL_MS)
+                    }
+                    val again = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" && it.conclusion != "cancelled" }
+                    val flipped = retry.filter { r -> again.none { it.id == r.id } }
+                    flipped.forEach { r -> flaky?.record(repo, com.suarez.coder.ci.Flaky.failedTests(logs[r.id].orEmpty())) }
+                    rerunNote = if (flipped.isNotEmpty()) "Not: ilk çalıştırma geçici bir hatayla düştü, yeniden çalıştırılınca geçti (kod hatası değil).\n"
+                        else "Not: geçici görünen hata nedeniyle bir kez yeniden çalıştırıldı, yine başarısız (gerçek hata olabilir).\n"
+                    failed = again
+                }
+            }
+            val sb = StringBuilder("Commit ${sha.take(7)}:\n").append(rerunNote)
             runs.forEach { sb.append("- ${it.name}: ${it.conclusion} (${it.url})\n") }
-            val failed = runs.filter { it.conclusion != "success" && it.conclusion != "skipped" }
-            success = failed.isEmpty()
+            // Only cancelled runs (superseded by a newer commit) prove nothing.
+            success = failed.isEmpty() && runs.any { it.conclusion != "cancelled" }
+            if (failed.isEmpty() && !success) {
+                summary = "Tüm çalıştırmalar iptal edildi (yeni bir commit tarafından geçilmiş olabilir)."
+                sb.append("\n").append(summary).append(" Son commit için tekrar ci_wait çağır.\n")
+                return sb.toString()
+            }
             if (success) {
                 apk = runCatching { github.apkLinkFor(repo, sha, branch, runs.map { it.id }) }.getOrNull()
                 apk?.let { sb.append("\nAPK: ").append(it).append('\n') }

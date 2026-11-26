@@ -36,6 +36,12 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("coder")
         }
+        // Release code, measurable: what the macrobenchmark installs (profileable, signed like release).
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("coder")
+            matchingFallbacks += listOf("release")
+        }
     }
 
     compileOptions {
@@ -73,9 +79,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.security:security-crypto:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jsoup:jsoup:1.18.1")
 
+    testImplementation("org.yaml:snakeyaml:2.2")
     testImplementation("junit:junit:4.13.2")
     // Screenshot tests on the JVM (Robolectric + Roborazzi), used to check the UI without an emulator.
     testImplementation("org.robolectric:robolectric:4.14.1")

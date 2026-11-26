@@ -21,6 +21,8 @@ class OpenAiCompatClient(
     private val openRouter: Boolean = false,
     /** The model accepts reasoning.effort (known from OpenRouter's model list). */
     private val reasoning: Boolean = false,
+    /** The model accepts response_format (JSON mode). */
+    private val json: Boolean = false,
     /** Waits between retries of temporary errors; visible for tests. */
     private val backoffMs: List<Long> = BACKOFF_MS,
 ) : LlmClient {
@@ -28,7 +30,8 @@ class OpenAiCompatClient(
     companion object {
         /** Temporary upstream/proxy failures: retried, never treated as a model mistake. */
         val TRANSIENT_CODES = setOf(408, 429, 500, 502, 503, 504, 520, 522, 524, 529)
-        val BACKOFF_MS = listOf(2_000L, 5_000L, 10_000L)
+        /** Retry waits; tests shorten them. */
+        @Volatile var BACKOFF_MS = listOf(2_000L, 5_000L, 10_000L)
         private const val MAX_RETRY_AFTER_MS = 30_000L
 
         fun isTransient(code: Int) = code in TRANSIENT_CODES
@@ -71,7 +74,9 @@ class OpenAiCompatClient(
             .put("model", model)
             .put("messages", buildMessages(system, history))
         options.maxOutputTokens?.let { body.put("max_tokens", it) }
+        options.temperature?.let { body.put("temperature", it) }
         if (openRouter) body.put("usage", JSONObject().put("include", true))
+        if (json && options.jsonMode && tools.isEmpty()) body.put("response_format", JSONObject().put("type", "json_object"))
         if (reasoning) OpenRouterCatalog.effortFor(options.thinkingLevel, options.minimalThinking)?.let {
             body.put("reasoning", JSONObject().put("effort", it))
         }
@@ -89,6 +94,11 @@ class OpenAiCompatClient(
             .post(body.toString().toRequestBody(Http.JSON))
             .build()
         var res = send(req)
+        if (res.code == 400 && body.has("temperature") && errorMessage(res.body).contains("temperature", ignoreCase = true)) {
+            // Reasoning models fix their own temperature.
+            body.remove("temperature")
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
         if (res.code == 400 && options.maxOutputTokens != null && errorMessage(res.body).contains("max_tokens", ignoreCase = true)) {
             // The model's own output limit is lower than the configured one: let the API use its maximum.
             body.remove("max_tokens")
@@ -97,6 +107,10 @@ class OpenAiCompatClient(
         if (res.code == 400 && body.has("reasoning") && errorMessage(res.body).contains("reasoning", ignoreCase = true)) {
             // Listed as supporting reasoning but this provider rejects it: answer without it.
             body.remove("reasoning")
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
+        if (res.code == 400 && body.has("response_format") && errorMessage(res.body).contains("response_format", ignoreCase = true)) {
+            body.remove("response_format")
             res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
         }
         if (res.code !in 200..299) {

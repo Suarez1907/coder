@@ -18,8 +18,13 @@ data class Usage(val input: Long = 0, val output: Long = 0, val cached: Long = 0
 }
 
 sealed class ChatMessage {
-    /** [images]: paths of prepared JPEG files (resized on the device); sent as inline image parts to vision models. */
-    data class User(val text: String, val images: List<String> = emptyList()) : ChatMessage()
+    /** [images]: paths of prepared JPEG files (resized on the device); sent as inline image parts to vision models.
+     *  [isHarnessInternal]: the app (not the user) added this message, e.g. an automatic authority upgrade. */
+    data class User(
+        val text: String,
+        val images: List<String> = emptyList(),
+        val isHarnessInternal: Boolean = false,
+    ) : ChatMessage()
 
     data class Assistant(
         val text: String,
@@ -85,8 +90,12 @@ data class CallOptions(
     val onProgress: ((StreamProgress) -> Unit)? = null,
     /** Called when a long answer continues in another hop (Gemini long decode), with the hop number. */
     val onHop: ((Int) -> Unit)? = null,
+    /** Ask for a JSON object answer (OpenRouter response_format) where the model supports it. */
+    val jsonMode: Boolean = false,
     /** Gemini cachedContents/... name; when set, system prompt and tools come from the cache. */
     val cachedContent: String? = null,
+    /** Sampling temperature (several candidates of the same edit differ); null = the model's default. */
+    val temperature: Double? = null,
 )
 
 data class LlmResponse(
@@ -139,9 +148,10 @@ object MessageJson {
     private fun usageFrom(o: JSONObject?) = if (o == null) Usage() else
         Usage(o.optLong("i"), o.optLong("o"), o.optLong("c"), o.optLong("th"))
 
-    fun toJson(list: List<ChatMessage>): String {
-        val arr = JSONArray()
-        for (m in list) {
+    fun toJson(list: List<ChatMessage>): String = JSONArray().also { arr -> list.forEach { arr.put(encode(it)) } }.toString()
+
+    /** One message as a JSON object (also one line of an append-only chat log). */
+    fun encode(m: ChatMessage): JSONObject {
             val o = JSONObject()
             when (m) {
                 is ChatMessage.User -> {
@@ -177,17 +187,16 @@ object MessageJson {
                     o.put("calls", calls)
                 }
             }
-            arr.put(o)
-        }
-        return arr.toString()
+            return o
     }
 
     fun fromJson(s: String): List<ChatMessage> {
         val arr = JSONArray(s)
-        val out = ArrayList<ChatMessage>()
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            out += when (o.getString("t")) {
+        return (0 until arr.length()).map { decode(arr.getJSONObject(it)) }
+    }
+
+    fun decode(o: JSONObject): ChatMessage {
+            return when (o.getString("t")) {
                 "user" -> ChatMessage.User(o.getString("text"),
                     o.optJSONArray("imgs")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList())
                 "notice" -> ChatMessage.Notice(o.getString("text"), if (o.has("detail")) o.getString("detail") else null, o.optBoolean("err"))
@@ -215,7 +224,5 @@ object MessageJson {
                     )
                 }
             }
-        }
-        return out
     }
 }

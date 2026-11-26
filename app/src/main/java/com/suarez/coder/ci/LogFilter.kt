@@ -7,18 +7,24 @@ package com.suarez.coder.ci
 object LogFilter {
     private val timestamp = Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z\\s?")
     private val errorRe = Regex(
-        "(^e: |^w: .*error|\\berror\\b|\\berror:|##\\[error\\]|FAILED|FAILURE|BUILD FAILED|What went wrong|Exception|" +
-            "Unresolved reference|cannot find symbol|Could not (find|resolve)|npm ERR!|Traceback|AssertionError|" +
-            "SyntaxError|TypeError|ReferenceError|Process completed with exit code [1-9]|exit code [1-9])",
+        "(^e: |^w: .*\\berror\\b|\\berror\\b|\\berror\\[|##\\[error\\]|\\bFAILED\\b|\\bFAILURE\\b|What went wrong|" +
+            "\\b\\w*(Error|Exception)\\b:|Exception in thread|Caused by:|Unresolved reference|cannot find symbol|Could not (find|resolve)|" +
+            "npm ERR!|Traceback|^\\s*File \".*\", line \\d+|^fatal:|\\btest failed\\b|Process completed with exit code [1-9]|exit code [1-9]|" +
+            "manifest unknown|manifest not found)",
         RegexOption.IGNORE_CASE,
     )
+    /**
+     * License boilerplate ("WITHOUT WARRANTY ... FAILURE OF ESSENTIAL PURPOSE") is printed by some tools and is not an
+     * error. Matched in capitals only, so real error lines that merely mention such words stay.
+     */
+    private val legal = Regex("\\b(WARRANTY|WARRANTIES|WARRANTED|LIABILITY|LIABLE|DAMAGES|INFRINGEMENT|NONINFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b")
     private val noise = Regex("(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated)", RegexOption.IGNORE_CASE)
 
     fun extract(log: String, context: Int = 2, maxChars: Int = 6_000): String {
         val lines = log.lines().map { it.replace(timestamp, "").trimEnd() }
         val keep = sortedSetOf<Int>()
         lines.forEachIndexed { i, l ->
-            if (errorRe.containsMatchIn(l) && !noise.containsMatchIn(l)) {
+            if (errorRe.containsMatchIn(l) && !noise.containsMatchIn(l) && !legal.containsMatchIn(l)) {
                 for (j in (i - context).coerceAtLeast(0)..(i + context).coerceAtMost(lines.size - 1)) keep += j
             }
         }

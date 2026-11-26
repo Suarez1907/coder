@@ -22,8 +22,16 @@ class LocalRouterTest {
 
     @Test fun complexKeywordsGoToArchitect() {
         assertEquals(Route.COMPLEX_ARCHITECT, r("Oyuna yeni bir seviye ve puan tablosu ekle"))
-        assertEquals(Route.COMPLEX_ARCHITECT, r("Ağ katmanını refactor edip Retrofit'e taşı"))
-        assertEquals(Route.COMPLEX_ARCHITECT, r("Uygulama açılışta çöküyor, logları inceleyip düzelt", pinned = 1))
+        assertEquals(Route.COMPLEX_ARCHITECT, r("Uygulamaya yeni ekran ekle: ayarlar ve profil"))
+        // A refactor is not automatically architecture any more: tier 2 / Decision decides.
+        assertNull(r("Ağ katmanını refactor edip Retrofit'e taşı"))
+    }
+
+    @Test fun scopedFixesBypassTheArchitect() {
+        assertEquals(Route.SIMPLE_EDIT, r("Uygulama açılışta çöküyor, logları inceleyip düzelt", pinned = 1))
+        assertEquals(Route.SIMPLE_EDIT, r("Giriş ekranındaki null hatayı düzelt"))
+        assertEquals(Route.SIMPLE_EDIT, r("app/src/main/java/com/x/LoginViewModel.kt içinde timeout değerini 30 sn yap"))
+        assertEquals(Route.SIMPLE_EDIT, r("PR #12'yi merge et"))
     }
 
     @Test fun questionsWithoutChangeVerbs() {

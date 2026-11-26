@@ -30,6 +30,22 @@ object Pricing {
         "gemini-2.5-flash" to Price(0.30, 2.50, 0.03, 1.00),
     )
 
+    /** A published future price (from the provider's announcement), applied from [effectiveMs]. */
+    data class ScheduledPrice(val model: String, val effectiveMs: Long, val price: Price, val source: String)
+
+    private fun utc(y: Int, m: Int, d: Int) = java.time.LocalDate.of(y, m, d).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+
+    /** Gemini 3.8 Flash's introductory price ends on 2027-01-01 (reported by several pricing trackers in November 2026). */
+    val SCHEDULED: List<ScheduledPrice> = listOf(
+        ScheduledPrice("gemini-3.8-flash", utc(2027, 1, 1), Price(1.50, 7.50, 0.15, 0.50), "fiyat takip siteleri, Kasım 2026"),
+    )
+
+    /** The next scheduled change for a model that has not taken effect yet. */
+    fun upcoming(model: String, now: Long = System.currentTimeMillis()): ScheduledPrice? {
+        val m = model.lowercase().substringAfterLast('/')
+        return SCHEDULED.filter { m.startsWith(it.model) && it.effectiveMs > now }.minByOrNull { it.effectiveMs }
+    }
+
     /** Models where only implicit caching exists (explicit cachedContents is rejected). */
     fun supportsExplicitCache(model: String): Boolean {
         val m = model.lowercase()
@@ -47,8 +63,9 @@ object Pricing {
     /** True when the price comes from the published table (not a guess). */
     fun isKnown(model: String) = lookupTable(model) != null
 
-    private fun lookupTable(model: String): Price? {
+    private fun lookupTable(model: String, now: Long = System.currentTimeMillis()): Price? {
         val m = model.lowercase().removePrefix("models/").removePrefix("~")
+        SCHEDULED.filter { m.startsWith(it.model) && it.effectiveMs <= now }.maxByOrNull { it.effectiveMs }?.let { return it.price }
         TABLE[m]?.let { return it }
         // Versioned or preview ids, e.g. gemini-2.5-flash-preview-09-2025 → longest matching prefix.
         return TABLE.entries.filter { m.startsWith(it.key) }.maxByOrNull { it.key.length }?.value
@@ -59,8 +76,9 @@ object Pricing {
         val m = model.lowercase()
         return when {
             m.contains("decision") -> Price(0.10, 0.0, 0.10)
-            m.contains("deepseek") && (m.contains("reason") || m.contains("pro")) -> Price(0.55, 2.19, 0.14)
-            m.contains("deepseek") -> Price(0.28, 0.42, 0.028)
+            // DeepSeek V4 standard rates as reported in November 2026 (V4-Pro / V4-Flash); override in Settings if they differ.
+            m.contains("deepseek") && (m.contains("reason") || m.contains("pro")) -> Price(0.435, 0.87, 0.0036)
+            m.contains("deepseek") -> Price(0.14, 0.28, 0.014)
             m.contains("flash-lite") -> Price(0.30, 2.50, 0.03, 1.0)
             m.contains("flash") -> Price(0.75, 3.75, 0.075, 0.50)
             m.contains("pro") -> Price(2.00, 12.00, 0.20, 4.50)

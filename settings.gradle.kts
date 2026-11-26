@@ -18,3 +18,5 @@ dependencyResolutionManagement {
 }
 rootProject.name = "Coder"
 include(":app")
+// Startup measurement on an emulator (GitHub Actions: coder-perf.yml); only its "benchmark" variant is built.
+include(":macrobenchmark")

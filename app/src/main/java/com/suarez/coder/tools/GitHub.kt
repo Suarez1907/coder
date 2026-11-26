@@ -11,9 +11,85 @@ import java.net.URLEncoder
 class ToolException(message: String) : Exception(message)
 
 class GitHub(private val token: () -> String) {
-    private val api = "https://api.github.com"
+    private val api get() = API
 
-    data class FileChange(val path: String, val content: String?, val delete: Boolean)
+    /**
+     * Short-lived read cache shared by every GitHub instance (foreground and background agents): file contents, trees
+     * and default branches are read many times per task. Any write through this class clears the repo's entries, so
+     * our own commits are always seen; external pushes show up after the TTL at the latest.
+     */
+    object ReadCache {
+        private class Entry(val at: Long, val value: Any?, val size: Int)
+        private val map = LinkedHashMap<String, Entry>(64, 0.75f, true)
+        private var total = 0L
+        const val MAX_CHARS = 6_000_000L
+        const val MAX_ITEM_CHARS = 400_000
+        var hits = 0L; private set
+        var misses = 0L; private set
+
+        @Synchronized fun get(key: String, ttlMs: Long, now: Long = System.currentTimeMillis()): Pair<Boolean, Any?> {
+            val e = map[key] ?: return (false to null).also { misses++ }
+            if (now - e.at > ttlMs) { map.remove(key); total -= e.size; misses++; return false to null }
+            hits++
+            return true to e.value
+        }
+
+        @Synchronized fun put(key: String, value: Any?, size: Int, now: Long = System.currentTimeMillis()) {
+            if (size > MAX_ITEM_CHARS) return
+            map.remove(key)?.let { total -= it.size }
+            map[key] = Entry(now, value, size); total += size
+            val it = map.entries.iterator()
+            while ((total > MAX_CHARS || map.size > 300) && it.hasNext()) { val e = it.next(); total -= e.value.size; it.remove() }
+        }
+
+        /** Drops a repo's entries (blank = everything). */
+        @Synchronized fun invalidate(repo: String) {
+            val prefix = repo.lowercase() + "|"
+            val it = map.entries.iterator()
+            while (it.hasNext()) { val e = it.next(); if (repo.isBlank() || e.key.startsWith(prefix)) { total -= e.value.size; it.remove() } }
+        }
+
+        @Synchronized fun clear() { map.clear(); total = 0 }
+        fun key(repo: String, vararg parts: String?) = repo.lowercase() + "|" + parts.joinToString("|") { it ?: "" }
+
+        const val FILE_TTL = 90_000L
+        const val TREE_TTL = 60_000L
+        const val BRANCH_TTL = 600_000L
+    }
+
+    /**
+     * Conditional requests: GET responses are kept with their ETag; asking again with If-None-Match returns 304 when
+     * nothing changed, which GitHub does not count against the rate limit and which carries no body.
+     */
+    object ETags {
+        private class Entry(val etag: String, val body: String, val type: String?)
+        private val map = LinkedHashMap<String, Entry>(64, 0.75f, true)
+        private var total = 0L
+        const val MAX_CHARS = 8_000_000L
+        var revalidated = 0L; private set
+        var stored = 0L; private set
+
+        @Synchronized fun etag(key: String): String? = map[key]?.etag
+        @Synchronized fun hit(key: String): Http.Result? = map[key]?.let { revalidated++; Http.Result(200, it.body, it.type, etag = it.etag) }
+        @Synchronized fun put(key: String, etag: String, body: String, type: String?) {
+            if (body.length > ReadCache.MAX_ITEM_CHARS) return
+            map.remove(key)?.let { total -= it.body.length }
+            map[key] = Entry(etag, body, type); total += body.length; stored++
+            val it = map.entries.iterator()
+            while (total > MAX_CHARS && it.hasNext()) { val e = it.next(); total -= e.value.body.length; it.remove() }
+        }
+        @Synchronized fun clear() { map.clear(); total = 0 }
+    }
+
+    private suspend fun <T> cached(key: String, ttl: Long, size: (T) -> Int, load: suspend () -> T): T {
+        val (hit, v) = ReadCache.get(key, ttl)
+        @Suppress("UNCHECKED_CAST")
+        if (hit) return v as T
+        return load().also { ReadCache.put(key, it, size(it)) }
+    }
+
+    /** [base64]: content is base64-encoded binary (documents); it goes through a blob instead of inline text. */
+    data class FileChange(val path: String, val content: String?, val delete: Boolean, val base64: Boolean = false)
 
     /** Builds an authenticated request (for streaming downloads). */
     fun request(method: String, path: String, accept: String = "application/vnd.github+json"): Request {
@@ -27,6 +103,47 @@ class GitHub(private val token: () -> String) {
     }
 
     /** Commit sha of a branch/tag (default branch when [ref] is null). */
+    /** Head of a branch, or null when the branch does not exist (404). Other failures throw. */
+    suspend fun branchSha(repo: String, branch: String): String? {
+        val r = call("GET", "/repos/$repo/git/ref/heads/${enc(branch)}")
+        if (r.code == 404) return null
+        if (r.code !in 200..299) throw ToolException("Branch okunamadı ($branch): HTTP ${r.code}")
+        return JSONObject(r.body).getJSONObject("object").getString("sha")
+    }
+
+    /** Moves a branch back to [sha] (force), or deletes it when [sha] is null (it did not exist before). */
+    suspend fun resetBranch(repo: String, branch: String, sha: String?) {
+        checkWrite(repo, branch)
+        if (sha == null) {
+            val r = call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}")
+            if (r.code !in 200..299 && r.code != 422) throw ToolException("Branch silinemedi: HTTP ${r.code} ${r.body.take(200)}")
+            return
+        }
+        val r = call("PATCH", "/repos/$repo/git/refs/heads/${enc(branch)}", JSONObject().put("sha", sha).put("force", true))
+        if (r.code !in 200..299) throw ToolException("Geri alınamadı: HTTP ${r.code} ${r.body.take(300)}")
+    }
+
+    /** Paths changed between two commits/branches (compare API), at most a few hundred. */
+    suspend fun changedSince(repo: String, base: String, head: String): List<String> {
+        val o = json("GET", "/repos/$repo/compare/${enc(base)}...${enc(head)}")
+        val a = o.optJSONArray("files") ?: return emptyList()
+        return (0 until a.length()).map { a.getJSONObject(it).optString("filename") }.filter { it.isNotBlank() }
+    }
+
+    /** Files changed by the head commit of a branch with their patches (for @diff). */
+    suspend fun lastCommitDiff(repo: String, branch: String?, maxChars: Int = 15_000): String {
+        val ref = branch?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
+        val o = json("GET", "/repos/$repo/commits/${enc(ref)}")
+        val sb = StringBuilder("Son commit ${o.optString("sha").take(7)} ($ref): ${o.optJSONObject("commit")?.optString("message")?.lineSequence()?.firstOrNull() ?: ""}\n")
+        val files = o.optJSONArray("files") ?: JSONArray()
+        for (i in 0 until files.length()) {
+            val f = files.getJSONObject(i)
+            sb.append("\n### ").append(f.optString("filename")).append(" (").append(f.optString("status")).append(")\n").append(f.optString("patch"))
+            if (sb.length > maxChars) { sb.setLength(maxChars); sb.append("\n…(kesildi)"); break }
+        }
+        return sb.toString()
+    }
+
     suspend fun headSha(repo: String, ref: String?): String {
         val r = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val res = call("GET", "/repos/$repo/commits/${enc(r)}", accept = "application/vnd.github.sha")
@@ -43,14 +160,66 @@ class GitHub(private val token: () -> String) {
             method in setOf("POST", "PUT", "PATCH") -> "{}".toRequestBody(Http.JSON)
             else -> null
         }
-        val req = Request.Builder().url(url)
+        val b = Request.Builder().url(url)
             .header("Authorization", "Bearer $t")
             .header("Accept", accept)
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "Coder-Android")
             .method(method, reqBody)
-            .build()
-        return Http.execute(req)
+        val key = "$accept|$url"
+        if (method == "GET") ETags.etag(key)?.let { b.header("If-None-Match", it) }
+        val r = Http.execute(b.build())
+        if (method == "GET") {
+            if (r.code == 304) ETags.hit(key)?.let { return it }
+            if (r.code == 200 && !r.etag.isNullOrBlank()) ETags.put(key, r.etag, r.body, r.contentType)
+        }
+        return r
+    }
+
+    /**
+     * Many files in one GraphQL request (instead of one REST call each); results land in the read cache, so the
+     * following [readFileRaw] calls are free. Files GraphQL cannot give as text (binary, truncated) and any GraphQL
+     * failure fall back to REST.
+     */
+    suspend fun readFilesBatch(repo: String, ref: String?, paths: List<String>): Map<String, String?> {
+        val r = ref?.takeIf { it.isNotBlank() }
+        val want = paths.map { it.trim('/') }.filter { it.isNotBlank() }.distinct()
+            .filter { !ReadCache.get(ReadCache.key(repo, "file", r, it), ReadCache.FILE_TTL).first }
+        val out = LinkedHashMap<String, String?>()
+        val (owner, name) = repo.split('/').let { (it.getOrNull(0) ?: "") to (it.getOrNull(1) ?: "") }
+        if (want.size > 1 && owner.isNotBlank() && name.isNotBlank()) {
+            for (chunk in want.chunked(GRAPHQL_BATCH)) {
+                val res = runCatching { graphqlFiles(owner, name, r ?: "HEAD", chunk) }.getOrNull() ?: break
+                for ((p, text) in res) {
+                    out[p] = text
+                    ReadCache.put(ReadCache.key(repo, "file", r, p), text, text?.length ?: 8)
+                }
+            }
+        }
+        for (p in paths.map { it.trim('/') }.distinct()) if (p !in out) out[p] = readFileRaw(repo, p, r)
+        return out
+    }
+
+    /** path -> text (null: missing); paths that need REST (binary/truncated) are left out. */
+    private suspend fun graphqlFiles(owner: String, name: String, ref: String, paths: List<String>): Map<String, String?> {
+        fun q(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        val fields = paths.mapIndexed { i, p -> "f$i: object(expression: ${q("$ref:$p")}) { ... on Blob { text isBinary isTruncated } }" }
+        val query = "query { repository(owner: ${q(owner)}, name: ${q(name)}) { ${fields.joinToString(" ")} } }"
+        val r = call("POST", "/graphql", JSONObject().put("query", query))
+        if (r.code !in 200..299) throw ToolException("GraphQL ${r.code}")
+        val root = JSONObject(r.body)
+        if (root.has("errors") && root.optJSONObject("data")?.optJSONObject("repository") == null) throw ToolException("GraphQL hatası")
+        val repoObj = root.getJSONObject("data").getJSONObject("repository")
+        val out = LinkedHashMap<String, String?>()
+        paths.forEachIndexed { i, p ->
+            val o = repoObj.optJSONObject("f$i")
+            when {
+                o == null -> out[p] = null // no such file at that ref
+                o.optBoolean("isBinary") || o.optBoolean("isTruncated") || o.isNull("text") -> Unit // REST fallback
+                else -> out[p] = o.getString("text")
+            }
+        }
+        return out
     }
 
     private suspend fun json(method: String, path: String, body: Any? = null): JSONObject {
@@ -62,7 +231,9 @@ class GitHub(private val token: () -> String) {
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
     private fun encPath(p: String) = p.trim('/').split('/').joinToString("/") { enc(it) }
 
-    suspend fun defaultBranch(repo: String): String = json("GET", "/repos/$repo").getString("default_branch")
+    suspend fun defaultBranch(repo: String): String = cached(ReadCache.key(repo, "default"), ReadCache.BRANCH_TTL, { 64 }) {
+        json("GET", "/repos/$repo").getString("default_branch")
+    }
 
     suspend fun listRepos(): String {
         val r = call("GET", "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member")
@@ -80,6 +251,12 @@ class GitHub(private val token: () -> String) {
     /** Returns (branch, blobs) or null if the repository is empty. */
     suspend fun treeEntries(repo: String, ref: String?): Pair<String, List<TreeEntry>>? {
         val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
+        return cached(ReadCache.key(repo, "tree", branch), ReadCache.TREE_TTL, { r -> (r?.second?.sumOf { it.path.length + 48 } ?: 16).coerceAtMost(ReadCache.MAX_ITEM_CHARS) }) {
+            loadTree(repo, branch)
+        }
+    }
+
+    private suspend fun loadTree(repo: String, branch: String): Pair<String, List<TreeEntry>>? {
         val r = call("GET", "/repos/$repo/git/trees/${enc(branch)}?recursive=1")
         if (r.code == 409) return null
         if (r.code !in 200..299) throw ToolException("GitHub -> ${r.code}: ${r.body.take(500)}")
@@ -101,7 +278,12 @@ class GitHub(private val token: () -> String) {
         return head + lines.take(limit).joinToString("\n") + (if (lines.size > limit) "\n... (${lines.size - limit} dosya daha)" else "")
     }
 
-    suspend fun readFileRaw(repo: String, path: String, ref: String?): String? {
+    suspend fun readFileRaw(repo: String, path: String, ref: String?): String? =
+        cached(ReadCache.key(repo, "file", ref?.takeIf { it.isNotBlank() }, path.trim('/')), ReadCache.FILE_TTL, { it?.length ?: 8 }) {
+            loadFileRaw(repo, path, ref)
+        }
+
+    private suspend fun loadFileRaw(repo: String, path: String, ref: String?): String? {
         val q = ref?.takeIf { it.isNotBlank() }?.let { "?ref=${enc(it)}" } ?: ""
         val r = call("GET", "/repos/$repo/contents/${encPath(path)}$q", accept = "application/vnd.github.raw+json")
         if (r.code == 404) return null
@@ -111,6 +293,10 @@ class GitHub(private val token: () -> String) {
     }
 
     companion object {
+        /** API root; end-to-end tests point it at a fake GitHub. */
+        @Volatile var API = "https://api.github.com"
+        const val GRAPHQL_BATCH = 40
+
         /**
          * A contents request for a folder returns a JSON array of entries. Files may also start with '['
          * (TOML sections like `[versions]`, JSON arrays), so only a real array of {type, path} objects counts.
@@ -150,7 +336,19 @@ class GitHub(private val token: () -> String) {
     }
 
     /** Creates a single commit with all changes on [branch] (created from [baseBranch]/default if missing). */
+    /**
+     * Exam runs: every write must go to the one scratch branch; PRs, merges, deletions and workflow dispatches are refused.
+     * Returns why a write is refused, or null when allowed.
+     */
+    var writeGuard: ((repo: String, branch: String?) -> String?)? = null
+
+    private fun checkWrite(repo: String, branch: String?) {
+        writeGuard?.invoke(repo, branch)?.let { throw ToolException(it) }
+        ReadCache.invalidate(repo)
+    }
+
     suspend fun commitFiles(repo: String, branch: String, message: String, files: List<FileChange>, baseBranch: String?): String {
+        checkWrite(repo, branch)
         if (files.isEmpty()) throw ToolException("Değiştirilecek dosya yok.")
         var refRes = call("GET", "/repos/$repo/git/ref/heads/${enc(branch)}")
         if (refRes.code == 409) return commitToEmptyRepo(repo, branch, message, files)
@@ -169,7 +367,12 @@ class GitHub(private val token: () -> String) {
         val entries = JSONArray()
         for (f in files) {
             val e = JSONObject().put("path", f.path.trim('/')).put("mode", "100644").put("type", "blob")
-            if (f.delete) e.put("sha", JSONObject.NULL) else e.put("content", f.content ?: "")
+            when {
+                f.delete -> e.put("sha", JSONObject.NULL)
+                f.base64 -> e.put("sha", json("POST", "/repos/$repo/git/blobs",
+                    JSONObject().put("content", f.content ?: "").put("encoding", "base64")).getString("sha"))
+                else -> e.put("content", f.content ?: "")
+            }
             entries.put(e)
         }
         val newTree = json("POST", "/repos/$repo/git/trees", JSONObject().put("base_tree", baseTree).put("tree", entries)).getString("sha")
@@ -177,6 +380,7 @@ class GitHub(private val token: () -> String) {
             JSONObject().put("message", message).put("tree", newTree).put("parents", JSONArray().put(headSha)))
         val commitSha = commit.getString("sha")
         json("PATCH", "/repos/$repo/git/refs/heads/${enc(branch)}", JSONObject().put("sha", commitSha))
+        ReadCache.invalidate(repo)
         return "Commit oluşturuldu: ${commitSha.take(7)} on $branch (${files.size} dosya)\nhttps://github.com/$repo/commit/$commitSha"
     }
 
@@ -184,15 +388,23 @@ class GitHub(private val token: () -> String) {
     private suspend fun commitToEmptyRepo(repo: String, branch: String, message: String, files: List<FileChange>): String {
         val out = StringBuilder("Repo boştu; dosyalar tek tek eklendi:\n")
         for (f in files.filter { !it.delete }) {
-            val b64 = Base64.encodeToString((f.content ?: "").toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            val b64 = if (f.base64) f.content ?: "" else Base64.encodeToString((f.content ?: "").toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
             json("PUT", "/repos/$repo/contents/${encPath(f.path)}",
                 JSONObject().put("message", message).put("content", b64).put("branch", branch))
             out.append("+ ").append(f.path).append('\n')
         }
+        ReadCache.invalidate(repo)
         return out.toString()
     }
 
+    /** Creates [branch] pointing at an exact commit (exam runs start from the task's original base). */
+    suspend fun createBranchAt(repo: String, branch: String, sha: String) {
+        checkWrite(repo, branch)
+        json("POST", "/repos/$repo/git/refs", JSONObject().put("ref", "refs/heads/$branch").put("sha", sha))
+    }
+
     suspend fun createBranch(repo: String, branch: String, from: String?): String {
+        checkWrite(repo, branch)
         val base = from?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val sha = json("GET", "/repos/$repo/git/ref/heads/${enc(base)}").getJSONObject("object").getString("sha")
         json("POST", "/repos/$repo/git/refs", JSONObject().put("ref", "refs/heads/$branch").put("sha", sha))
@@ -200,6 +412,7 @@ class GitHub(private val token: () -> String) {
     }
 
     suspend fun createPullRequest(repo: String, title: String, head: String, base: String?, body: String?): String {
+        checkWrite(repo, null)
         val b = base?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val pr = json("POST", "/repos/$repo/pulls",
             JSONObject().put("title", title).put("head", head).put("base", b).put("body", body ?: ""))
@@ -207,14 +420,128 @@ class GitHub(private val token: () -> String) {
     }
 
     suspend fun mergePullRequest(repo: String, number: Int, method: String, title: String?): String {
+        checkWrite(repo, null)
         val body = JSONObject().put("merge_method", method)
         title?.let { body.put("commit_title", it) }
         val o = json("PUT", "/repos/$repo/pulls/$number/merge", body)
         return "PR #$number birleştirildi (${method}, ${o.optString("sha").take(7)}). https://github.com/$repo/pull/$number"
     }
 
+    /** The newest workflow_dispatch run of [workflowFile] on [branch] created at or after [sinceMs], or null. */
+    suspend fun dispatchedRun(repo: String, workflowFile: String, branch: String, sinceMs: Long): Run? {
+        val r = call("GET", "/repos/$repo/actions/workflows/${enc(workflowFile)}/runs?event=workflow_dispatch&branch=${enc(branch)}&per_page=5")
+        if (r.code !in 200..299) return null
+        val arr = JSONObject(r.body).optJSONArray("workflow_runs") ?: return null
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+            .filter { o -> runCatching { java.time.Instant.parse(o.optString("created_at")).toEpochMilli() }.getOrDefault(0L) >= sinceMs - 60_000 }
+            .maxByOrNull { it.optString("created_at") }
+            ?.let { o -> Run(o.getLong("id"), o.optString("name"), o.optString("status"),
+                o.optString("conclusion").takeIf { !o.isNull("conclusion") && it.isNotBlank() }, o.optString("html_url")) }
+    }
+
+    suspend fun run(repo: String, runId: Long): Run {
+        val o = json("GET", "/repos/$repo/actions/runs/$runId")
+        return Run(o.getLong("id"), o.optString("name"), o.optString("status"),
+            o.optString("conclusion").takeIf { !o.isNull("conclusion") && it.isNotBlank() }, o.optString("html_url"))
+    }
+
+    /** (artifact id, name) of a run. */
+    suspend fun artifacts(repo: String, runId: Long): List<Pair<Long, String>> {
+        val r = call("GET", "/repos/$repo/actions/runs/$runId/artifacts?per_page=20")
+        if (r.code !in 200..299) return emptyList()
+        val arr = JSONObject(r.body).optJSONArray("artifacts") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.map { it.getLong("id") to it.optString("name") }
+    }
+
+    data class StarredRepo(val fullName: String, val description: String, val topics: List<String>, val stars: Int)
+
+    /** Repositories the user starred (newest first), up to [maxPages] pages of 100. */
+    suspend fun starredRepos(maxPages: Int = 3): List<StarredRepo> {
+        val out = ArrayList<StarredRepo>()
+        for (page in 1..maxPages) {
+            val r = call("GET", "/user/starred?per_page=100&page=$page")
+            if (r.code !in 200..299) throw ToolException("Yıldızlı repolar alınamadı: HTTP ${r.code}")
+            val batch = Starred.parse(r.body)
+            out += batch
+            if (batch.size < 100) break
+        }
+        return out
+    }
+
+    object Starred {
+        fun parse(body: String): List<StarredRepo> = runCatching {
+            val arr = JSONArray(body)
+            (0 until arr.length()).map { arr.getJSONObject(it) }.map { o ->
+                StarredRepo(o.getString("full_name"), o.optString("description").takeIf { !o.isNull("description") }.orEmpty(),
+                    o.optJSONArray("topics")?.let { t -> (0 until t.length()).map { t.optString(it) } }.orEmpty(), o.optInt("stargazers_count"))
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    data class CommitInfo(val sha: String, val parents: List<String>, val files: List<Pair<String, String>>)
+
+    /** Parents and (filename, status) of a commit. */
+    suspend fun commitInfo(repo: String, sha: String): CommitInfo {
+        val o = json("GET", "/repos/$repo/commits/$sha")
+        val parents = o.optJSONArray("parents")?.let { a -> (0 until a.length()).map { a.getJSONObject(it).getString("sha") } }.orEmpty()
+        val files = o.optJSONArray("files")?.let { a -> (0 until a.length()).map { a.getJSONObject(it).let { f -> f.optString("filename") to f.optString("status") } } }.orEmpty()
+        return CommitInfo(o.optString("sha"), parents, files)
+    }
+
+    data class FoundRepo(val fullName: String, val stars: Int, val description: String, val pushedAt: String)
+
+    /** Public repository search (the scout); most-starred first. */
+    suspend fun searchRepos(query: String, perPage: Int = 10): List<FoundRepo> {
+        val r = call("GET", "/search/repositories?q=${enc(query)}&sort=stars&order=desc&per_page=$perPage")
+        if (r.code !in 200..299) throw ToolException("Arama başarısız: HTTP ${r.code}")
+        val arr = JSONObject(r.body).optJSONArray("items") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.map {
+            FoundRepo(it.getString("full_name"), it.optInt("stargazers_count"), it.optString("description").takeIf { d -> d != "null" }.orEmpty(), it.optString("pushed_at"))
+        }
+    }
+
+    data class PrInfo(val number: Int, val title: String, val head: String, val url: String)
+
+    suspend fun openPullRequests(repo: String): List<PrInfo> {
+        val r = call("GET", "/repos/$repo/pulls?state=open&per_page=50")
+        if (r.code !in 200..299) throw ToolException("PR listesi alınamadı: HTTP ${r.code}")
+        val arr = JSONArray(r.body)
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            PrInfo(o.getInt("number"), o.optString("title"), o.optJSONObject("head")?.optString("ref").orEmpty(), o.optString("html_url"))
+        }
+    }
+
+    /** Merges; returns (HTTP code, message or merge sha). 405/409 mean "not mergeable / conflict". */
+    suspend fun tryMerge(repo: String, number: Int, method: String): Pair<Int, String> {
+        checkWrite(repo, null)
+        val r = call("PUT", "/repos/$repo/pulls/$number/merge", JSONObject().put("merge_method", method))
+        val body = runCatching { JSONObject(r.body) }.getOrNull()
+        return r.code to (if (r.code in 200..299) body?.optString("sha").orEmpty() else body?.optString("message") ?: r.body.take(300))
+    }
+
+    suspend fun closePullRequest(repo: String, number: Int) {
+        checkWrite(repo, null)
+        json("PATCH", "/repos/$repo/pulls/$number", JSONObject().put("state", "closed"))
+    }
+
+    suspend fun deleteBranch(repo: String, branch: String): Boolean {
+        if (writeGuard != null) return false
+        ReadCache.invalidate(repo)
+        return call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}").code in 200..299
+    }
+
+    /** "path +add −del" lines of a pull request. */
+    suspend fun pullRequestFiles(repo: String, number: Int): List<String> {
+        val r = call("GET", "/repos/$repo/pulls/$number/files?per_page=50")
+        if (r.code !in 200..299) return emptyList()
+        val arr = JSONArray(r.body)
+        return (0 until arr.length()).map { i -> arr.getJSONObject(i).let { "${it.optString("filename")} +${it.optInt("additions")} −${it.optInt("deletions")}" } }
+    }
+
     /** Starts a workflow_dispatch run; [workflow] is the file name (e.g. android.yml) or id. */
     suspend fun dispatchWorkflow(repo: String, workflow: String, ref: String?, inputs: JSONObject?): String {
+        checkWrite(repo, null)
         val branch = ref?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
         val body = JSONObject().put("ref", branch)
         if (inputs != null && inputs.length() > 0) body.put("inputs", inputs)
@@ -237,6 +564,12 @@ class GitHub(private val token: () -> String) {
     }
 
     data class Job(val id: Long, val name: String, val conclusion: String?)
+
+    /** Re-runs only the failed jobs of a run (same commit): the flaky-failure check. */
+    suspend fun rerunFailedJobs(repo: String, runId: Long): Boolean {
+        checkWrite(repo, null)
+        return call("POST", "/repos/$repo/actions/runs/$runId/rerun-failed-jobs").code in 200..299
+    }
 
     suspend fun jobs(repo: String, runId: Long): List<Job> {
         val arr = json("GET", "/repos/$repo/actions/runs/$runId/jobs?per_page=50").optJSONArray("jobs") ?: return emptyList()
@@ -291,6 +624,7 @@ class GitHub(private val token: () -> String) {
     }
 
     suspend fun raw(method: String, path: String, body: String?): String {
+        if (method.uppercase() != "GET") checkWrite("", null)
         val parsedBody: Any? = body?.takeIf { it.isNotBlank() }?.let {
             runCatching { JSONObject(it) }.getOrElse { _ -> runCatching { JSONArray(it) }.getOrElse { _ -> throw ToolException("body geçerli JSON değil") } }
         }

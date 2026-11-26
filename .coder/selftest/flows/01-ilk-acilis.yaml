@@ -1,0 +1,12 @@
+# İlk açılışta ayarlar görünür, geri ile sohbet ekranına dönülür
+appId: com.suarez.coder
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Ayarlar"
+- tapOn: "Sağlayıcılar & API"
+- assertVisible: "Etkin modeller"
+- back
+- back
+- assertVisible: "Coder"
+- takeScreenshot: criterion_1

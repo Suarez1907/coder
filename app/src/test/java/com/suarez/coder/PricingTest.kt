@@ -18,7 +18,7 @@ class PricingTest {
         val o = Pricing.parseOverrides("gemini = 9, 9\ngemini-2.5-flash = 0.3, 2.5, 0.03, 1 # yorum")
         assertEquals(0.3, Pricing.priceFor("gemini-2.5-flash", o).input, 1e-9)
         assertEquals(9.0, Pricing.priceFor("gemini-2.5-pro", o).input, 1e-9)
-        assertEquals(0.28, Pricing.priceFor("deepseek-chat", emptyMap()).input, 1e-9)
+        assertEquals(0.14, Pricing.priceFor("deepseek-chat", emptyMap()).input, 1e-9) // DeepSeek V4-Flash standard rate
     }
 }
 

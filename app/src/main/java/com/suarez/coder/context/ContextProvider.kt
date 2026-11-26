@@ -18,8 +18,11 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
 
     fun invalidate() = memo.clear()
 
-    val repo: String get() = settings.contextRepo.ifBlank { settings.defaultRepo }
-    val ref: String? get() = settings.contextRef.ifBlank { null }
+    /** Exam runs: a different repo/branch and no pinned files, without touching the user's settings. */
+    var repoOverride: String? = null
+    var refOverride: String? = null
+    val repo: String get() = repoOverride ?: settings.contextRepo.ifBlank { settings.defaultRepo }
+    val ref: String? get() = refOverride ?: settings.contextRef.ifBlank { null }
     val hasManualFiles: Boolean get() = settings.contextFiles.isNotEmpty()
 
     /** Persistent project notes (.coder/NOTES.md), or null when the repo has none. */
@@ -31,7 +34,7 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
     }
 
     /** The user's pinned files. */
-    suspend fun load(): Loaded? = load(repo, ref, settings.contextFiles, "Kullanıcının seçtiği")
+    suspend fun load(): Loaded? = load(repo, ref, if (repoOverride != null) emptyList() else settings.contextFiles, "Kullanıcının seçtiği")
 
     /** Files picked automatically for one request. */
     suspend fun loadAuto(repo: String, ref: String?, files: List<String>): Loaded? =
