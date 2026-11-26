@@ -35,6 +35,16 @@ class WeeklyCycle(
         /** A cheaper pool model for a role, not tried yet: the default experiment when nothing else is queued. */
         fun cheaperModel(current: String, pool: List<String>, price: (String) -> Double, tried: Set<String>): String? =
             pool.filter { it != current && it !in tried && price(it) < price(current) * 0.8 }.minByOrNull { price(it) }
+
+        /**
+         * Roles whose model the user chose and no automatic run may replace. The architect is the top of the chain:
+         * a cheaper architect would silently weaken every plan, so its model changes only by hand.
+         */
+        val LOCKED_ROLES = setOf("architect")
+
+        /** True when a won experiment may be applied without asking (Auto-Ship). */
+        fun autoAdoptable(e: Experiment): Boolean =
+            e.kind != Experiment.Kind.MODEL || e.payload.optString("role") !in LOCKED_ROLES
     }
 
     private val agent = Agent(settings) // GitHub + pricing; not used for model calls
@@ -251,12 +261,15 @@ class WeeklyCycle(
             return "${exp.title}: ölçülemedi."
         }
         val won = Experiment.wins(b, c)
+        val locked = won && !autoAdoptable(exp)
         val state = when {
             !won -> Experiment.State.REJECTED
+            locked -> Experiment.State.PROPOSED
             settings.autonomyLevel >= 2 -> Experiment.State.ADOPTED
             else -> Experiment.State.PROPOSED
         }
-        val decided = exp.copy(state = state, decidedAt = System.currentTimeMillis(), baseline = b, candidate = c)
+        val decided = exp.copy(state = state, decidedAt = System.currentTimeMillis(), baseline = b, candidate = c,
+            note = if (locked) "Sınavı kazandı ama Mimar modeli kilitli: uygulamak için siz onaylayın." else exp.note)
         store.saveExperiment(decided)
         if (state == Experiment.State.ADOPTED) ExperimentApplier(settings, store, skills).apply(decided)
         store.addLog(EvoTier.EXAM, "${exp.title}: ${state.label} (mevcut $b, aday $c)")

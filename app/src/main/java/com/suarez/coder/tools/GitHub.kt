@@ -308,6 +308,37 @@ class GitHub(private val token: () -> String) {
             if (entries.isEmpty() || entries.any { it !is JSONObject || !it.has("type") || !it.has("path") }) return null
             return "(Bu bir klasör)\n" + entries.joinToString("\n") { e -> (e as JSONObject).let { "${it.getString("type")}: ${it.getString("path")}" } }
         }
+
+        /** Releases JSON -> short Turkish summary: tag, date, draft/pre-release flags, assets with download links. */
+        fun releaseSummary(body: String, limit: Int): String {
+            val arr = runCatching { JSONArray(body) }.getOrNull() ?: return "Sürüm listesi okunamadı."
+            if (arr.length() == 0) return "Bu repoda henüz sürüm (release) yok."
+            val sb = StringBuilder("Sürümler (en yeni önce):\n")
+            for (i in 0 until minOf(arr.length(), limit.coerceIn(1, 20))) {
+                val o = arr.optJSONObject(i) ?: continue
+                val tag = o.optString("tag_name")
+                sb.append("- ").append(tag.ifBlank { "(etiketsiz)" })
+                o.optString("name").takeIf { it.isNotBlank() && it != tag }?.let { sb.append(" — ").append(it) }
+                if (o.optBoolean("draft")) sb.append(" (taslak)")
+                if (o.optBoolean("prerelease")) sb.append(" (ön izleme)")
+                o.optString("published_at").take(10).takeIf { it.isNotBlank() }?.let { sb.append(' ').append(it) }
+                sb.append('\n')
+                val assets = o.optJSONArray("assets") ?: continue
+                for (j in 0 until assets.length()) {
+                    val a = assets.optJSONObject(j) ?: continue
+                    sb.append("  asset: ").append(a.optString("name"))
+                    sb.append(" (").append(sizeText(a.optLong("size"))).append(") ")
+                    sb.append(a.optString("browser_download_url").ifBlank { a.optString("url") }).append('\n')
+                }
+            }
+            return sb.toString().trimEnd()
+        }
+
+        private fun sizeText(bytes: Long): String = when {
+            bytes >= 1_048_576 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1_048_576.0)
+            bytes >= 1024 -> "${bytes / 1024} KB"
+            else -> "$bytes B"
+        }
     }
 
     /**
@@ -425,6 +456,13 @@ class GitHub(private val token: () -> String) {
         title?.let { body.put("commit_title", it) }
         val o = json("PUT", "/repos/$repo/pulls/$number/merge", body)
         return "PR #$number birleştirildi (${method}, ${o.optString("sha").take(7)}). https://github.com/$repo/pull/$number"
+    }
+
+    /** Recent releases with their assets, so the agent can point at a real download link instead of guessing. */
+    suspend fun releases(repo: String, limit: Int): String {
+        val r = call("GET", "/repos/$repo/releases?per_page=${limit.coerceIn(1, 20)}")
+        if (r.code !in 200..299) throw ToolException("GitHub -> ${r.code}: ${r.body.take(500)}")
+        return releaseSummary(r.body, limit)
     }
 
     /** The newest workflow_dispatch run of [workflowFile] on [branch] created at or after [sinceMs], or null. */
@@ -583,21 +621,18 @@ class GitHub(private val token: () -> String) {
      * A downloadable APK built for [sha]: a release asset of a release targeting that commit (or [branch]),
      * else the first artifact of the given runs. Returns a link the chat/installer understands, or null.
      */
-    suspend fun apkLinkFor(repo: String, sha: String, branch: String?, runIds: List<Long>): String? {
+    suspend fun apkLinkFor(repo: String, sha: String, branch: String?, runIds: List<Long>): String? =
+        shipFor(repo, sha, branch)?.apkUrl ?: artifactLink(repo, runIds)
+
+    /** The release published for [sha]/[branch] (Auto-Ship), with its tag and page for the chat. */
+    suspend fun shipFor(repo: String, sha: String, branch: String?): com.suarez.coder.ci.AutoShip.Ship? {
         val rel = call("GET", "/repos/$repo/releases?per_page=10")
-        if (rel.code in 200..299) {
-            val arr = JSONArray(rel.body)
-            for (i in 0 until arr.length()) {
-                val r = arr.getJSONObject(i)
-                val target = r.optString("target_commitish")
-                if (target != sha && (branch == null || target != branch)) continue
-                val assets = r.optJSONArray("assets") ?: continue
-                for (j in 0 until assets.length()) {
-                    val a = assets.getJSONObject(j)
-                    if (a.optString("name").endsWith(".apk")) return a.optString("browser_download_url").ifBlank { null }
-                }
-            }
-        }
+        if (rel.code !in 200..299) return null
+        return com.suarez.coder.ci.AutoShip.pick(rel.body, sha, branch)
+    }
+
+    /** First artifact of the given runs (the app downloads it with the token), or null. */
+    suspend fun artifactLink(repo: String, runIds: List<Long>): String? {
         for (id in runIds) {
             val res = call("GET", "/repos/$repo/actions/runs/$id/artifacts?per_page=10")
             if (res.code !in 200..299) continue

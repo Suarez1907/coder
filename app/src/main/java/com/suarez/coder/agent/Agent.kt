@@ -92,7 +92,15 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             guards.quickCheck(repo, branch, changes)
         }
         tools.beforeWrite = { repo, branch -> guards.checkpoint(repo, branch) }
-        tools.afterCommit = { repo, result, paths, newFiles -> runCatching { foresight.recordCommit(repo, result, paths, newFiles) } }
+        tools.afterCommit = { repo, result, paths, newFiles ->
+            runCatching { foresight.recordCommit(repo, result, paths, newFiles) }
+            // SkillsSync: a committed .coder/skills/* file makes the repo skill cache stale and tells the agent how to
+            // use the skill right now (the catalog itself is refreshed on the next request).
+            if (com.suarez.coder.skills.SkillSync.touches(paths)) {
+                runCatching { tools.skills?.invalidate(repo) }
+                com.suarez.coder.skills.SkillSync.notice(paths)?.let { n -> if (!isEvolutionSession) liveHistory?.add(ChatMessage.Notice(n)) }
+            }
+        }
     }
 
     // ---- Run-scoped helpers: self-review, checkpoints, @-mentions, similar tasks, custom modes ----
@@ -123,6 +131,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     var similarFor: ((repo: String, request: String) -> String?)? = null
     /** CI error → fix memory (shared file; null without app storage). */
     val fixMemory: FixMemory? = filesDir?.let { FixMemory(java.io.File(it, "fixes.json")) }
+    /** CI ders defteri: aynı hata tekrar gelince sınıf + çözüm ipucu (null depolama yoksa). */
+    val ciKnowledge: com.suarez.coder.ci.CiKnowledgeBase? = filesDir?.let { com.suarez.coder.ci.CiKnowledgeBase(java.io.File(it, "ci-lessons.json")) }
 
     /** The user's ordered stronger models (keys present); falls back to the single escalation model. */
     fun escalationChain(): List<ModelRef> {

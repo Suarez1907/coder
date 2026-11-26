@@ -239,4 +239,24 @@ class ManagerSettingsTest {
         assertEquals("- Run ci_wait after every push", SelfManager(s, store).policyText())
         s.modelPool = emptyList()
     }
+
+    @Test fun architectModelIsLockedAndUndoKeepsTheUsersChoice() {
+        val s = Settings(ApplicationProvider.getApplicationContext())
+        val store = EvolutionStore(tmp.newFolder())
+        val skills = SkillRepository(tmp.newFolder(), { null }, { _, _ -> null })
+        val applier = ExperimentApplier(s, store, skills)
+        s.editorModel = "gemini/a"; s.architectModel = "gemini/arch"
+        // A won architect experiment is never shipped automatically, and applying it by hand does nothing.
+        assertFalse(WeeklyCycle.autoAdoptable(Experiment.model("architect", "gemini/cheap", "t")))
+        assertTrue(WeeklyCycle.autoAdoptable(Experiment.model("editor", "gemini/cheap", "t")))
+        applier.apply(Experiment.model("architect", "gemini/cheap", "t"))
+        assertEquals("gemini/arch", s.architectModel)
+        assertNull(store.log().last().undo)
+        // Undo never overwrites a model the user picked after the adoption.
+        applier.apply(Experiment.model("editor", "gemini/b", "t"))
+        assertEquals("gemini/b", s.editorModel)
+        s.editorModel = "gemini/c"
+        assertFalse(applier.undo(store.log().last().undo!!))
+        assertEquals("gemini/c", s.editorModel)
+    }
 }

@@ -39,6 +39,15 @@ class ToolRegistry(private val settings: Settings) {
 
     var ciListener: CiListener? = null
 
+    /** Auto-Ship: yeşil build'in yayınlamadığı sürüme dair uyarı (CiController bir kez Notice ekler). */
+    private var shipMissing: String? = null
+
+    fun takeShipNotice(): com.suarez.coder.llm.ChatMessage.Notice? {
+        val text = shipMissing ?: return null
+        shipMissing = null
+        return com.suarez.coder.llm.ChatMessage.Notice(text)
+    }
+
     /** Whether a path is part of the frozen stable context (so its copy there is now outdated). */
     var isInSnapshot: (String) -> Boolean = { false }
 
@@ -101,6 +110,10 @@ class ToolRegistry(private val settings: Settings) {
         obj("repo" to str(repoDesc), "number" to int("PR numarası"),
             "method" to JSONObject().put("type", "string").put("enum", JSONArray(listOf("merge", "squash", "rebase"))).put("description", "Birleştirme yöntemi (varsayılan merge)"),
             "commit_title" to str("Birleştirme commit başlığı (isteğe bağlı)"), required = listOf("repo", "number")))
+    private val releases = ToolSpec("github_releases",
+        "Reponun son sürümlerini (release) ve içindeki dosyaları (APK vb. indirme bağlantılarıyla) listeler. " +
+            "Kullanıcıya 'en son sürüm nerede' türü bir yanıt vermeden önce çağır; sürüm adı/bağlantısı tahmin etme.",
+        obj("repo" to str(repoDesc), "limit" to int("Kaç sürüm (varsayılan 5, en çok 20)"), required = listOf("repo")))
     private val runWorkflow = ToolSpec("github_run_workflow",
         "Bir GitHub Actions workflow'unu elle başlatır (workflow_dispatch). Sonucu ci_wait ile izle.",
         obj("repo" to str(repoDesc), "workflow" to str("Workflow dosya adı (ör. android.yml) veya kimliği"),
@@ -189,7 +202,7 @@ class ToolRegistry(private val settings: Settings) {
             required = listOf("query")))
 
     val specs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
-        createBranch, createPr, mergePr, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool) + extraSpecs(true)
+        createBranch, createPr, mergePr, releases, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool) + extraSpecs(true)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
     val readOnlySpecs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors,
@@ -270,7 +283,7 @@ class ToolRegistry(private val settings: Settings) {
 
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
-            "github_read_files", "github_search_code", "ci_errors", "github_api", "submit_plan", "load_skill",
+            "github_read_files", "github_search_code", "ci_errors", "github_releases", "github_api", "submit_plan", "load_skill",
             "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol")
 
         /**
@@ -368,6 +381,7 @@ class ToolRegistry(private val settings: Settings) {
                 (s("method") ?: "merge").lowercase(), s("commit_title"))
             "github_run_workflow" -> github.dispatchWorkflow(repo(), req("workflow"), s("ref"),
                 s("inputs_json")?.let { runCatching { JSONObject(it) }.getOrElse { throw ToolException("inputs_json geçerli bir JSON nesnesi değil") } })
+            "github_releases" -> github.releases(repo(), i("limit") ?: 5)
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
@@ -623,8 +637,10 @@ class ToolRegistry(private val settings: Settings) {
                 return sb.toString()
             }
             if (success) {
-                apk = runCatching { github.apkLinkFor(repo, sha, branch, runs.map { it.id }) }.getOrNull()
+                val ship = runCatching { github.shipFor(repo, sha, branch) }.getOrNull()
+                apk = ship?.apkUrl ?: runCatching { github.artifactLink(repo, runs.map { it.id }) }.getOrNull()
                 apk?.let { sb.append("\nAPK: ").append(it).append('\n') }
+                shipMissing = com.suarez.coder.ci.AutoShip.warning(ship, repo, branch ?: sha, runs.lastOrNull()?.url)
                 summary = runs.joinToString { "${it.name}: ${it.conclusion}" }
             } else {
                 failed.forEach { r ->
