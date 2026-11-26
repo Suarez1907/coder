@@ -6,7 +6,7 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 - `agent/Agent.kt`: ana ajan döngüsü (`agentLoop`), araç çağrısı, yetki fazı kablolaması.
 - `ci/CiKnowledgeBase.kt`: CI ders defteri (belirti → sebep sınıfı → çözüm, hits); `Agent.ciKnowledge`, `CiController` yeşile dönünce kaydeder, hatada tekrar gelirse ipucu ekler.
 - `ci/AutoHealer.kt`: saf teşhis/karar (RERUN / USE_KNOWN_FIX / ESCALATE / ASK); `CiController` her kırmızı turda tek satır `Notice` + ipucu üretir (evrim oturumunda Notice yok).
-- `ci/AutoShip.kt`: yeşil build → sürüm eşleştirme; yalnızca kesin sha (veya aynı sürüm adı) eşleşir, taslak atlanır, eşleşme yoksa "yayınlanmadı" uyarısı — eski sürüm asla yeni build diye gösterilmez. `ChatViewModel` tek satır `Notice` + 45 sn'lik `durumMuhabere` ile yoklar.
+- `ci/AutoShip.kt`: yeşil build → sürüm eşleştirme; yalnızca kesin sha (veya aynı sürüm adı) eşleşir, taslak atlanır, eşleşme yoksa "yayınlanmadı" uyarısı — eski sürüm asla yeni build diye gösterilmez. `ToolRegistry.ciWait` uyarıyı `takeShipNotice()` ile saklar, `CiController` (evrim oturumu hariç) tek satır `ChatMessage.Notice` ekler.
 - `skills/SkillSync.kt`: commit edilen `.coder/skills/<ad>/...` yollarından yetenek adı çıkarır; `Agent.afterCommit` `SkillRepository.invalidate(repo)` + tek satır `Notice` ekler (katalog sonraki istekte tazelenir).
 - `agent/ReadOnlyMismatchRecovery.kt`: READ_ONLY faz kararı + yetki kurtarma (1 yükseltme → Uygulayıcı'ya devir).
 - `tools/ToolRegistry.kt`: `accessError` (readOnly/allowOps erişim kuralları); salt okunur `github_releases` (sürüm + asset bağlantıları, `GitHub.releaseSummary` saf biçimlendirici).
