@@ -127,6 +127,37 @@ object Pricing {
 
     fun formatTry(v: Double): String = String.format(Locale.US, "₺%.2f", v)
 
+    data class StreamCut(
+        val model: String,
+        val outputTokens: Long,
+        val savedOutputTokens: Long,
+        val usd: Double,
+        val savedUsd: Double,
+        val at: Long,
+    )
+
+    private val streamCuts = ArrayList<StreamCut>()
+
+    /** Tokens already generated when a stream is cut, plus the output the cut avoided. */
+    @Synchronized
+    fun recordStreamCut(model: String, outputTokens: Long, savedOutputTokens: Long, price: Price, at: Long = System.currentTimeMillis()): StreamCut {
+        val usd = outputTokens.coerceAtLeast(0) * price.output / 1_000_000.0
+        val savedUsd = savedOutputTokens.coerceAtLeast(0) * price.output / 1_000_000.0
+        val row = StreamCut(model, outputTokens.coerceAtLeast(0), savedOutputTokens.coerceAtLeast(0), usd, savedUsd, at)
+        streamCuts += row
+        return row
+    }
+
+    @Synchronized fun streamCuts(): List<StreamCut> = streamCuts.toList()
+
+    @Synchronized fun clearStreamCuts() { streamCuts.clear() }
+
+    /** Output still inside the cap after a cut. A loop would have spent it. */
+    fun savedOutputTokens(consumed: Long, maxOut: Int?): Long {
+        val cap = (maxOut ?: 8_192).toLong()
+        return (cap - consumed.coerceAtLeast(0)).coerceAtLeast(256)
+    }
+
     fun formatTokens(n: Long): String = when {
         n >= 1_000_000 -> String.format(Locale.US, "%.2fM", n / 1e6)
         n >= 1_000 -> String.format(Locale.US, "%.1fk", n / 1e3)

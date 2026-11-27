@@ -466,6 +466,18 @@ private fun GitHubPage(vm: ChatViewModel) {
         }
         SwitchSetting("Token önizlemesi", "Gönderim öncesi tahmini maliyet", s.tokenPreview,
             "Gemini'nin ücretsiz countTokens ucuyla hesaplanır.") { s.tokenPreview = it }
+        SwitchSetting("Canlı akış devre kesicisi", "Tekrar, düzyazı ve tam dosya yazımını keser", s.streamWatchdog,
+            "Yanıt raydan çıkarsa akış durur, tüketilen token kaydedilir ve en fazla bir kez yeniden denenir. Kilitli mimar modeli değişmez.") {
+            s.streamWatchdog = it
+        }
+        SwitchSetting("Arka plan Flex/Ekonomik katman arbitrajı", "Acil olmayan işlerde indirimli uç", s.flexArbitrage,
+            "Evolution, beceri sentezi ve repo sentinel arka plan işleri destekleyen sağlayıcıda Flex veya ekonomik yönlendirme kullanır. Destek yoksa standart uç noktaya düşer.") {
+            s.flexArbitrage = it
+        }
+        SwitchSetting("Turn-0 bağlam paketi", "İlk yazma turundan önce ilgili semboller", s.turn0Pack,
+            "Paket sabit sistem talimatına yazılmaz; yalnızca ilk görev mesajına eklenir.") { s.turn0Pack = it }
+        NumberSetting("Turn-0 karakter tavanı", s.turn0CharCap,
+            "Varsayılan 14000. Sıra: hedef semboller, çağrı noktaları, test, kurallar.") { s.turn0CharCap = it }
         TextSetting("Fiyat düzeltmeleri", s.priceOverrides, singleLine = false, mono = true, placeholder = "gemini-2.5-pro = 1.25, 10, 0.125, 4.5",
             info = "Satır başına: model = giriş, çıkış, önbellekli giriş, saatlik depolama (1M token başına USD). Boşsa yerleşik tablo kullanılır; tabloda olmayan modeller maliyet özetinde * ile işaretlenir.") { s.priceOverrides = it }
     }

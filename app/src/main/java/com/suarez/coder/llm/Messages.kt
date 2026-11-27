@@ -96,6 +96,10 @@ data class CallOptions(
     val cachedContent: String? = null,
     /** Sampling temperature (several candidates of the same edit differ); null = the model's default. */
     val temperature: Double? = null,
+    /** Live cut. Null keeps the existing non-streaming request. */
+    val watchdog: MidStreamWatchdog? = null,
+    /** OpenRouter: ask the router to prefer the cheaper provider. Ignored when false. */
+    val priceSort: Boolean = false,
 )
 
 data class LlmResponse(
@@ -157,6 +161,7 @@ object MessageJson {
                 is ChatMessage.User -> {
                     o.put("t", "user").put("text", m.text)
                     if (m.images.isNotEmpty()) o.put("imgs", JSONArray(m.images))
+                    if (m.isHarnessInternal) o.put("hi", true)
                 }
                 is ChatMessage.Notice -> {
                     o.put("t", "notice").put("text", m.text).put("err", m.isError)
@@ -198,7 +203,8 @@ object MessageJson {
     fun decode(o: JSONObject): ChatMessage {
             return when (o.getString("t")) {
                 "user" -> ChatMessage.User(o.getString("text"),
-                    o.optJSONArray("imgs")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList())
+                    o.optJSONArray("imgs")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
+                    o.optBoolean("hi"))
                 "notice" -> ChatMessage.Notice(o.getString("text"), if (o.has("detail")) o.getString("detail") else null, o.optBoolean("err"))
                 "summary" -> ChatMessage.Summary(o.getString("text"))
                 "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,

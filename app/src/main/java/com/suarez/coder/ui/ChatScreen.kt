@@ -340,10 +340,12 @@ private fun ChatTopBar(vm: ChatViewModel, onOpenSettings: () -> Unit, onMenu: ()
     val cost = vm.agent.sessionCost(vm.messages)
     val calls = vm.messages.filterIsInstance<ChatMessage.UsageRecord>().filter { it.role != "cache" && it.role != "decision" }
     val hit = vm.agent.cacheHitRate(calls)
+    val warm = vm.agent.cacheWarmLabel(hit?.let { (it * 100).toInt() })
     val subtitle = buildString {
         append(Pricing.formatUsd(cost))
         append(" · ").append(Pricing.formatTry(cost * s.usdTry))
-        if (hit != null) append(" · Önbellek %").append((hit * 100).toInt())
+        if (warm != null) append(" · ").append(warm)
+        else if (hit != null) append(" · Önbellek %").append((hit * 100).toInt())
     }
     Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
         Row(

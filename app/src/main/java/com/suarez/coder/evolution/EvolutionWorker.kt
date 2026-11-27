@@ -8,6 +8,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.suarez.coder.cost.PriorityTier
 import java.util.concurrent.TimeUnit
 
 /** Background evolution run: no UI, network only (Wi-Fi when asked), exits cleanly when disabled or over budget. */
@@ -18,6 +19,7 @@ class EvolutionWorker(context: Context, params: WorkerParameters) : CoroutineWor
     }
 
     companion object {
+        val priorityTier: PriorityTier = PriorityTier.BACKGROUND_FLEX
         private const val NAME = "coder-evolution"
 
         /** Queued after a recorded session; KEEP so a burst of sessions becomes one run. */

@@ -17,6 +17,9 @@ class ContractDagOrchestrator(
     maxConcurrency: Int = 2,
     private val implementerFor: (DagNode) -> String = { "implementer" },
 ) {
+    /** Set by the runner. Null means the cache has not been measured and steps keep their normal pace. */
+    var cacheTracker: com.suarez.coder.cost.CacheTtlTracker? = null
+    var cacheProvider: String = "gemini"
     val maxConcurrency: Int = maxConcurrency.coerceIn(1, 3)
 
     /** Refuses every attempt to point the run at another architect. */
@@ -73,6 +76,7 @@ class ContractDagOrchestrator(
         worker: suspend (DagNode, TaskContract) -> NodeResult,
     ): DagRun {
         val contract = lock(nodes)
+        val pace = com.suarez.coder.cost.FinOpsArbitrageEngine.pace(cacheTracker, cacheProvider)
         var sequential = contract.conflict
         var fellBack = contract.conflict
         val tx = StagedTransaction()
@@ -92,6 +96,10 @@ class ContractDagOrchestrator(
             }
             val wave = if (sequential) listOf(ready.first()) else selectWave(ready)
             waveLog += wave.map { it.id }
+            // A warm KV cache is not asked to wait. A cold cache prefers compaction over a pause.
+            if (!pace.minimizeWaits && pace.interStepDelayMs > 0) {
+                kotlinx.coroutines.delay(pace.interStepDelayMs)
+            }
             val results = coroutineScope {
                 wave.map { node ->
                     async {
@@ -151,6 +159,7 @@ class ContractDagOrchestrator(
             maxInFlight = maxFlight.get(),
             errors = errors,
             staged = tx,
+            preferCompact = pace.preferCompactAndTurn0,
         )
     }
 
@@ -225,4 +234,6 @@ data class DagRun(
     val maxInFlight: Int,
     val errors: List<String>,
     val staged: StagedTransaction,
+    /** Cache had expired: the caller should compact and pack Turn-0 before the next cold write. */
+    val preferCompact: Boolean = false,
 )

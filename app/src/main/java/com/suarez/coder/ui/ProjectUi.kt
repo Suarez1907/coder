@@ -25,8 +25,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.PauseCircle
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
@@ -238,7 +241,11 @@ private fun ProfileEditor(p: ProjectProfile, canDelete: Boolean, onSave: (Projec
 @Composable
 fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
     var data by remember { mutableStateOf<CostBreakdown?>(null) }
-    LaunchedEffect(Unit) { data = vm.costBreakdown() }
+    var finops by remember { mutableStateOf<com.suarez.coder.cost.FinOpsReport.Summary?>(null) }
+    LaunchedEffect(Unit) {
+        data = vm.costBreakdown()
+        finops = vm.finOpsSummary()
+    }
     val rate = vm.settings.usdTry
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         SystemBarsEffect()
@@ -258,6 +265,7 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
                         StatCard("Toplam", d.totalUsd, rate, Modifier.weight(1f))
                         StatCard("Bu ay", d.monthUsd, rate, Modifier.weight(1f))
                     }
+                    finops?.let { FinOpsCard(it) }
                     DashGroup("Önbellek isabeti") {
                         Text(d.cacheHitRate?.let { "%${(it * 100).toInt()}" } ?: "–", style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize, fontFeatureSettings = "tnum"),
                             color = d.cacheHitRate?.let { if (it >= 0.6) coder.cacheGood else if (it >= 0.3) coder.cacheMid else coder.muted } ?: coder.muted)
@@ -279,6 +287,34 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall, color = coder.muted)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FinOpsCard(s: com.suarez.coder.cost.FinOpsReport.Summary) {
+    DashGroup("FinOps Tasarrufları") {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.Analytics, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+            Text("Turn-0 Paketleyici", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text("${s.turn0Runs} görev · ${s.turn0SavedTurns} tur · ${Pricing.formatTokens(s.turn0SavedTokens)}",
+                style = Mono.small.copy(fontFeatureSettings = "tnum"), color = coder.muted)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.PauseCircle, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+            Text("Akış Devre Kesicisi", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text("${s.watchdogCuts} kesinti · ${Pricing.formatUsd(s.watchdogSavedUsd)}",
+                style = Mono.small.copy(fontFeatureSettings = "tnum"), color = coder.cost)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.DriveFileRenameOutline, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+            Text("Sıfır-Token Code-Mod", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text("${s.codeModFiles} dosya", style = Mono.small.copy(fontFeatureSettings = "tnum"), color = coder.muted)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.Layers, contentDescription = null, tint = coder.muted, modifier = Modifier.size(18.dp))
+            Text("Flex/Önbellek", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(Pricing.formatUsd(s.flexSavedUsd), style = Mono.small.copy(fontFeatureSettings = "tnum"), color = coder.cost)
         }
     }
 }
