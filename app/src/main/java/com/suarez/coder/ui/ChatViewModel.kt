@@ -820,11 +820,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private val blueprintStore by lazy {
-        com.suarez.coder.skills.BlueprintStore(File(getApplication<Application>().filesDir, "blueprints.json"))
+        com.suarez.coder.skills.BlueprintStore(File(getApplication<Application>().filesDir, "blueprints"))
     }
     var blueprints by mutableStateOf<List<com.suarez.coder.skills.Blueprint>>(emptyList())
         private set
-    var contractWarning by mutableStateOf<com.suarez.coder.context.CrossRepoContractTwin.ContractWarning?>(null)
+    var contractWarning by mutableStateOf<com.suarez.coder.context.CrossRepoContractTwin.ContractBreakage?>(null)
         private set
     var contractSyncBusy by mutableStateOf(false)
         private set
@@ -837,14 +837,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshBlueprints() {
         viewModelScope.launch(Dispatchers.IO) {
-            val list = runCatching { blueprintStore.all() }.getOrDefault(emptyList())
+            val list = runCatching { blueprintStore.list() }.getOrDefault(emptyList())
             withContext(Dispatchers.Main) { blueprints = list }
         }
     }
 
     fun approveBlueprint(id: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            blueprintStore.approve(id)
+            blueprintStore.approveDraft(id)
             refreshBlueprints()
         }
     }
@@ -857,17 +857,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun saveTurnAsBlueprint(name: String, files: List<String>, promptSummary: String) {
-        if (files.isEmpty()) return
+        if (files.isEmpty() && promptSummary.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             val repo = repoNow().ifBlank { "local" }
             val techTag = repo.substringAfterLast('/').ifBlank { "genel" }
-            val bp = com.suarez.coder.skills.BlueprintEngine.fromTurn(
+            val bp = com.suarez.coder.skills.Blueprint(
                 name = name.ifBlank { "blueprint-${System.currentTimeMillis() % 10000}" },
+                description = promptSummary.take(120),
                 techTag = techTag,
-                files = files.distinct(),
-                promptSummary = promptSummary,
+                slots = emptyList(),
+                fileTemplates = files.distinct().map { p ->
+                    com.suarez.coder.skills.BlueprintFileTemplate(
+                        pathTemplate = p,
+                        action = com.suarez.coder.skills.BlueprintTemplateAction.CREATE,
+                        contentTemplate = "",
+                    )
+                },
+                verificationHints = emptyList(),
+                usageCount = 0,
+                draft = true,
             )
-            blueprintStore.save(bp)
+            blueprintStore.saveUserBlueprint(bp)
             refreshBlueprints()
             withContext(Dispatchers.Main) {
                 messages += ChatMessage.Notice("Blueprint taslak olarak kaydedildi: ${bp.name}")
@@ -884,9 +894,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val warning = contractWarning ?: return
         if (contractSyncBusy || running) return
         contractSyncBusy = true
-        val targetRepos = warning.affectedRepos.joinToString(", ")
-        val prompt = "Çoklu-repo kontrat uyarısı algılandı (${warning.summary}). " +
-            "Etkilenen repolar ($targetRepos) için senkronize PR hazırla ve değişiklikleri doğrula."
+        val targetRepos = warning.targetRepo
+        val prompt = "Çoklu-repo kontrat uyarısı algılandı (${warning.formatNotice()}). " +
+            "Etkilenen repo ($targetRepos) için senkronize PR hazırla ve değişiklikleri doğrula."
         contractWarning = null
         contractSyncBusy = false
         doSend(prompt)

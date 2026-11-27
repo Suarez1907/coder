@@ -7,13 +7,6 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 ## Kurallar
 
 ## Derleme/test
-- `./gradlew testDebugUnitTest assembleDebug` (CI: coder-quick.yml = quick check, build.yml = APK + release).
-- Faz 5B doğrulaması: `./gradlew testDebugUnitTest assembleDebug`; `GoldenEvalSuiteTest` ile yeni Faz 5B testleri birlikte yeşil olmalı.
-- Kapı bağlantısı: `ShipGuard.hold(mutationOn=true)` mutant varsa merge durur; `ContractDagOrchestrator` cross-repo uyarısı `DagRun.errors` üretir ve commit'i engeller.
-- Swarm kancası yalnızca Implementer adımında tetiklenir (`implementers[id] != architectModelId`); Mimar düğümü doğrudan `worker`'a gider; turnuva hatası tek satır `Notice` + worker'a düşüş.
-- `ShipGuard.recordMutationRun` / `mutationSummaryLine` / `mutationDetail` tek satır sohbet/PR özeti + tam satır-mutant geri bildirimi verir; `MetaHarnessCompressor` yalnızca okuma yapar, PR/merge yan etkisi yoktur.
-- Yetki testleri: `app/src/test/java/com/suarez/coder/ToolAccessTest.kt`.
-- Tuzak: Kotlin blok yorumları iç içe geçer; bir KDoc satırında yıldız-slash kalıbı (örn. evo dalı yazımı) dosyanın kalanını yoruma çevirir ve yüzlerce sahte "unresolved reference" üretir. Böyle satırlar `//` ile yazılır.
 
 <!-- coder-scoped-rules -->
 ## Proje kuralları
@@ -33,4 +26,10 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 - [*] Turkish "devam et" requests route to QUESTION_ONLY but execute 60+ turns of implementation work — treat as COMPLEX_ARCHITECT
 - [*] Route normalization mismatch: orchestrator logs COMPLEX_ARCHITECT while SessionTraceRecorder logs UNKNOWN for same session
 - [*] Sessions stopped with processed=false, correction=false leave repo state unfinalized causing repeat context-loading errors
+- [*] Branch `feat/phase-5b-zero-de...` had widespread pre-existing compilation errors beyond the two reported unresolved references; fixing only the reported errors left the build broken
+- [*] Settings.kt data class and SettingsScreen.kt must stay in sync — new UI fields require corresponding Settings properties with defaults
+- [*] QuickCheck.kt gate catches type mismatches and missing params locally; run it before proposing any Kotlin diff
+- [*] ChatViewModel.kt references ContractWarning, approve, all — these types must exist in the codebase or be imported; verify type definitions before patching unresolved-reference errors.
+- [*] Branch feat/phase-5b-zero-de... carries pre-existing compile errors beyond the reported lines; run QuickCheck.kt on the full branch first to scope the real fix surface.
+- [*] COMPLEX_ARCHITECT sessions that emit only ["need_more_info"] steps and zero file edits mean the architect never executed; treat as incomplete until at least one code-modifying step appears.
 <!-- /coder-scoped-rules -->

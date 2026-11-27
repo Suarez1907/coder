@@ -237,7 +237,13 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                     m.images,
                                     { vm.rewindToTurn(turn) },
                                     { vm.forkFromTurn(turn) },
-                                    onSaveBlueprint = { vm.saveTurnAsBlueprint(turn) },
+                                    onSaveBlueprint = {
+                                        vm.saveTurnAsBlueprint(
+                                            name = m.text.lineSequence().firstOrNull()?.trim()?.take(48).orEmpty(),
+                                            files = emptyList(),
+                                            promptSummary = m.text.take(2000),
+                                        )
+                                    },
                                 )
                             }
                             is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
