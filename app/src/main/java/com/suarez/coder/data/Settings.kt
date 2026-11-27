@@ -712,6 +712,62 @@ class Settings(context: Context) {
         get() = prefs.getLong("decision_timeout_ms", 2_000L)
         set(v) = prefs.edit().putLong("decision_timeout_ms", v.coerceIn(500L, 30_000L)).apply()
 
+    /** Complex tasks wait for a spec card before code is written. Small tasks never wait. */
+    var specApproval: Boolean
+        get() = bool("spec_approval", false)
+        set(v) = putBool("spec_approval", v)
+
+    var visualQa: Boolean
+        get() = bool("visual_qa", true)
+        set(v) = putBool("visual_qa", v)
+
+    var adversarialCritic: Boolean
+        get() = bool("adversarial_critic", true)
+        set(v) = putBool("adversarial_critic", v)
+
+    /** "github" (default) or "sandbox". An unreachable sandbox falls back to GitHub Actions. */
+    var executionBackend: String
+        get() = str("execution_backend", "github").let { if (it == "sandbox") it else "github" }
+        set(v) = put("execution_backend", if (v == "sandbox") "sandbox" else "github")
+
+    var sandboxUrl: String
+        get() = str("sandbox_url")
+        set(v) = put("sandbox_url", v.trim())
+
+    var sandboxToken: String
+        get() = str("sandbox_token")
+        set(v) = put("sandbox_token", v.trim())
+
+    /** User-picked on-device model. Empty means the heuristic fallback. Never an APK asset. */
+    var tier0ModelPath: String
+        get() = str("tier0_model")
+        set(v) = put("tier0_model", v.trim())
+
+    var tier0Redact: Boolean
+        get() = bool("tier0_redact", true)
+        set(v) = putBool("tier0_redact", v)
+
+    var tier0Voice: Boolean
+        get() = bool("tier0_voice", true)
+        set(v) = putBool("tier0_voice", v)
+
+    var tier0Classify: Boolean
+        get() = bool("tier0_classify", true)
+        set(v) = putBool("tier0_classify", v)
+
+    var mcpServers: String
+        get() = str("mcp_servers", "[]")
+        set(v) = put("mcp_servers", v)
+
+    var mcpTools: String
+        get() = str("mcp_tools", "[]")
+        set(v) = put("mcp_tools", v)
+
+    /** Optional official llms.txt or docs URL used by fetch_live_docs. */
+    var docsLlmsUrl: String
+        get() = str("docs_llms_url")
+        set(v) = put("docs_llms_url", v.trim())
+
     // ---- Selected context files ----
 
     var contextRepo: String

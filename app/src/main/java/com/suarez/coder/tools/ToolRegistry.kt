@@ -39,6 +39,12 @@ class ToolRegistry(private val settings: Settings) {
 
     var ciListener: CiListener? = null
 
+    /** Stops an automatic merge after Visual QA or the adversarial critic records a blocking verdict. */
+    val shipGuard = com.suarez.coder.qa.ShipGuard()
+
+    /** Disk cache for fetch_live_docs. Null uses a temp directory. */
+    var docsCacheDir: java.io.File? = null
+
     /** Edit loop for one run. Counts A-B-A oscillations; the trace copies [OscillationBreaker.escalations]. */
     val oscillation = com.suarez.coder.harness.OscillationBreaker()
 
@@ -172,6 +178,11 @@ class ToolRegistry(private val settings: Settings) {
         obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
             "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
             "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
+    private val fetchLiveDocs = ToolSpec("fetch_live_docs",
+        "İstenen kütüphane konusunun kompakt güncel API özetini getirir (en fazla 6000 karakter). Önce 7 günlük disk önbelleği, " +
+            "sonra Context7 veya tanımlı llms.txt. Sürümü version olarak ver. Sonuç araç bağlamında kalır.",
+        obj("library" to str("Kütüphane adı"), "topic" to str("Konu"), "version" to str("Sürüm (isteğe bağlı)"),
+            required = listOf("library", "topic")))
     private val listSymbols = ToolSpec("github_list_symbols",
         "Bir dosyanın üst düzey sembollerini (class, interface, object, fun, def, func) satır ve zorunlu parametre sayısıyla listeler. " +
             "İmza değişikliğinden önce çağır. Yerel SHA indeksinden okur; model çağrısı yapmaz.",
@@ -228,7 +239,10 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
-        if (settings.docsLookup) add(lookupDocs)
+        if (settings.docsLookup) {
+            add(lookupDocs)
+            add(fetchLiveDocs)
+        }
         add(listSymbols)
         add(findImpact)
         add(findReferences)
@@ -236,6 +250,10 @@ class ToolRegistry(private val settings: Settings) {
         if (writer && cloudOps != null) { add(codemod); add(mutationTest) }
         if (settings.semanticSearch && semantic != null && settings.geminiKey.isNotBlank()) add(semanticSearch)
         if (writer && settings.todoList) add(updateTodos)
+        mcpRegistry().bound().filter { writer || !it.write }.forEach { b ->
+            add(ToolSpec(b.qualifiedName, "MCP ${b.server.name} / ${b.tool}. ${b.description.take(140)}",
+                obj("arguments_json" to str("JSON nesnesi"))))
+        }
     }
 
     private val docs = DocsLookup(web) { settings.context7Key }
@@ -308,7 +326,7 @@ class ToolRegistry(private val settings: Settings) {
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_releases", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact", "github_list_symbols")
+            "lookup_docs", "fetch_live_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact", "github_list_symbols")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -325,10 +343,13 @@ class ToolRegistry(private val settings: Settings) {
         }
     }
 
-    fun needsApproval(call: ToolCall): Boolean = when (call.name) {
-        "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool", "codemod", "mutation_test" -> true
-        "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
+    fun needsApproval(call: ToolCall): Boolean = when {
+        call.name.startsWith("mcp_") -> mcpRegistry().needsApproval(call.name)
+        call.name == "github_write_files" || call.name == "github_apply_diff" || call.name == "github_create_branch" ||
+            call.name == "github_create_pull_request" || call.name == "github_merge_pull_request" ||
+            call.name == "github_run_workflow" || call.name == "run_cloud_tool" || call.name == "codemod" ||
+            call.name == "mutation_test" -> true
+        call.name == "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
         else -> false
     }
 
@@ -356,8 +377,14 @@ class ToolRegistry(private val settings: Settings) {
             val r = s("repo") ?: repoOverride ?: settings.defaultRepo.takeIf { it.isNotBlank() } ?: throw ToolException("'repo' parametresi gerekli")
             return normalizeRepo(r)
         }
-        if (role in ARCHITECT_ROLES) architectDenied(call.name, s("method"))?.let { throw ToolException(it) }
-        accessError(call.name, s("method"), readOnly, allowOps)?.let { throw ToolException(it) }
+        if (call.name.startsWith("mcp_")) {
+            if (mcpRegistry().needsApproval(call.name) && (readOnly || role in ARCHITECT_ROLES)) {
+                throw ToolException("Mimar veya salt okunur mod yazma etkili MCP aracını çalıştıramaz: ${call.name}")
+            }
+        } else {
+            if (role in ARCHITECT_ROLES) architectDenied(call.name, s("method"))?.let { throw ToolException(it) }
+            accessError(call.name, s("method"), readOnly, allowOps)?.let { throw ToolException(it) }
+        }
 
         val result = when (call.name) {
             "web_search" -> web.search(req("query"))
@@ -401,6 +428,7 @@ class ToolRegistry(private val settings: Settings) {
                 }
                 val staged = files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) }
                 assertSignatures(staged)
+                assertSecurity(staged)
                 preCommit?.invoke(repo, branch, staged)
                 beforeWrite?.invoke(repo, branch)
                 val withNotes = attachNotes?.invoke(repo, branch, files) ?: files
@@ -410,8 +438,11 @@ class ToolRegistry(private val settings: Settings) {
             }
             "github_create_branch" -> github.createBranch(repo(), req("branch"), s("from"))
             "github_create_pull_request" -> github.createPullRequest(repo(), req("title"), req("head"), s("base"), s("body"))
-            "github_merge_pull_request" -> github.mergePullRequest(repo(), i("number") ?: throw ToolException("'number' gerekli"),
-                (s("method") ?: "merge").lowercase(), s("commit_title"))
+            "github_merge_pull_request" -> {
+                shipGuard.hold(settings.autoShip, settings.visualQa, settings.adversarialCritic)?.let { throw ToolException(it) }
+                github.mergePullRequest(repo(), i("number") ?: throw ToolException("'number' gerekli"),
+                    (s("method") ?: "merge").lowercase(), s("commit_title"))
+            }
             "github_run_workflow" -> github.dispatchWorkflow(repo(), req("workflow"), s("ref"),
                 s("inputs_json")?.let { runCatching { JSONObject(it) }.getOrElse { throw ToolException("inputs_json geçerli bir JSON nesnesi değil") } })
             "github_releases" -> github.releases(repo(), i("limit") ?: 5)
@@ -419,6 +450,7 @@ class ToolRegistry(private val settings: Settings) {
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
             "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
+            "fetch_live_docs" -> liveDocs().fetch(req("library"), req("topic"), s("version"), settings.context7Key, settings.docsLlmsUrl.ifBlank { null })
             "github_list_symbols" -> listSymbols(repo(), s("ref"), req("path"))
             "github_find_impact" -> findImpact(repo(), s("ref"), req("path"), s("symbolName") ?: s("symbol"))
             "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
@@ -428,19 +460,9 @@ class ToolRegistry(private val settings: Settings) {
                 i("start_line"), i("end_line"), Args.stringList(a, "tests"))
             "update_todos" -> com.suarez.coder.agent.Todos.ack(com.suarez.coder.agent.Todos.parse(a))
             "semantic_search" -> (semantic ?: throw ToolException("Anlamsal arama bu oturumda kullanılamıyor.")).search(repo(), s("ref"), req("query"))
-            "run_cloud_tool" -> {
-                val runner = cloud ?: throw ToolException("Bulut araçları bu oturumda kullanılamıyor.")
-                val r = repo()
-                ciListener?.started(r, "Bulut aracı: ${s("tool") ?: ""}")
-                var ok = false
-                try {
-                    runner.run(r, req("tool"), req("script_path"), s("output_dir"), s("branch"), s("blender_version"),
-                        listOf("app_dir", "composition", "requirements").mapNotNull { k -> s(k)?.let { k to it } }.toMap()).also { ok = !it.contains("BAŞARISIZ") }
-                } finally {
-                    ciListener?.finished(r, ok, if (ok) "Bulut aracı bitti" else "Bulut aracı başarısız", null)
-                }
-            }
-            else -> throw ToolException("Bilinmeyen araç: ${call.name}")
+            "run_cloud_tool" -> runCloud(repo(), req("tool"), req("script_path"), s("output_dir"), s("branch"), s("blender_version"),
+                listOf("app_dir", "composition", "requirements").mapNotNull { k -> s(k)?.let { k to it } }.toMap())
+            else -> if (call.name.startsWith("mcp_")) mcpCall(call.name, s("arguments_json")) else throw ToolException("Bilinmeyen araç: ${call.name}")
         }
         if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request") ||
             (call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET")
@@ -479,6 +501,60 @@ class ToolRegistry(private val settings: Settings) {
         changes.forEach { (path, before, after) -> tx.stage(path, before, after) }
         val gate = com.suarez.coder.harness.PreFlightValidator.signatureGate(dependencyGraph, tx)
         if (gate.blocked) throw ToolException(gate.repairPrompt())
+    }
+
+    /** $0 secret and manifest scan. A hit blocks the push before GitHub sees it. */
+    private fun assertSecurity(changes: List<Triple<String, String?, String?>>) {
+        val tx = com.suarez.coder.harness.StagedTransaction()
+        changes.forEach { (path, before, after) -> tx.stage(path, before, after) }
+        val gate = com.suarez.coder.harness.PreFlightValidator.securityGate(tx)
+        val hard = gate.hits.filter { it.kind != "secret" }
+        if (hard.isNotEmpty()) {
+            throw ToolException(com.suarez.coder.harness.SecurityScanner.Report(true, hard).repairPrompt())
+        }
+    }
+
+    fun mcpRegistry(): com.suarez.coder.mcp.McpRegistry = com.suarez.coder.mcp.McpRegistry(
+        com.suarez.coder.mcp.McpRegistry.serversFromJson(settings.mcpServers),
+        com.suarez.coder.mcp.McpRegistry.toolsFromJson(settings.mcpTools),
+    )
+
+    /** Alphabetical compact summary for the task, not the stable system prefix. */
+    fun mcpTaskContext(): String = mcpRegistry().compactSummary().let { if (it.isBlank()) "" else "MCP\n$it" }
+
+    private fun liveDocs() = com.suarez.coder.docs.LiveDocsProvider(
+        docsCacheDir ?: java.io.File(System.getProperty("java.io.tmpdir"), "coder-live-docs"),
+        com.suarez.coder.docs.LiveDocsProvider.httpFetcher(),
+    )
+
+    private suspend fun mcpCall(qualified: String, argumentsJson: String?): String {
+        val bound = mcpRegistry().find(qualified) ?: throw ToolException("MCP aracı yok: $qualified")
+        val args = runCatching { org.json.JSONObject(argumentsJson ?: "{}") }.getOrElse { throw ToolException("arguments_json geçerli bir JSON nesnesi değil") }
+        return com.suarez.coder.mcp.McpClient(com.suarez.coder.mcp.defaultMcpTransport()).callTool(bound.server, bound.tool, args)
+    }
+
+    private suspend fun runCloud(repo: String, tool: String, script: String, outputDir: String?, branch: String?, blender: String?, extra: Map<String, String>): String {
+        val sandboxNote = sandboxPrefix(tool, script, outputDir ?: "coder-out")
+        if (sandboxNote != null && !sandboxNote.startsWith(com.suarez.coder.execution.HotSandboxBackend.FAILOVER)) return sandboxNote
+        val runner = cloud ?: throw ToolException((sandboxNote?.let { it + "\n" } ?: "") + "Bulut araçları bu oturumda kullanılamıyor.")
+        ciListener?.started(repo, "Bulut aracı: $tool")
+        var ok = false
+        try {
+            return ((sandboxNote?.let { it + "\n" } ?: "") + runner.run(repo, tool, script, outputDir, branch, blender, extra)).also { ok = !it.contains("BAŞARISIZ") }
+        } finally {
+            ciListener?.finished(repo, ok, if (ok) "Bulut aracı bitti" else "Bulut aracı başarısız", null)
+        }
+    }
+
+    /** Null when the sandbox is not selected. A failover line is prefixed onto the GitHub Actions run. */
+    private suspend fun sandboxPrefix(tool: String, script: String, outputDir: String): String? {
+        if (settings.executionBackend != "sandbox" || settings.sandboxUrl.isBlank()) return null
+        val hot = com.suarez.coder.execution.HotSandboxBackend(
+            settings.sandboxUrl, settings.sandboxToken, com.suarez.coder.execution.defaultSandboxHttp(),
+            com.suarez.coder.execution.GitHubActionsBackend(),
+        )
+        val res = hot.runCloudTool(tool, script, outputDir)
+        return if (res.backendId == "sandbox" && res.notice == null) res.output else res.notice
     }
 
     /** Reads a file from the branch, falling back to the base branch and the default branch. */
@@ -529,6 +605,7 @@ class ToolRegistry(private val settings: Settings) {
         commitNotes.clear()
         val staged = changes.map { Triple(it.path, originals[it.path], it.content) }
         assertSignatures(staged)
+                assertSecurity(staged)
         preCommit?.invoke(repo, branch, staged)
         beforeWrite?.invoke(repo, branch)
         val withNotes = attachNotes?.invoke(repo, branch, changes) ?: changes

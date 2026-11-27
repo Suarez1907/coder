@@ -873,7 +873,10 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 requestContext.mentionContext(request.text)?.let { history.add(at++, it); ui.update() }
                 val repoNow = tools.activeRepo()
                 if (settings.similarTasks) similarFor?.let { f -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { f(repoNow, request.text) } }?.let {
-                    history.add(at, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
+                    history.add(at++, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
+                }
+                tools.mcpTaskContext().takeIf { it.isNotBlank() }?.let {
+                    history.add(at, ChatMessage.ContextBlock(it, "mcp"))
                 }
             }
             val mode = if (override == null && !isEvolutionSession) activeMode() else null

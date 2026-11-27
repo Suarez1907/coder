@@ -1,5 +1,7 @@
 package com.suarez.coder.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -26,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Layers
@@ -93,6 +96,8 @@ private enum class Page(
     TEMPLATES("Komut şablonları", Icons.Outlined.Terminal, "Sohbette / ile açılan hazır istemler"),
     EVOLUTION("Öz-Gelişim", Icons.Outlined.Memory, "Kümeler, koşullu hafıza, modeller ve self-PR"),
     SKILLS("Yetenekler (Skills)", Icons.Outlined.Star, "Sistem talimatına ad ve açıklama; tam metin load_skill ile"),
+    MCP("MCP & Dokümantasyon", Icons.Outlined.Hub, "Uzak sunucular, Context7, belge önbelleği"),
+    EXECUTION("Yürütme & Cihaz-İçi Zeka", Icons.Outlined.Memory, "Sandbox, Tier-0, görsel QA ve eleştirmen"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -129,6 +134,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.TEMPLATES -> TemplatesPage(vm)
                 Page.EVOLUTION -> EvolutionPage(vm)
                 Page.SKILLS -> SkillsPage(vm)
+                Page.MCP -> McpPage(vm)
+                Page.EXECUTION -> ExecutionPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -169,7 +176,7 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
         Modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surface)
             .border(1.dp, coder.border, shape),
     ) {
-        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.SKILLS, Page.EVOLUTION)
+        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.SKILLS, Page.EVOLUTION, Page.MCP, Page.EXECUTION)
         pages.forEachIndexed { i, p ->
             Row(
                 Modifier.fillMaxWidth().clickable { open(p) }.padding(horizontal = 16.dp, vertical = 14.dp),
@@ -340,6 +347,8 @@ private fun ArchitectPage(vm: ChatViewModel) {
             "Selamlama, açıklama ve özet yazılmaz; kod yalnızca SEARCH/REPLACE bloklarıyla değişir.") { s.terseMode = it }
         SwitchSetting("Proje notları", ".coder/NOTES.md", s.projectNotes,
             "Repodaki kalıcı proje notları sabit bağlama eklenir; ajan önemli değişikliklerde aynı commit'te günceller.") { s.projectNotes = it }
+        SwitchSetting("Karmaşık görevlerde kodlama öncesi Spec onayı", "3+ dosya veya kontratlı DAG", s.specApproval,
+            "Küçük işler bölünmez. Açıkken kilitli Mimar bir spec kartı üretir; onaydan sonra yürütme başlar. Mimar modeli değişmez.") { s.specApproval = it }
         SwitchSetting("Ekonomi modu (Flex)", "%50 ucuz, dakikalar sürebilir", s.economyMode,
             "Gemini istekleri Flex kademesinden gider: yarı fiyat, ama yanıtlar 1-15 dakika sürebilir ve kapasite dolabilir. Kapasite dolarsa standart fiyata geçmeden önce sorulur.") { s.economyMode = it; vm.refreshSettings() }
         TextSetting("Orta zorlukta Mimar modeli", s.architectModelMedium, mono = true, placeholder = "gemini/gemini-3.8-flash",
@@ -630,6 +639,88 @@ private fun TextSetting(
 private fun NumberSetting(label: String, initial: Int, info: String? = null, onSave: (Int) -> Unit) {
     TextSetting(label, initial.toString(), mono = true, keyboard = KeyboardType.Number, info = info) { v ->
         v.filter(Char::isDigit).toIntOrNull()?.let(onSave)
+    }
+}
+
+@Composable
+private fun McpPage(vm: ChatViewModel) {
+    val s = vm.settings
+    var version by remember { mutableIntStateOf(0) }
+    val servers = remember(version, s.mcpServers) { com.suarez.coder.mcp.McpRegistry.serversFromJson(s.mcpServers) }
+    Group {
+        Title("Context7", "Anahtar isteğe bağlıdır. Boşsa belge araması anahtarsız devam eder.")
+        TextSetting("Context7 API anahtarı", s.context7Key, secret = true) { s.context7Key = it }
+        TextSetting("llms.txt veya belge adresi", s.docsLlmsUrl, mono = true, placeholder = "https://...") { s.docsLlmsUrl = it }
+        OutlinedButton(onClick = { vm.clearDocsCache() }) { Text("Belge önbelleğini temizle") }
+    }
+    Group {
+        Title("MCP sunucuları", "Salt okunur sunucular doğrudan çalışır. Yazma etkili araçlar onay ister. Özet alfabetik sıradadır ve sabit önekin dışındadır.")
+        var name by remember { mutableStateOf("") }
+        var url by remember { mutableStateOf("") }
+        var auth by remember { mutableStateOf("") }
+        var readOnly by remember { mutableStateOf(true) }
+        OutlinedTextField(name, { name = it }, label = { Text("Ad") }, singleLine = true, textStyle = Mono.body, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(url, { url = it }, label = { Text("Uç nokta") }, singleLine = true, textStyle = Mono.body, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(auth, { auth = it }, label = { Text("Yetki başlığı") }, singleLine = true, textStyle = Mono.body, modifier = Modifier.fillMaxWidth())
+        SwitchSetting("Salt okunur", "Yazma araçları çalışmaz", readOnly) { readOnly = it }
+        OutlinedButton(onClick = {
+            if (name.isBlank() || url.isBlank()) return@OutlinedButton
+            val next = servers.filterNot { it.name.equals(name.trim(), true) } +
+                com.suarez.coder.mcp.McpServerConfig(name.trim(), url.trim(), auth.trim().ifBlank { null }, true, readOnly)
+            s.mcpServers = com.suarez.coder.mcp.McpRegistry.serversToJson(next)
+            name = ""; url = ""; auth = ""
+            version++
+            vm.refreshSettings()
+        }) { Text("Sunucu ekle") }
+        servers.forEach { server ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(server.name, style = Mono.small)
+                    Text(server.endpointUrl + if (server.readOnly) " · salt okunur" else " · onaylı yazma", style = Mono.tiny, color = coder.muted, maxLines = 1)
+                }
+                TextButton(onClick = {
+                    s.mcpServers = com.suarez.coder.mcp.McpRegistry.serversToJson(servers.filterNot { it.name == server.name })
+                    version++
+                }) { Text("Sil") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExecutionPage(vm: ChatViewModel) {
+    val s = vm.settings
+    val scope = rememberCoroutineScope()
+    var ping by remember { mutableStateOf("") }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) { s.tier0ModelPath = uri.toString(); vm.refreshSettings() }
+    }
+    Group {
+        Title("Yürütme motoru", "GitHub Actions varsayılandır. Sıcak sandbox kapalıysa uygulama aynı hatta kalır. Yayın APK yine Actions ile imzalanır.")
+        var engine by remember { mutableStateOf(s.executionBackend) }
+        Segmented(listOf("github" to "GitHub Actions", "sandbox" to "Sıcak VPS Sandbox"), engine) {
+            engine = it; s.executionBackend = it; vm.refreshSettings()
+        }
+        TextSetting("Sandbox adresi", s.sandboxUrl, mono = true, placeholder = "https://100.x.y.z:8787") { s.sandboxUrl = it }
+        TextSetting("Bearer token", s.sandboxToken, secret = true) { s.sandboxToken = it }
+        OutlinedButton(onClick = { scope.launch { ping = "Ölçülüyor…"; vm.testSandbox { ping = it } } }) { Text("Bağlantıyı Test Et") }
+        if (ping.isNotBlank()) Text(ping, style = Mono.tiny, color = coder.muted)
+        Text("Kurulum: runner/Dockerfile imajını çalıştırın, SANDBOX_TOKEN verin, 8787 portunu açın. Sağlık kontrolü 2 saniyedir.", style = Mono.tiny, color = coder.muted)
+    }
+    Group {
+        Title("Cihaz-içi Tier-0", "Ağırlıklar APK'ya gömülmez. Dosya yoksa veya köprü yoksa HeuristicFallback devrededir.")
+        Text(vm.tier0Status(), style = Mono.tiny, color = coder.muted)
+        Text(s.tier0ModelPath.ifBlank { "Model seçilmedi" }, style = Mono.tiny, color = coder.muted, maxLines = 2)
+        OutlinedButton(onClick = { pick.launch(arrayOf("*/*")) }) { Text("Model dosyası seç") }
+        TextButton(onClick = { s.tier0ModelPath = ""; vm.refreshSettings() }) { Text("Modeli kaldır") }
+        SwitchSetting("Gizlilik maskeleme", "Buluta gitmeden [REDACTED_N]", s.tier0Redact) { s.tier0Redact = it }
+        SwitchSetting("Sesli not düzeni", "Dağınık isteği maddeye çevirir", s.tier0Voice) { s.tier0Voice = it }
+        SwitchSetting("Çevrimdışı ön-sınıflandırma", "Basit işi kuyruğa alır", s.tier0Classify) { s.tier0Classify = it }
+    }
+    Group {
+        Title("Kapılar", "İkisi de kullanıcının tanımlı modellerini kullanır. Model yoksa deterministik yedek çalışır ve Mimar kilitli kalır.")
+        SwitchSetting("Görsel QA", "Önizleme artifact'larını denetler", s.visualQa) { s.visualQa = it }
+        SwitchSetting("Karşıt eleştirmen", "Merge öncesi farklı model ailesi", s.adversarialCritic) { s.adversarialCritic = it }
     }
 }
 
