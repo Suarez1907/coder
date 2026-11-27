@@ -55,5 +55,8 @@ class ShipGuard {
 
         fun allowAnotherVisualFix(roundsDone: Int) = roundsDone < VisualQaGate.MAX_FIX_ROUNDS
         fun allowAnotherCriticFix(roundsDone: Int) = roundsDone < AdversarialCritic.MAX_FIX_ROUNDS
+
+        /** Diff mutation gate: any surviving mutant report blocks the automatic merge. */
+        fun blocksMutation(report: String?): Boolean = !report.isNullOrBlank()
     }
 }

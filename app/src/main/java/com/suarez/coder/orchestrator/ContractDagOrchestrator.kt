@@ -111,7 +111,8 @@ class ContractDagOrchestrator(
                         try {
                             val swarmResult = speculativeSwarm?.invoke(node, contract)
                             if (swarmResult != null) {
-                                onNotice?.invoke("SpeculativeSwarm: ${node.id} (Mimar kilitli: ${contract.architectModelId})")
+                                val notice = "SpeculativeSwarm: ${node.id} (Mimar kilitli: ${contract.architectModelId})"
+                                onNotice?.invoke(notice.replace('\n', ' ').replace('\r', ' '))
                                 node.id to swarmResult
                             } else {
                                 node.id to worker(node, contract)
