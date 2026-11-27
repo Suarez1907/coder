@@ -1,0 +1,41 @@
+{
+  "component": "log_filter",
+  "cases": [
+    {
+      "id": "gradle_kotlin_unresolved",
+      "log": "Starting Gradle Daemon\n> Task :app:compileDebugKotlin\nDownloading https://example.invalid/foo.jar\nDownloading https://example.invalid/bar.jar\ne: app/src/main/java/Game.kt:12:8 Unresolved reference 'PlayerState'\nw: file:///tmp/Unused.kt:3:5 Parameter unused\nFAILURE: Build failed with an exception.\n* What went wrong:\nExecution failed for task ':app:compileDebugKotlin'.\nBUILD FAILED in 14s\n",
+      "mustContain": ["e: app/src/main/java/Game.kt:12:8 Unresolved reference 'PlayerState'"],
+      "mustNotContain": ["(Belirgin hata satırı bulunamadı"]
+    },
+    {
+      "id": "gradle_what_went_wrong",
+      "log": "> Task :app:testDebugUnitTest\nSomeTest > sample FAILED\nFAILURE: Build failed with an exception.\n* What went wrong:\nExecution failed for task ':app:testDebugUnitTest'.\n> There were failing tests.\n",
+      "mustContain": ["What went wrong", "There were failing tests"],
+      "mustNotContain": ["(Belirgin hata satırı bulunamadı"]
+    },
+    {
+      "id": "gdscript_parse",
+      "log": "Godot Engine v4.3.stable\nSCRIPT ERROR: Parse Error: Identifier \"hp\" not found.\n   at: GDScript::reload (res://scripts/player.gd:42)\nERROR: Failed to load script \"res://scripts/player.gd\".\n",
+      "mustContain": ["SCRIPT ERROR: Parse Error: Identifier \"hp\" not found.", "res://scripts/player.gd:42"],
+      "mustNotContain": ["(Belirgin hata satırı bulunamadı"]
+    },
+    {
+      "id": "godot_missing_function",
+      "log": "Godot Engine v4.3.stable\nERROR: Invalid call. Nonexistent function 'jump' in base 'Node'.\n   at: _ready (res://actors/enemy.gd:18)\n",
+      "mustContain": ["Nonexistent function 'jump'", "res://actors/enemy.gd:18"],
+      "mustNotContain": ["(Belirgin hata satırı bulunamadı"]
+    },
+    {
+      "id": "blender_python_traceback",
+      "log": "Blender 4.2.0\nTraceback (most recent call last):\n  File \"/blend/addon.py\", line 40, in execute\n    bpy.ops.object.add()\nAttributeError: 'BpyOps' object has no attribute 'add'\n",
+      "mustContain": ["File \"/blend/addon.py\", line 40, in execute", "AttributeError: 'BpyOps' object has no attribute 'add'"],
+      "mustNotContain": ["(Belirgin hata satırı bulunamadı"]
+    },
+    {
+      "id": "long_gradle_root_kept",
+      "log": "Configure project :app\nDownloading androidx.core\nDownloading androidx.compose\nDownloading kotlinx.coroutines\nDownloading junit\nDownloading robolectric\n> Task :app:preBuild\n> Task :app:compileDebugKotlin\ne: app/src/main/java/com/suarez/coder/ui/Hud.kt:88:5 Unresolved reference 'ScoreTable'\n> Task :app:compileDebugKotlin FAILED\n",
+      "mustContain": ["e: app/src/main/java/com/suarez/coder/ui/Hud.kt:88:5 Unresolved reference 'ScoreTable'"],
+      "mustNotContain": ["(Belirgin hata satırı bulunamadı"]
+    }
+  ]
+}

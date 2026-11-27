@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material3.AlertDialog
@@ -88,6 +91,8 @@ private enum class Page(
     CACHE("Önbellek & Bağlam", Icons.Outlined.Layers, "Context Caching, sıkıştırma, geçmiş"),
     GITHUB("GitHub & Bütçe", Icons.Outlined.AccountBalanceWallet, "Token, repo, onay, bütçe ve fiyatlar"),
     TEMPLATES("Komut şablonları", Icons.Outlined.Terminal, "Sohbette / ile açılan hazır istemler"),
+    EVOLUTION("Öz-Gelişim", Icons.Outlined.Memory, "Kümeler, koşullu hafıza, modeller ve self-PR"),
+    SKILLS("Yetenekler (Skills)", Icons.Outlined.Star, "Sistem talimatına ad ve açıklama; tam metin load_skill ile"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -111,7 +116,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         },
     ) { pad ->
         Column(
-            Modifier.padding(pad).fillMaxSize().imePadding().verticalScroll(rememberScrollState())
+            Modifier.padding(pad).consumeWindowInsets(pad).fillMaxSize().imePadding().verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -122,6 +127,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 Page.CACHE -> CachePage(vm)
                 Page.GITHUB -> GitHubPage(vm)
                 Page.TEMPLATES -> TemplatesPage(vm)
+                Page.EVOLUTION -> EvolutionPage(vm)
+                Page.SKILLS -> SkillsPage(vm)
             }
             Spacer(Modifier.size(24.dp))
         }
@@ -162,7 +169,7 @@ private fun HomePage(vm: ChatViewModel, open: (Page) -> Unit) {
         Modifier.fillMaxWidth().clip(shape).background(MaterialTheme.colorScheme.surface)
             .border(1.dp, coder.border, shape),
     ) {
-        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES)
+        val pages = listOf(Page.PROVIDERS, Page.ARCHITECT, Page.CACHE, Page.GITHUB, Page.TEMPLATES, Page.SKILLS, Page.EVOLUTION)
         pages.forEachIndexed { i, p ->
             Row(
                 Modifier.fillMaxWidth().clickable { open(p) }.padding(horizontal = 16.dp, vertical = 14.dp),

@@ -8,7 +8,7 @@ import java.util.Locale
  * Tier 2: routing parameters tuned from experience, kept as data (no rebuild needed). Every change is clamped by
  * [EvolutionGuard] and logged with the previous value so the user can undo it in one tap.
  */
-class AdaptiveRoutingStore(private val file: File, private val statsFile: File) {
+class AdaptiveRoutingStore(private val file: File, private val statsFile: File, private val ctg: CostToGreenScorer? = null) {
     @Synchronized fun current(): AdaptiveRouting = if (file.isFile) AdaptiveRouting.fromJson(file.readText()) else AdaptiveRouting()
 
     @Synchronized fun save(r: AdaptiveRouting) = file.writeText(r.toJson().toString())
@@ -76,6 +76,28 @@ class AdaptiveRoutingStore(private val file: File, private val statsFile: File) 
         }
         statsFile.writeText(o.toString())
     }
+
+    /** Implementer-only choice. Returns null when experiments are off and nothing is pinned. Never returns the architect. */
+    fun selectImplementer(
+        domain: TaskDomain,
+        candidates: List<String>,
+        architectModelId: String,
+        baselineModelId: String,
+        experiments: Boolean,
+        pinned: String?,
+        roll: Double = Math.random(),
+        now: Long = System.currentTimeMillis(),
+    ): String? = ctg?.let {
+        ImplementerExperimentEngine(it).select(domain, candidates, architectModelId, baselineModelId, experiments, pinned, roll = roll, now = now)
+    }
+
+    fun observeImplementer(modelId: String, domain: TaskDomain, sample: CostToGreenScorer.Sample, baselineModelId: String, now: Long) {
+        ctg?.record(modelId, domain, sample, baselineModelId, now)
+    }
+
+    fun costScores(domain: TaskDomain? = null) = ctg?.scores(domain).orEmpty()
+
+    fun resetCostScores() { ctg?.reset() }
 
     fun summary(): String = stats().entries.sortedByDescending { it.value.runs }.take(12).joinToString("\n") { (k, s) ->
         "$k: ${s.runs} çalışma, başarı %${(s.successRate * 100).toInt()}, ort. $" + String.format(Locale.US, "%.4f", s.avgCost) +

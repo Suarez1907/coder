@@ -41,6 +41,14 @@ data class SessionTrace(
     val prop: String? = null,
     /** The run's tool steps, abstracted ("read:build.gradle.kts", "diff:*.kt", "ci"), for procedure mining. */
     val steps: List<String> = emptyList(),
+    /** Phase-1 counters. Zero when the run did not record that signal. */
+    val preflightBlocksCount: Int = 0,
+    val searchReplaceTier2Count: Int = 0,
+    val searchReplaceTier3Count: Int = 0,
+    val oscillationEscalationsCount: Int = 0,
+    val prePushGateWarningsCount: Int = 0,
+    /** Anonymized JSON windows (~40 lines around a real failure). Empty means no self-PR. */
+    val failureWindows: List<String> = emptyList(),
 ) {
     /** Problems that are worth learning from (a clean, cheap run teaches nothing). */
     val troubleScore get() = diffErrorCount + ciFailureCount * 2 + escalations.size + (if (stopped) 1 else 0) + (if (userCorrection) 2 else 0)
@@ -54,6 +62,9 @@ data class SessionTrace(
         .put("rating", rating).put("arm", arm ?: JSONObject.NULL).put("base", baseSha ?: JSONObject.NULL)
         .put("branch", branch ?: JSONObject.NULL).put("route", route ?: JSONObject.NULL)
         .put("ctx", ctx?.let { JSONArray(it) } ?: JSONObject.NULL).put("prop", prop ?: JSONObject.NULL).put("steps", JSONArray(steps))
+        .put("preflight", preflightBlocksCount).put("sr2", searchReplaceTier2Count).put("sr3", searchReplaceTier3Count)
+        .put("osc", oscillationEscalationsCount).put("prepush", prePushGateWarningsCount)
+        .put("windows", JSONArray(failureWindows))
 
     companion object {
         private fun list(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -66,6 +77,8 @@ data class SessionTrace(
             o.optInt("rating"), o.optNullableString("arm"), o.optNullableString("base"), o.optNullableString("branch"), o.optNullableString("route"),
             o.optJSONArray("ctx")?.let { a -> (0 until a.length()).map { a.getDouble(it) } },
             o.optNullableString("prop"), list(o.optJSONArray("steps")),
+            o.optInt("preflight"), o.optInt("sr2"), o.optInt("sr3"), o.optInt("osc"), o.optInt("prepush"),
+            list(o.optJSONArray("windows")),
         )
     }
 }
@@ -162,15 +175,23 @@ data class PendingSelfPr(
     val createdAt: Long,
     val state: PrState = PrState.PENDING,
     val apkUrl: String? = null,
+    val evalPassed: Int = 0,
+    val evalTotal: Int = 0,
+    val evalAdded: Int = 0,
+    val evalRegressions: Int = 0,
+    val clusterKey: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject().put("n", number).put("title", title).put("url", url).put("branch", branch).put("cause", rootCause)
         .put("files", JSONArray(files)).put("ci", ciPassed).put("cost", costUsd).put("topic", topic).put("at", createdAt)
         .put("state", state.name).put("apk", apkUrl ?: JSONObject.NULL)
+        .put("evalP", evalPassed).put("evalT", evalTotal).put("evalA", evalAdded).put("evalR", evalRegressions)
+        .put("cluster", clusterKey)
 
     companion object {
         fun fromJson(o: JSONObject) = PendingSelfPr(o.getInt("n"), o.optString("title"), o.optString("url"), o.optString("branch"),
             o.optString("cause"), o.optJSONArray("files")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
             o.optBoolean("ci"), o.optDouble("cost", 0.0), o.optString("topic"), o.optLong("at"),
-            runCatching { PrState.valueOf(o.optString("state")) }.getOrDefault(PrState.PENDING), if (o.isNull("apk")) null else o.optString("apk"))
+            runCatching { PrState.valueOf(o.optString("state")) }.getOrDefault(PrState.PENDING), if (o.isNull("apk")) null else o.optString("apk"),
+            o.optInt("evalP"), o.optInt("evalT"), o.optInt("evalA"), o.optInt("evalR"), o.optString("cluster"))
     }
 }

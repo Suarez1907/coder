@@ -85,6 +85,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Self-evolution screen state. */
     var evoPending by mutableStateOf<PendingSelfPr?>(null)
+    var evoClusters by mutableStateOf<List<com.suarez.coder.evolution.ErrorCluster>>(emptyList())
+    var evoRules by mutableStateOf<List<com.suarez.coder.evolution.ScopedRule>>(emptyList())
+    var evoCtg by mutableStateOf<List<com.suarez.coder.evolution.CostToGreenScorer.Score>>(emptyList())
         private set
     var evoLog by mutableStateOf<List<EvolutionLogEntry>>(emptyList())
         private set
@@ -191,7 +194,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Connects an agent to the app: memory, learned choices, plans, CI notifications, similar tasks. */
     private fun wire(a: Agent): Agent {
         a.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
-        a.modelPicker = { route, ctx -> manager.pick(route, ctx) }
+        a.context.ruleStore = evoStore.scopedRules
+        a.context.rulesEnabled = { settings.evoEnabled && settings.evoMemory }
+        a.ciLessons = com.suarez.coder.evolution.CiLessonLearner(evoStore.scopedRules)
+        a.tools.attachNotes = { repo, branch, files ->
+            if (!settings.syncProjectNotes || a.isEvolutionSession) files
+            else com.suarez.coder.evolution.NotesSync.attachFromGitHub(a.tools.github, a.context.ruleStore, repo, branch, files, enabled = true)
+        }
+        a.modelPicker = { route, ctx, paths, intent -> manager.pick(route, ctx, paths, intent) }
         a.promptOverrides = { if (settings.evoEnabled) evoStore.promptOverrides() else emptyMap() }
         a.policyText = { manager.policyText() }
         a.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
@@ -955,7 +965,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val run = work.drop(runStart)
         val request = (work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
         val trace = SessionTraceRecorder.record(run, request, sid, a.tools.normalizeRepo(repoNow()),
-            a.isEvolutionSession, a::costOf)?.copy(arm = a.lastArm, route = a.lastRoute, ctx = a.lastCtx?.toList(), prop = a.lastProp,
+            a.isEvolutionSession, a::costOf, oscillationEscalations = a.tools.oscillation.escalations)?.copy(arm = a.lastArm, route = a.lastRoute, ctx = a.lastCtx?.toList(), prop = a.lastProp,
             baseSha = base?.first, branch = base?.second?.ifBlank { null }) ?: return
         if (sid == currentSessionId) canRate = true
         viewModelScope.launch(Dispatchers.IO) {
@@ -970,7 +980,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val p = evoStore.pending()
             val log = evoStore.log().asReversed()
-            withContext(Dispatchers.Main) { evoPending = p; evoLog = log }
+            val clusters = evoStore.clusters.all().sortedByDescending { it.occurrenceCount }
+            val repo = settings.contextRepo.ifBlank { settings.defaultRepo }
+            val rules = evoStore.scopedRules.all().filter { repo.isBlank() || it.repo.equals(repo, true) }
+            val scores = evoStore.ctg.scores(null)
+            withContext(Dispatchers.Main) {
+                evoPending = p
+                evoLog = log
+                evoClusters = clusters
+                evoRules = rules
+                evoCtg = scores
+            }
         }
     }
 
@@ -1041,6 +1061,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     runCatching { gh.deleteBranch(EvolutionGuard.SELF_REPO, p.branch) }
                     evoStore.savePending(p.copy(state = PrState.MERGED))
+                    if (p.clusterKey.isNotBlank()) evoStore.clusters.mark(p.clusterKey, com.suarez.coder.evolution.ClusterStatus.RESOLVED)
                     evoStore.bump("merged")
                     // A merged topic is done: never propose the same fix again.
                     evoStore.reject(p.topic)
@@ -1078,6 +1099,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     runCatching { gh.closePullRequest(EvolutionGuard.SELF_REPO, p.number) }
                     runCatching { gh.deleteBranch(EvolutionGuard.SELF_REPO, p.branch) }
                     evoStore.reject(p.topic)
+                    if (p.clusterKey.isNotBlank()) evoStore.clusters.mark(p.clusterKey, com.suarez.coder.evolution.ClusterStatus.DISMISSED)
                     evoStore.savePending(null)
                     evoStore.addLog(EvoTier.SELF_PR, "PR #${p.number} reddedildi; \"${p.topic}\" konusu tekrar açılmayacak.")
                 }
@@ -1087,6 +1109,38 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 refreshEvolution()
             }
         }
+    }
+
+    fun evoDismissCluster(key: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            evoStore.clusters.dismiss(key)
+            refreshEvolution()
+        }
+    }
+
+    fun evoArchiveRule(id: String) {
+        viewModelScope.launch(Dispatchers.IO) { evoStore.scopedRules.archive(id); refreshEvolution() }
+    }
+
+    fun evoRestoreRule(id: String) {
+        viewModelScope.launch(Dispatchers.IO) { evoStore.scopedRules.restore(id); refreshEvolution() }
+    }
+
+    fun evoAddRule(globs: String, text: String) {
+        val repo = settings.contextRepo.ifBlank { settings.defaultRepo }.ifBlank { "local" }
+        viewModelScope.launch(Dispatchers.IO) {
+            evoStore.scopedRules.add(repo, globs.split(',', '\n').map { it.trim() }.filter { it.isNotBlank() }, text, com.suarez.coder.evolution.RuleSource.MANUAL)
+            refreshEvolution()
+        }
+    }
+
+    fun evoResetCtg() {
+        viewModelScope.launch(Dispatchers.IO) { evoStore.ctg.reset(); refreshEvolution() }
+    }
+
+    fun evoPinImplementer(modelId: String) {
+        settings.pinnedImplementer = if (settings.pinnedImplementer == modelId) "" else modelId
+        refreshSettings()
     }
 
     /** Hides a merged PR card once its APK was offered. */

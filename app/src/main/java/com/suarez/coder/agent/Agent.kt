@@ -452,7 +452,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     /** Picks models for a route ("role" -> model); null/empty = keep the user's models. */
     /** Set by the app: prompt sections adopted by self-improvement (PromptSections ids). */
     var promptOverrides: (() -> Map<String, String>)? = null
-    var modelPicker: ((route: String, ctx: DoubleArray?) -> com.suarez.coder.evolution.SelfManager.Pick?)? = null
+    var modelPicker: ((route: String, ctx: DoubleArray?, paths: List<String>, intent: String) -> com.suarez.coder.evolution.SelfManager.Pick?)? = null
     /** Context and propensities of the last learned model choice (recorded in the run's trace). */
     var lastCtx: DoubleArray? = null
     var lastProp: String? = null
@@ -475,6 +475,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
 
     /** Runs of the evolution engine: never recorded as traces, so they can never start another evolution. */
     var isEvolutionSession = false
+    /** Red-then-green CI lessons for the active repo. Null outside the app shell. */
+    var ciLessons: com.suarez.coder.evolution.CiLessonLearner? = null
     /** Evolution runs use one isolated model for every role, independent of the chat models. */
     var modelOverride: ModelRef? = null
     /** Called with the cost of every model call (evolution budget accounting). */
@@ -832,6 +834,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         flexDisabledForRun = false
         lastArm = null
         lastRoute = null
+        tools.oscillation.reset()
         // Repo skills (.coder/skills/*/SKILL.md), cached for minutes so the catalog line stays stable.
         tools.skills?.let { s -> runCatching { kotlinx.coroutines.withTimeout(8_000) { s.refreshRepo(tools.activeRepo()) } } }
         architectOverride = null
@@ -942,11 +945,27 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 } else ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))
                 history.add(requestIndex + 1, block)
             }
+            // Scoped rules follow the files of this turn. They stay out of the cached system prefix.
+            if (!isEvolutionSession && requestIndex >= 0) {
+                val mentioned = Regex("[\\w./-]+\\.[A-Za-z0-9]{1,8}").findAll(request?.text.orEmpty()).map { it.value }.toList()
+                val rulePaths = (autoPaths + settings.contextFiles + mentioned).map { it.trim().removePrefix("./") }.filter { it.isNotBlank() }.distinct()
+                val repoForRules = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) }
+                if (!repoForRules.isNullOrBlank() && rulePaths.isNotEmpty()) {
+                    context.matchingRulesBlock(repoForRules, rulePaths)?.let { rules ->
+                        val at = (requestIndex + 1 until history.size).lastOrNull { history[it] is ChatMessage.ContextBlock }
+                        if (at != null) {
+                            val b = history[at] as ChatMessage.ContextBlock
+                            history[at] = b.copy(text = b.text.trimEnd() + "\n\n" + rules)
+                        } else history.add(requestIndex + 1, ChatMessage.ContextBlock(rules, "proje kuralları"))
+                    }
+                }
+            }
             // Learned model choice for this run (the user's pool; otherwise their fixed models).
             lastRoute = (route ?: if (settings.architectMode) Route.COMPLEX_ARCHITECT else Route.SIMPLE_EDIT).name
             lastCtx = null; lastProp = null
             val ctx = if (modelPicker != null && settings.contextualRouting) routeContext(maxOf(autoPaths.size, settings.contextFiles.size)) else null
-            modelPicker?.invoke(lastRoute!!, ctx)?.takeIf { it.models.isNotEmpty() }?.let { pick ->
+            val intent = request?.text.orEmpty()
+            modelPicker?.invoke(lastRoute!!, ctx, autoPaths.ifEmpty { settings.contextFiles }, intent)?.takeIf { it.models.isNotEmpty() }?.let { pick ->
                 val picks = pick.models
                 lastCtx = pick.ctx; lastProp = pick.prop
                 roleOverrides = picks

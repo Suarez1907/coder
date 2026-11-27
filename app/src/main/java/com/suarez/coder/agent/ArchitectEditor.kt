@@ -236,7 +236,8 @@ class ArchitectEditor(private val agent: Agent) {
             return Outcome(false, "Commit denetimi değişikliği durdurdu, commit yapılmadı:\n${e.message}", repairable = true)
         }
         agent.tools.beforeWrite?.invoke(repo, branch)
-        val result = agent.tools.github.commitFiles(repo, branch, message, changes, base)
+        val withNotes = agent.tools.attachNotes?.invoke(repo, branch, changes) ?: changes
+        val result = agent.tools.github.commitFiles(repo, branch, message, withNotes, base)
         agent.tools.afterCommit?.invoke(repo, result, changes.map { it.path }, changes.count { !it.delete && originals[it.path] == null })
         agent.tools.onRepoChanged()
         val notes = agent.tools.commitNotes.joinToString("\n").also { agent.tools.commitNotes.clear() }
@@ -303,7 +304,9 @@ class ArchitectEditor(private val agent: Agent) {
     private fun validate(paths: Collection<String>, originals: Map<String, String?>, state: Map<String, String?>): Map<String, String> =
         paths.mapNotNull { p ->
             val after = state[p] ?: return@mapNotNull null
-            CodeValidator.validate(p, originals[p], after)?.let { p to it }
+            val problems = listOfNotNull(CodeValidator.validate(p, originals[p], after)) +
+                com.suarez.coder.harness.PreFlightValidator.check(p, originals[p], after).map { "ön kontrol (${it.rule}): ${it.detail}" }
+            if (problems.isEmpty()) null else p to problems.joinToString("\n")
         }.toMap()
 
     data class Step(val ref: ModelRef, val role: String)
@@ -392,7 +395,9 @@ class ArchitectEditor(private val agent: Agent) {
         var feedback: String? = null
         var failedNow: Set<String> = emptySet()
         var convo = ArrayList<ChatMessage>()
+        var forceEscalation = false
         for ((attempt, step) in ladder.withIndex()) {
+            if (forceEscalation && step.role != "escalation") continue
             if (attempt > 0 && ladder[attempt - 1].ref.key != step.ref.key) {
                 history += ChatMessage.Notice("⤴️ Onarım denemesi ${attempt + 1}: ${Agent.roleLabel(step.role)} modeli (${step.ref.model}).")
                 ui.update()
@@ -422,11 +427,19 @@ class ArchitectEditor(private val agent: Agent) {
             problems += parsed.errors
             val touched = HashSet<String>()
             val failedPaths = HashSet<String>()
+            var tier2 = 0
+            var tier3 = 0
             for ((path, blocks) in parsed.blocks.groupBy { it.path.trim().removePrefix("./") }) {
                 if (path !in paths) { problems += "$path planda yok; atlandı."; continue }
                 val res = SearchReplace.applyToFile(state[path], blocks)
+                tier2 += res.tier2
+                tier3 += res.tier3
                 state[path] = if (res.applied.isEmpty() && state[path] == null) null else res.content
-                if (res.applied.isNotEmpty()) touched += path
+                if (res.applied.isNotEmpty()) {
+                    touched += path
+                    val body = state[path]
+                    if (body != null && agent.tools.oscillation.observe(path, body).escalate) forceEscalation = true
+                }
                 if (res.failures.isNotEmpty()) {
                     failedPaths += path
                     problems += SearchReplace.describeFailures(res.failures)
@@ -436,8 +449,12 @@ class ArchitectEditor(private val agent: Agent) {
             if (untouched.isNotEmpty() && parsed.blocks.isEmpty()) problems += "Hiç geçerli SEARCH/REPLACE bloğu üretilmedi (biçim bozuk)."
             else if (untouched.isNotEmpty()) problems += "Şu dosyalar için blok yok: ${untouched.joinToString()}"
             // Cheap local checks catch broken edits before they cost a CI round trip.
+            if (tier2 + tier3 > 0) history += ChatMessage.Notice("SEARCH kademe 2: $tier2; SEARCH kademe 3: $tier3")
             val invalid = validate(touched, originals, state)
+            val preflight = invalid.values.sumOf { Regex("ön kontrol").findAll(it).count() }
+            if (preflight > 0) history += ChatMessage.Notice("ön kontrol: $preflight")
             invalid.forEach { (p, why) -> problems += "Yerel kontrol, $p: $why"; failedPaths += p }
+            if (forceEscalation && step.role != "escalation") problems += "Salınım eşiği aşıldı; aynı dosya A-B-A döndü. Yükseltme modeli denenecek."
 
             val label = Agent.roleLabel(step.role)
             history += ChatMessage.Notice(

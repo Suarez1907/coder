@@ -28,6 +28,12 @@ class WeeklyCycle(
 
         fun weekStart(now: Long) = now - WeeklyReport.WEEK_MS
 
+        /** Applies an editor experiment. An architect experiment is ignored. */
+        fun apply(e: Experiments.Experiment, settings: Settings) {
+            if (e.role == "architect" || e.model.equals(settings.architectModel, true)) return
+            if (e.role == "editor") settings.editorModel = e.model
+        }
+
         /** Configuration fingerprint: a baseline exam result is reused only while this stays the same. */
         fun configHash(s: Settings, rules: List<String>, enabledSkills: List<String>) =
             listOf(s.architectMode, s.architectModel, s.editorModel, s.smartRouting, rules.sorted(), enabledSkills.sorted()).toString().hashCode().toString(16)
@@ -293,7 +299,8 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
                 }
                 val old = settings.editorModel
                 settings.editorModel = model
-                store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}", undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).toString())
+                store.addLog(EvoTier.MODEL, "Sınavı kazandı, uygulandı: ${e.title}",
+                    undo = JSONObject().put("kind", "MODEL").put("role", role).put("old", old).put("model", model).toString())
             }
             Experiment.Kind.RULE -> {
                 val text = e.payload.optString("text")
@@ -319,9 +326,15 @@ class ExperimentApplier(private val settings: Settings, private val store: Evolu
     fun undo(json: String): Boolean {
         val o = runCatching { JSONObject(json) }.getOrNull() ?: return false
         when (o.optString("kind")) {
-            "MODEL" -> if (o.optString("role") == "architect") {
-                store.addLog(EvoTier.MODEL, "Mimar modeli kilitli, geri alma reddedildi.")
-            } else settings.editorModel = o.optString("old")
+            "MODEL" -> {
+                if (o.optString("role") == "architect") {
+                    store.addLog(EvoTier.MODEL, "Mimar modeli kilitli, geri alma reddedildi.")
+                    return false
+                }
+                val adopted = o.optString("model")
+                if (adopted.isNotBlank() && settings.editorModel != adopted) return false
+                settings.editorModel = o.optString("old")
+            }
             "RULE" -> store.setPolicyRules(store.policyRules() - o.optString("text"))
             "SKILL" -> skills.setEnabled(o.optString("name"), false)
             "PROMPT" -> store.setPromptOverride(o.optString("section"), if (o.isNull("old")) null else o.optString("old"))

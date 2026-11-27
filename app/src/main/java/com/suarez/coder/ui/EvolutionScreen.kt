@@ -4,21 +4,29 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -51,10 +59,16 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.suarez.coder.cost.Pricing
+import com.suarez.coder.evolution.ClusterStatus
+import com.suarez.coder.evolution.CostToGreenScorer
 import com.suarez.coder.evolution.EvoTier
+import com.suarez.coder.evolution.ErrorCluster
 import com.suarez.coder.evolution.EvolutionLogEntry
 import com.suarez.coder.evolution.PendingSelfPr
 import com.suarez.coder.evolution.PrState
+import com.suarez.coder.evolution.RuleSource
+import com.suarez.coder.evolution.ScopedRule
+import com.suarez.coder.evolution.TaskDomain
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -107,11 +121,44 @@ private fun MonoSwitch(title: String, subtitle: String?, checked: Boolean, enabl
     }
 }
 
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MonoChips(labels: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        labels.forEachIndexed { i, label ->
+            val on = i == selected
+            Surface(
+                onClick = { onSelect(i) },
+                shape = RoundedCornerShape(8.dp),
+                color = if (on) Mono2.strong else Color.Transparent,
+                border = BorderStroke(1.dp, if (on) Mono2.strong else Mono2.line),
+            ) {
+                Text(label, style = Mono.tiny, color = if (on) MaterialTheme.colorScheme.surface else Mono2.strong,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+            }
+        }
+    }
+}
+
 @Composable
 fun EvolutionPage(vm: ChatViewModel) {
-    val s = vm.settings
     LaunchedEffect(Unit) { vm.refreshEvolution() }
+    var tab by remember { mutableStateOf(0) }
+    Column(Modifier.fillMaxWidth().statusBarsPadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        MonoChips(listOf("Özet & PR", "Kümeler", "Hafıza", "Modeller (CTG)"), tab) { tab = it }
+        when (tab) {
+            0 -> SummaryTab(vm)
+            1 -> ClustersTab(vm)
+            2 -> MemoryTab(vm)
+            else -> ModelsTab(vm)
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun SummaryTab(vm: ChatViewModel) {
+    val s = vm.settings
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         vm.evoPending?.let { PendingPrCard(vm, it) }
         ManagerSection(vm)
@@ -127,8 +174,25 @@ fun EvolutionPage(vm: ChatViewModel) {
             HorizontalDivider(color = Mono2.line)
             MonoSwitch("Hafıza ve dersler (K1)", "Repo başına kısa dersler; sabit bağlama eklenir.", k1, enabled) { k1 = it; s.evoMemory = it }
             MonoSwitch("Adaptif yönlendirme (K2)", "Sınırlı ve geri alınabilir eşik ve ipuçları.", k2, enabled) { k2 = it; s.evoRouting = it }
-            MonoSwitch("Kendi koduna PR aç (K3)", "Test önce, CI yeşilse PR; merge her zaman sizin onayınızla.", k3, enabled) { k3 = it; s.evoSelfPr = it }
+            MonoSwitch("Kendi koduna PR aç (K3)", "Küme eşiği dolunca test önce, CI yeşilse PR; merge her zaman sizin onayınızla.", k3, enabled) { k3 = it; s.evoSelfPr = it }
             MonoSwitch("Sadece Wi-Fi'de çalıştır", null, wifi, enabled) { wifi = it; s.evoWifiOnly = it }
+            var notesSync by remember { mutableStateOf(s.syncProjectNotes) }
+            MonoSwitch("NOTES.md sonraki commite eklensin", "Kapalıyken hiçbir NOTES commit'i yok. Açıkken yalnızca senin istediğin commite eklenir; merge edilmez.", notesSync, enabled) {
+                notesSync = it; s.syncProjectNotes = it
+            }
+            var sessions by remember { mutableStateOf(s.clusterMinSessions.toString()) }
+            var floor by remember { mutableStateOf(s.clusterMinCostUsd.toString()) }
+            OutlinedTextField(sessions, {
+                sessions = it.filter { c -> c.isDigit() }.take(2)
+                sessions.toIntOrNull()?.let { n -> s.clusterMinSessions = n }
+            }, singleLine = true, textStyle = Mono.body, label = { Text("Self-PR küme eşiği (farklı seans)") }, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            OutlinedTextField(floor, {
+                floor = it
+                it.replace(',', '.').toDoubleOrNull()?.let { v -> s.clusterMinCostUsd = v }
+            }, singleLine = true, textStyle = Mono.body, label = { Text("Self-PR küme eşiği (USD)") }, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                supportingText = { Text("2 farklı seans, bu maliyet veya 3 başarısız tur. Tek seans PR açmaz.") })
             HorizontalDivider(color = Mono2.line)
             var ctx by remember { mutableStateOf(s.contextualRouting) }
             var pe by remember { mutableStateOf(s.promptEvolution) }
@@ -234,6 +298,13 @@ private fun PendingPrCard(vm: ChatViewModel, p: PendingSelfPr) {
                 Text("PR #${p.number} oluşturuldu: ${p.title}. Merge edip yeni release APK yayınlayayım mı?",
                     style = MaterialTheme.typography.bodyLarge, color = Mono2.strong)
                 Text(p.rootCause, style = MaterialTheme.typography.bodySmall, color = Mono2.weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (p.clusterKey.isNotBlank()) Text(p.clusterKey, style = Mono.tiny, color = Mono2.weak, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (p.evalTotal > 0) {
+                    Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
+                        Text("Eval: ${p.evalPassed}/${p.evalTotal} · +${p.evalAdded} yeni test · ${p.evalRegressions} gerileme",
+                            style = Mono.tiny, color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                    }
+                }
                 Text("${p.files.size} dosya · CI ${if (p.ciPassed) "Geçti" else "Bilinmiyor"} · " + Pricing.formatUsd(p.costUsd),
                     style = Mono.small, color = Mono2.weak)
                 if (p.state == PrState.CONFLICT) Text("Merge çakışması: dal korunuyor; GitHub'da çözün veya reddedin.",
@@ -288,9 +359,165 @@ private fun ReviewDialog(vm: ChatViewModel, p: PendingSelfPr, onDismiss: () -> U
                 Text("Değişen dosyalar", style = MaterialTheme.typography.labelLarge, color = Mono2.weak)
                 (files ?: p.files).forEach { Text(it, style = Mono.small) }
                 Text("Dal: ${p.branch}", style = Mono.tiny, color = Mono2.weak)
+                if (p.evalTotal > 0) Text("Golden Eval: ${p.evalPassed}/${p.evalTotal} (+${p.evalAdded} yeni vaka, ${p.evalRegressions} gerileme)", style = Mono.small)
             }
         },
         confirmButton = { TextButton(onClick = { uri.openUri(p.url) }) { Text("GitHub'da aç") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Kapat") } },
     )
+}
+
+@Composable
+private fun ClustersTab(vm: ChatViewModel) {
+    if (vm.evoClusters.isEmpty()) {
+        Text("Henüz hata kümesi yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        vm.evoClusters.forEach { cluster -> ClusterRow(vm, cluster) }
+    }
+}
+
+@Composable
+private fun ClusterRow(vm: ChatViewModel, c: ErrorCluster) {
+    var open by remember(c.clusterKey) { mutableStateOf(false) }
+    val usd = String.format(java.util.Locale.US, "%.2f", c.estimatedWastedCostUsd)
+    val state = when (c.status) {
+        ClusterStatus.COLLECTING -> "Toplanıyor"
+        ClusterStatus.READY_FOR_PR -> "PR Hazır"
+        ClusterStatus.PR_OPEN -> "PR Açık"
+        ClusterStatus.RESOLVED -> "Çözüldü"
+        ClusterStatus.DISMISSED -> "Yoksayıldı"
+    }
+    EvoCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("${c.clusterKey} · ${c.distinctSessionIds.size} seans · \$$usd kayıp · $state", style = Mono.small, color = Mono2.strong)
+            }
+            Icon(if (open) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, if (open) "Kapat" else "Detay",
+                tint = Mono2.weak, modifier = Modifier.clickable { open = !open }.padding(4.dp))
+        }
+        if (open) {
+            c.sampleTraces.forEach { Text(it, style = Mono.tiny, color = Mono2.weak) }
+            if (c.sampleTraces.isEmpty()) Text("Örnek iz yok.", style = Mono.tiny, color = Mono2.weak)
+        }
+        if (c.status != ClusterStatus.DISMISSED) {
+            TextButton(onClick = { vm.evoDismissCluster(c.clusterKey) }) { Text("Yoksay", color = Mono2.strong) }
+        }
+    }
+}
+
+@Composable
+private fun MemoryTab(vm: ChatViewModel) {
+    var archived by remember { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
+    MonoChips(listOf("Aktif", "Arşiv"), if (archived) 1 else 0) { archived = it == 1 }
+    val rows = vm.evoRules.filter { it.archived == archived }
+    if (rows.isEmpty()) Text(if (archived) "Arşiv boş." else "Bu repo için aktif kural yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEach { rule -> RuleRow(vm, rule) }
+        if (!archived) {
+            OutlinedButton(onClick = { adding = true }, border = BorderStroke(1.dp, Mono2.line)) {
+                Icon(Icons.Outlined.Add, null, Modifier.size(18.dp), tint = Mono2.strong)
+                Spacer(Modifier.width(6.dp))
+                Text("Manuel kural", color = Mono2.strong)
+            }
+        }
+    }
+    if (adding) AddRuleDialog(onDismiss = { adding = false }) { globs, text ->
+        adding = false
+        vm.evoAddRule(globs, text)
+    }
+}
+
+@Composable
+private fun RuleRow(vm: ChatViewModel, rule: ScopedRule) {
+    EvoCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(rule.scopeGlobs.joinToString(", "), style = Mono.tiny, color = Mono2.strong, modifier = Modifier.weight(1f))
+            Text("${rule.hitCount}", style = Mono.small, color = Mono2.weak)
+        }
+        Text(rule.ruleText, style = MaterialTheme.typography.bodySmall, color = Mono2.strong)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (rule.source == RuleSource.CI_VERIFIED) {
+                Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
+                    Text("CI Doğrulandı", style = Mono.tiny, color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { if (rule.archived) vm.evoRestoreRule(rule.id) else vm.evoArchiveRule(rule.id) }) {
+                Text(if (rule.archived) "Geri al" else "Arşivle", color = Mono2.strong)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddRuleDialog(onDismiss: () -> Unit, onAdd: (String, String) -> Unit) {
+    var globs by remember { mutableStateOf("**/*.kt") }
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Manuel kural") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(globs, { globs = it }, singleLine = true, textStyle = Mono.body, label = { Text("Kapsam (glob)") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(text, { text = it.take(220) }, textStyle = Mono.body, label = { Text("Kural (en fazla 220)") }, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = { TextButton(onClick = { if (text.trim().length >= 8) onAdd(globs, text.trim()) }) { Text("Ekle") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Vazgeç") } },
+    )
+}
+
+@Composable
+private fun ModelsTab(vm: ChatViewModel) {
+    val s = vm.settings
+    var domain by remember { mutableStateOf(0) }
+    val domains = listOf(null, TaskDomain.UI_COMPOSE, TaskDomain.KOTLIN_CORE, TaskDomain.CI_GRADLE_YAML, TaskDomain.GAME_3D_SCRIPT)
+    MonoChips(listOf("Tümü", "UI", "Çekirdek", "CI", "3D/Oyun"), domain) { domain = it }
+    Text("Mimar (Kilitli): ${s.architectModel}", style = Mono.small, color = Mono2.strong)
+    val selected = domains[domain]
+    val rows = vm.evoCtg.filter { selected == null || it.domain == selected }
+    if (rows.isEmpty()) Text("Bu alanda henüz uygulayıcı ölçümü yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+    rows.forEach { score -> CtgRow(vm, score) }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = { vm.evoResetCtg() }, border = BorderStroke(1.dp, Mono2.line)) {
+            Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp), tint = Mono2.strong)
+            Spacer(Modifier.width(6.dp))
+            Text("İstatistikleri sıfırla", color = Mono2.strong)
+        }
+    }
+    if (s.pinnedImplementer.isNotBlank()) {
+        TextButton(onClick = { vm.evoPinImplementer(s.pinnedImplementer) }) { Text("Sabitlemeyi kaldır", color = Mono2.strong) }
+    }
+}
+
+@Composable
+private fun CtgRow(vm: ChatViewModel, s: CostToGreenScorer.Score) {
+    val now = System.currentTimeMillis()
+    val cooling = s.cooldownUntil > now
+    EvoCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(s.modelId.substringAfter('/'), style = Mono.small, color = Mono2.strong, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (cooling) {
+                Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
+                    Text("Soğutmada", style = Mono.tiny, color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
+            }
+        }
+        Row {
+            Text("İlk Geçiş %${(s.firstPassCiRate * 100).toInt()}", style = Mono.tiny, color = Mono2.weak, modifier = Modifier.weight(1f))
+            Text("CTG $${String.format(java.util.Locale.US, "%.4f", s.costToGreenUsd)}", style = Mono.tiny, color = Mono2.weak, modifier = Modifier.weight(1f))
+        }
+        Row {
+            Text("Salınım %${(s.oscillationRate * 100).toInt()}", style = Mono.tiny, color = Mono2.weak, modifier = Modifier.weight(1f))
+            Text("Skor ${String.format(java.util.Locale.US, "%.2f", s.efficiencyScore)}", style = Mono.tiny, color = Mono2.strong, modifier = Modifier.weight(1f))
+        }
+        TextButton(onClick = { vm.evoPinImplementer(s.modelId) }) {
+            Icon(Icons.Outlined.Bookmark, null, Modifier.size(16.dp), tint = Mono2.strong)
+            Spacer(Modifier.width(4.dp))
+            Text(if (vm.settings.pinnedImplementer == s.modelId) "Sabitlendi" else "Uygulayıcıyı sabitle", color = Mono2.strong)
+        }
+    }
 }

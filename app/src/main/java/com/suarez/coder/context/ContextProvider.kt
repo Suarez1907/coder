@@ -1,6 +1,7 @@
 package com.suarez.coder.context
 
 import com.suarez.coder.data.Settings
+import com.suarez.coder.evolution.ScopedRuleStore
 import com.suarez.coder.tools.GitHub
 
 /** Loads the files the user pinned as context; contents are memoised until the repo changes. */
@@ -17,6 +18,20 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
     }
 
     fun invalidate() = memo.clear()
+
+    /** Conditional lessons. Injected per turn, never into the stable system prefix. */
+    var ruleStore: ScopedRuleStore? = null
+    var rulesEnabled: () -> Boolean = { false }
+
+    /**
+     * Rules whose globs match [paths], as a compact block for the volatile task context.
+     * Returns null when memory is off or nothing matches. Matching rules get a hit.
+     */
+    fun matchingRulesBlock(repo: String, paths: List<String>, now: Long = System.currentTimeMillis()): String? {
+        if (!rulesEnabled()) return null
+        val store = ruleStore ?: return null
+        return ScopedRuleStore.formatBlock(store.selectForTurn(repo, paths, now))
+    }
 
     /** Exam runs: a different repo/branch and no pinned files, without touching the user's settings. */
     var repoOverride: String? = null

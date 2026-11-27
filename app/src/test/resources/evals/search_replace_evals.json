@@ -1,0 +1,56 @@
+{
+  "component": "search_replace",
+  "cases": [
+    {
+      "id": "exact_match",
+      "content": "fun main() {\n    val a = 1\n    println(a)\n}\n",
+      "search": "    val a = 1",
+      "replace": "    val a = 2",
+      "expect": "ok",
+      "contains": "val a = 2",
+      "notContains": "val a = 1"
+    },
+    {
+      "id": "crlf_normalized",
+      "applyFile": true,
+      "path": "Main.kt",
+      "content": "fun main() {\r\n    val a = 1\r\n    println(a)\r\n}\r\n",
+      "search": "    val a = 1",
+      "replace": "    val a = 2",
+      "expect": "ok",
+      "contains": "val a = 2"
+    },
+    {
+      "id": "indent_tier2",
+      "content": "fun main() {\n    val a = 1\n    println(a)\n}\n",
+      "search": "val a = 1\nprintln(a)",
+      "replace": "val a = 5\nprintln(a + 1)",
+      "expect": "ok",
+      "contains": "    val a = 5\n    println(a + 1)"
+    },
+    {
+      "id": "trailing_ws_tier2",
+      "content": "alpha = 1   \nbeta = 2\n",
+      "search": "alpha = 1\nbeta = 2",
+      "replace": "alpha = 3\nbeta = 4",
+      "expect": "ok",
+      "contains": "alpha = 3"
+    },
+    {
+      "id": "ambiguous_rejected",
+      "content": "fun a() {\n    val x = 1\n}\nfun b() {\n    val x = 1\n}\n",
+      "search": "    val x = 1",
+      "replace": "    val x = 2",
+      "expect": "err"
+    },
+    {
+      "id": "anchor_tier3",
+      "content": "fun a() {\n    val x = 1\n    val y = 2\n    val z = 3\n}\n",
+      "search": "    val x = 1\n    ...\n    val z = 3",
+      "replace": "    val x = 9\n    val z = 9",
+      "expect": "ok",
+      "contains": "val x = 9",
+      "notContains": "val y = 2"
+    }
+  ]
+}

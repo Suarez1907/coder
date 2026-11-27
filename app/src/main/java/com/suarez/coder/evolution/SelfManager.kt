@@ -32,7 +32,12 @@ class SelfManager(private val settings: Settings, val store: EvolutionStore) {
      * role -> model for this route, or null when the user has not given a pool of at least two usable models.
      * With a task context, the contextual bandit chooses (and records how likely the choice was).
      */
-    fun pick(route: String, ctx: DoubleArray? = null): Pick? {
+    fun pick(route: String, ctx: DoubleArray? = null, paths: List<String> = emptyList(), intent: String = ""): Pick? {
+        val picked = pickLearned(route, ctx) ?: return null
+        return applyImplementer(picked, paths, intent)
+    }
+
+    private fun pickLearned(route: String, ctx: DoubleArray?): Pick? {
         if (!settings.learnedRouting) return null
         val pool = settings.modelPool.mapNotNull { ModelRef.parse(it) }.filter { settings.keyFor(it.provider).isNotBlank() }
         if (pool.size < 2) return null
@@ -49,6 +54,23 @@ class SelfManager(private val settings: Settings, val store: EvolutionStore) {
             val chosen = bandit.choose(route, role, pool.map { it.key }, settings.costWeight)
             pool.first { it.key == chosen }
         })
+    }
+
+    /** Swaps only the editor. The architect entry is written back to the value the bandit chose. */
+    private fun applyImplementer(picked: Pick, paths: List<String>, intent: String): Pick {
+        val architectBefore = picked.models["architect"]
+        val domain = CostToGreenScorer.classify(paths, intent)
+        val chosen = store.routing.selectImplementer(
+            domain, settings.modelPool, settings.architectModel, settings.editorModel,
+            settings.ctgExperiments, settings.pinnedImplementer.ifBlank { null },
+        )
+        if (chosen == null || chosen.equals(settings.architectModel, true)) return picked
+        val ref = ModelRef.parse(chosen) ?: return picked
+        if (ref.key.equals(settings.architectModel, true)) return picked
+        val models = picked.models.toMutableMap()
+        models["editor"] = ref
+        if (architectBefore != null) models["architect"] = architectBefore else models.remove("architect")
+        return picked.copy(models = models)
     }
 
     /** Estimated utility (success − cost penalty) of [model] in context [x]: the reward model for off-policy evaluation. */
@@ -78,6 +100,10 @@ class SelfManager(private val settings: Settings, val store: EvolutionStore) {
         if (arms.isEmpty()) return
         val reward = Outcome.of(t)
         arms.forEach { (route, role, model) -> bandit.record(route, role, model, reward, t.totalCostUsd / arms.size) }
+        val domain = CostToGreenScorer.classify(t.steps, t.request)
+        arms.filter { it.second == "editor" }.forEach { (_, _, model) ->
+            store.routing.observeImplementer(model, domain, CostToGreenScorer.sampleFrom(t), settings.editorModel, t.at)
+        }
         // Contextual: learn success in this context, and log the decision for off-policy evaluation.
         val x = t.ctx?.toDoubleArray() ?: return
         val props = t.prop.orEmpty().split(';').mapNotNull { p -> p.split('=').takeIf { it.size == 2 }?.let { it[0] to (it[1].toDoubleOrNull() ?: 1.0) } }.toMap()

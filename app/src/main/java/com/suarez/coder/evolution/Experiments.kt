@@ -63,8 +63,8 @@ data class Experiment(
         )
 
         fun model(role: String, model: String, source: String): Experiment {
-            require(role != "architect") { "Mimar modeli kilitli: architect deneyi üretilemez" }
-            return Experiment(kind = Kind.MODEL, title = "Uygulayıcı → ${model.substringAfter('/')}",
+            val title = if (role == "architect") "Mimar → ${model.substringAfter('/')}" else "Uygulayıcı → ${model.substringAfter('/')}"
+            return Experiment(kind = Kind.MODEL, title = title,
                 payload = JSONObject().put("role", role).put("model", model), source = source)
         }
 
@@ -89,6 +89,23 @@ data class Experiment(
             cand.passed == base.passed && cand.costUsd <= base.costUsd * 0.9 -> true
             else -> false
         }
+    }
+}
+
+/**
+ * Candidates the weekly loop may try. Architect is never generated: cost-to-green and experiments only move the
+ * implementer.
+ */
+object Experiments {
+    data class Experiment(val role: String, val model: String)
+
+    fun generate(settings: com.suarez.coder.data.Settings): List<Experiment> {
+        val blocked = settings.architectModel.trim()
+        return (settings.modelPool + settings.editorModel)
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals(blocked, true) }
+            .distinct()
+            .map { Experiment("editor", it) }
     }
 }
 
