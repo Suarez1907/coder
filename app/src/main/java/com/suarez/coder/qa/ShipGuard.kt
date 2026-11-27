@@ -9,6 +9,8 @@ class ShipGuard {
     @Volatile var visualRounds: Int = 0
     @Volatile var critic: AdversarialCritic.Verdict? = null
     @Volatile var criticRounds: Int = 0
+    @Volatile var mutationReport: String? = null
+    @Volatile var mutationSummary: String? = null
     @Volatile var userApproved: Boolean = false
 
     fun reset() {
@@ -16,10 +18,17 @@ class ShipGuard {
         visualRounds = 0
         critic = null
         criticRounds = 0
+        mutationReport = null
+        mutationSummary = null
         userApproved = false
     }
 
-    fun hold(autoShip: Boolean, visualOn: Boolean, criticOn: Boolean): String? {
+    fun hold(
+        autoShip: Boolean,
+        visualOn: Boolean,
+        criticOn: Boolean,
+        mutationOn: Boolean = false,
+    ): String? {
         if (!autoShip || userApproved) return null
         if (visualOn && VisualQaGate.blocksMerge(visual)) {
             val issues = visual?.issues.orEmpty().joinToString("\n")
@@ -32,6 +41,10 @@ class ShipGuard {
             val tail = if (criticRounds >= AdversarialCritic.MAX_FIX_ROUNDS) "Tur sınırı doldu; kullanıcı onayı gerekir."
             else "Bulgular bir düzeltme turuna aktarılabilir (${criticRounds}/${AdversarialCritic.MAX_FIX_ROUNDS})."
             return "Karşıt eleştirmen: BLOCK_CRITICAL. Otomatik merge durdu. $tail\n$sites"
+        }
+        if (mutationOn && !mutationReport.isNullOrBlank()) {
+            val summary = mutationSummary?.takeIf { it.isNotBlank() } ?: "Diff mutasyon testi: hayatta kalan mutant var."
+            return "$summary Otomatik merge durdu.\n$mutationReport"
         }
         return null
     }

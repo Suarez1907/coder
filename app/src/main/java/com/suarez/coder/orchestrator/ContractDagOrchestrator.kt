@@ -16,6 +16,9 @@ class ContractDagOrchestrator(
     val architectModelId: String,
     maxConcurrency: Int = 2,
     private val implementerFor: (DagNode) -> String = { "implementer" },
+    private val speculativeSwarm: (suspend (DagNode, TaskContract) -> NodeResult?)? = null,
+    private val crossRepoCheck: ((StagedTransaction) -> List<String>)? = null,
+    private val onNotice: ((String) -> Unit)? = null,
 ) {
     /** Set by the runner. Null means the cache has not been measured and steps keep their normal pace. */
     var cacheTracker: com.suarez.coder.cost.CacheTtlTracker? = null
@@ -106,7 +109,13 @@ class ContractDagOrchestrator(
                         val now = flight.incrementAndGet()
                         maxFlight.updateAndGet { m -> maxOf(m, now) }
                         try {
-                            node.id to worker(node, contract)
+                            val swarmResult = speculativeSwarm?.invoke(node, contract)
+                            if (swarmResult != null) {
+                                onNotice?.invoke("SpeculativeSwarm: ${node.id} (Mimar kilitli: ${contract.architectModelId})")
+                                node.id to swarmResult
+                            } else {
+                                node.id to worker(node, contract)
+                            }
                         } finally {
                             flight.decrementAndGet()
                         }
@@ -144,6 +153,11 @@ class ContractDagOrchestrator(
                 failures.clear()
                 errors += "sıralı moda düşüldü"
             }
+        }
+        val crossRepoWarnings = if (pending.isEmpty()) crossRepoCheck?.invoke(tx).orEmpty() else emptyList()
+        if (crossRepoWarnings.isNotEmpty()) {
+            onNotice?.invoke("CrossRepoContractTwin: ${crossRepoWarnings.joinToString("; ")}")
+            errors += crossRepoWarnings
         }
         val validation = if (pending.isEmpty()) validate(tx) else listOf("tamamlanmadı")
         if (validation.isNotEmpty()) errors += validation

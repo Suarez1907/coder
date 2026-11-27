@@ -11,8 +11,10 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 - `agent/ReadOnlyMismatchRecovery.kt`: READ_ONLY faz kararı + yetki kurtarma (1 yükseltme → Uygulayıcı'ya devir).
 - `tools/ToolRegistry.kt`: `accessError` (readOnly/allowOps erişim kuralları); salt okunur `github_releases` (sürüm + asset bağlantıları, `GitHub.releaseSummary` saf biçimlendirici).
 - `ui/ChatScreen.kt` + `ui/ChatViewModel.kt`: sohbet zaman çizelgesi (Notice satırları görünür).
+- Faz 5B: `SpeculativeSwarmEngine` (Implementer turnuvası), `DiffMutationTester` (Auto-Ship öncesi mutasyon kapısı), `BlueprintEngine` (parametrik replay), `MetaHarnessCompressor` (öz-sıkıştıran evrim), `CrossRepoContractTwin` (çoklu-repo kontrat ağı).
 
 ## Kurallar
+- Faz 5B kırmızı çizgileri: Mimar modeli kesin kilitli (`retarget` yasak), sıfır otomatik self-merge (`ShipGuard` mutasyon/QA kapısı), çoklu-repo değişiklikleri yalnızca onaylı izole PR ile.
 - READ_ONLY yalnızca kesin QUESTION görevinde veya Mimar planlama adımında; yazma niyetinde en fazla 1 otomatik yükseltme.
 - AdaptiveRoutingStore/LoopBreaker ToolAccess'i asla READ_ONLY'ye düşüremez; orkestratör uygulama adımları her zaman READ_WRITE.
 - Yetki fazı/olayı sohbet zaman çizelgesine tek satırlık `ChatMessage.Notice` olarak kaydedilir.
