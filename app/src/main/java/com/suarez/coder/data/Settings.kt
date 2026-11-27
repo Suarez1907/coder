@@ -360,6 +360,26 @@ class Settings(context: Context) {
         get() = bool("evo_wifi", false)
         set(v) = putBool("evo_wifi", v)
 
+    /** Distinct sessions required before a repeated failure may open a self-PR. */
+    var clusterMinSessions: Int
+        get() = prefs.getInt("cluster_min_sessions", 2).coerceIn(1, 20)
+        set(v) = prefs.edit().putInt("cluster_min_sessions", v.coerceIn(1, 20)).apply()
+
+    /** Cumulative wasted cost (USD) that also opens the self-PR gate. */
+    var clusterMinCostUsd: Double
+        get() = str("cluster_min_cost", "0.05").toDoubleOrNull()?.coerceIn(0.0, 10.0) ?: 0.05
+        set(v) = put("cluster_min_cost", v.coerceIn(0.0, 10.0).toString())
+
+    /** Cost-to-green exploration for the implementer. Never changes the architect. */
+    var ctgExperiments: Boolean
+        get() = bool("ctg_experiments", true)
+        set(v) = putBool("ctg_experiments", v)
+
+    /** When set, the implementer stays on this model. Blank keeps cost-to-green selection. */
+    var pinnedImplementer: String
+        get() = str("pinned_implementer", "")
+        set(v) = put("pinned_implementer", v.trim())
+
     /** Vague change requests get 1-3 short clarifying questions before any expensive planning. */
     var clarifyFirst: Boolean
         get() = bool("clarify_first", true)

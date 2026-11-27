@@ -85,12 +85,16 @@ class EvolutionEngine(
         var produced = 0
         var consumed = true
         try {
+            store.clusters.ingest(t, ClusterThresholds(settings.clusterMinSessions, settings.clusterMinCostUsd, 3))
+            if (settings.evoMemory) store.scopedRules.decay(System.currentTimeMillis())
             if (EvoTier.ROUTING in tiers) store.routing.record(t)
             // A clean session (no errors, retries, CI failures, stops or corrections) teaches nothing: no model call.
             if (t.troubleScore == 0) return "Temiz seans; model çağrılmadı."
             val recentTrouble = store.traces().takeLast(5).sumOf { it.troubleScore }
+            val clusterReady = store.clusters.forSession(t.sessionId).any { it.status == ClusterStatus.READY_FOR_PR }
             // The Coder file list (the biggest part of the prompt) is only sent when a self-PR could follow.
-            val selfPrPossible = maxOf(t.troubleScore, recentTrouble) >= EvolutionGuard.MIN_TROUBLE_FOR_PR && store.pending()?.state != PrState.PENDING
+            val selfPrPossible = (clusterReady || maxOf(t.troubleScore, recentTrouble) >= EvolutionGuard.MIN_TROUBLE_FOR_PR) &&
+                store.pending()?.state != PrState.PENDING
             val coderFiles = if (EvoTier.SELF_PR in tiers && selfPrPossible) runCatching {
                 agent.tools.github.treeEntries(EvolutionGuard.SELF_REPO, null)?.second.orEmpty().map { it.path }
                     .filter { it.startsWith("app/src/main/java/") && it.endsWith(".kt") && !EvolutionGuard.isProtected(it) }
@@ -118,6 +122,7 @@ class EvolutionEngine(
                 if (merged != notes) {
                     val pruned = reflector.pruneIfNeeded(merged)
                     store.saveLessons(t.repo, pruned)
+                    report.lessons.forEach { lesson -> store.scopedRules.add(t.repo, listOf("*"), lesson, RuleSource.REFLECTOR) }
                     log(EvoTier.MEMORY, "${t.repo}: ${report.lessons.size} ders öğrenildi: " + report.lessons.joinToString("; ").take(300))
                     produced++
                 }
@@ -135,24 +140,21 @@ class EvolutionEngine(
                     produced++
                 }
             }
-            // Tier 3: self-PR.
-            val si = report.selfImprovement
-            if (EvoTier.SELF_PR in tiersForModel && si != null) {
+            // Tier 3: self-PR only for a cluster that has crossed the threshold. One session is not enough.
+            val cluster = store.clusters.forSession(t.sessionId).firstOrNull { it.status == ClusterStatus.READY_FOR_PR }
+            val si = report.selfImprovement ?: cluster?.let { ErrorClusterEngine.improvementFor(it) }
+            if (EvoTier.SELF_PR in tiersForModel && si != null && cluster != null) {
                 val open = runCatching { agent.tools.github.openPullRequests(EvolutionGuard.SELF_REPO).count { it.head.startsWith(EvolutionGuard.BRANCH_PREFIX) } }.getOrDefault(1)
                 val gate = EvolutionGuard.mayOpenPr(open, store.pending()?.state == PrState.PENDING, startedToday + spent, budget,
-                    si.topic, store.rejectedTopics(), maxOf(t.troubleScore, recentTrouble))
+                    si.topic, store.rejectedTopics(), maxOf(t.troubleScore, recentTrouble, EvolutionGuard.MIN_TROUBLE_FOR_PR))
                 if (gate == EvolutionGuard.Block.OK) {
-                    val out = SelfPrOrchestrator(agent, onStatus).run(si) { spent }
-                    // The topic is closed as soon as a PR exists (merged or rejected later), so it is never opened twice.
-                    out.pr?.let { store.savePending(it); store.bump("prs"); store.reject(it.topic) }
-                    // Level 3: merge without asking when every gate holds (CI green, small, unprotected, trusted history).
-                    out.pr?.let { pr ->
-                        val actions = SelfPrActions(agent.tools.github, store)
-                        val watching = actions.lastMerge()?.let { m -> !m.counted && !m.reverted && System.currentTimeMillis() < m.at + SelfPrActions.WATCH_MS } == true
-                        if (SelfPrActions.mayAutoMerge(settings.autonomyLevel, pr, store.counter("merged_ok"), watching)) {
-                            val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode }.getOrDefault(0L)
-                            runCatching { actions.merge(pr, version, auto = true) }
-                        }
+                    val out = SelfPrOrchestrator(agent, onStatus).run(si, cluster) { spent }
+                    // The topic is closed as soon as a PR exists. The orchestrator never merges it.
+                    out.pr?.let {
+                        store.savePending(it)
+                        store.bump("prs")
+                        store.reject(it.topic)
+                        store.clusters.mark(cluster.clusterKey, ClusterStatus.PR_OPEN)
                     }
                     log(EvoTier.SELF_PR, (if (out.pr != null) "PR #${out.pr.number} açıldı: ${out.pr.title}. " else "Self-PR denemesi: ") + out.summary)
                     produced++
@@ -165,6 +167,8 @@ class EvolutionEngine(
                         else -> gate.name
                     })
                 }
+            } else if (EvoTier.SELF_PR in tiersForModel && report.selfImprovement != null && cluster == null) {
+                log(EvoTier.INFO, "Self-PR adayı (${report.selfImprovement.title}) tek seansla açılmadı; küme eşiği dolmadı.")
             }
             if (produced == 0) log(EvoTier.INFO, "Seans değerlendirildi: yeni ders veya ayar yok.")
             return "Değerlendirildi."

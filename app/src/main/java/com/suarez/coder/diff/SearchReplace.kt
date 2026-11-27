@@ -19,7 +19,7 @@ object SearchReplace {
 
     data class Failure(val block: Block, val reason: String)
 
-    data class FileResult(val content: String, val applied: List<Block>, val failures: List<Failure>)
+    data class FileResult(val content: String, val applied: List<Block>, val failures: List<Failure>, val tier2: Int = 0, val tier3: Int = 0)
 
     private val searchRe = Regex("^\\s*<{5,9}\\s*SEARCH\\s*$")
     private val dividerRe = Regex("^\\s*={5,9}\\s*$")
@@ -90,6 +90,8 @@ object SearchReplace {
         var content = original?.replace("\r\n", "\n")
         val applied = ArrayList<Block>()
         val failures = ArrayList<Failure>()
+        var tier2 = 0
+        var tier3 = 0
         for (b in blocks) {
             if (b.search.isBlank()) {
                 if (content == null || content.isBlank()) {
@@ -105,15 +107,20 @@ object SearchReplace {
                 continue
             }
             when (val r = replaceOnce(content, b.search, b.replace)) {
-                is Match.Ok -> { content = r.text; applied += b }
+                is Match.Ok -> {
+                    content = r.text
+                    applied += b
+                    if (r.tier == 2) tier2++
+                    if (r.tier == 3) tier3++
+                }
                 is Match.Err -> failures += Failure(b, r.reason)
             }
         }
-        return FileResult(content ?: "", applied, failures)
+        return FileResult(content ?: "", applied, failures, tier2, tier3)
     }
 
     sealed class Match {
-        data class Ok(val text: String) : Match()
+        data class Ok(val text: String, val tier: Int = 1) : Match()
         data class Err(val reason: String) : Match()
     }
 
@@ -125,7 +132,7 @@ object SearchReplace {
         if (sLines.count { isEllipsis(it) } == 1 && !content.contains(search)) return replaceAnchored(content, sLines, replace)
         // 1) Exact match.
         val exact = countOccurrences(content, search)
-        if (exact == 1) return Match.Ok(content.replaceFirst(search, replace))
+        if (exact == 1) return Match.Ok(content.replaceFirst(search, replace), tier = 1)
         if (exact > 1) return Match.Err("SEARCH metni dosyada $exact kez geçiyor; benzersiz olması için daha fazla satır ekleyin.")
 
         // 2) Line based: ignore trailing whitespace, then ignore indentation.
@@ -151,7 +158,7 @@ object SearchReplace {
                 out.addAll(fileLines.subList(0, start))
                 if (!(replace.isEmpty())) out.addAll(newLines)
                 out.addAll(fileLines.subList(start + target.size, fileLines.size))
-                return Match.Ok(out.joinToString("\n"))
+                return Match.Ok(out.joinToString("\n"), tier = 2)
             }
         }
         return Match.Err("SEARCH metni dosyada bulunamadı" + hint(fileLines, searchLines) + ". Dosyayı tekrar okuyup satırları birebir kopyalayın.")
@@ -184,7 +191,7 @@ object SearchReplace {
                 out.addAll(fileLines.subList(0, h))
                 if (replace.isNotEmpty()) out.addAll(newLines)
                 out.addAll(fileLines.subList(end, fileLines.size))
-                return Match.Ok(out.joinToString("\n"))
+                return Match.Ok(out.joinToString("\n"), tier = 3)
             }
         }
         return Match.Err("'...' öncesindeki satırlar dosyada bulunamadı. Dosyayı tekrar okuyup satırları birebir kopyalayın.")

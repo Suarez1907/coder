@@ -1,0 +1,60 @@
+{
+  "component": "router_access",
+  "cases": [
+    {
+      "id": "question_is_read_only",
+      "request": "bu fonksiyon ne işe yarıyor?",
+      "architect": "gemini/gemini-2.5-pro",
+      "implementer": "gemini/gemini-2.5-flash",
+      "expectRoute": "QUESTION_ONLY",
+      "expectPhase": "READ_ONLY",
+      "expectArchitect": "gemini/gemini-2.5-pro"
+    },
+    {
+      "id": "write_is_read_write",
+      "request": "başlık rengini değiştir",
+      "architect": "gemini/gemini-2.5-pro",
+      "implementer": "gemini/gemini-2.5-flash",
+      "expectRoute": "SIMPLE_EDIT",
+      "expectPhase": "READ_WRITE",
+      "expectArchitect": "gemini/gemini-2.5-pro"
+    },
+    {
+      "id": "fix_stays_read_write",
+      "request": "login hatasını düzelt",
+      "architect": "gemini/gemini-2.5-pro",
+      "implementer": "gemini/gemini-2.5-flash",
+      "expectRoute": "SIMPLE_EDIT",
+      "expectPhase": "READ_WRITE",
+      "expectArchitect": "gemini/gemini-2.5-pro"
+    },
+    {
+      "id": "single_agent_escalation_read_write",
+      "request": "login ekranını düzelt ve commit et",
+      "forcedRoute": "QUESTION_ONLY",
+      "architect": "gemini/gemini-2.5-pro",
+      "implementer": "gemini/gemini-2.5-flash",
+      "expectRoute": "QUESTION_ONLY",
+      "expectPhase": "READ_WRITE",
+      "expectArchitect": "gemini/gemini-2.5-pro"
+    },
+    {
+      "id": "architect_lock_on_complex",
+      "request": "yeni ekran ekle ve kimlik doğrulama mimarisini kur",
+      "architect": "gemini/gemini-2.5-pro",
+      "implementer": "gemini/gemini-2.5-flash",
+      "expectRoute": "COMPLEX_ARCHITECT",
+      "expectPhase": "READ_WRITE",
+      "expectArchitect": "gemini/gemini-2.5-pro"
+    },
+    {
+      "id": "release_question_keeps_architect",
+      "request": "release nasıl oluşturuluyor?",
+      "architect": "openrouter/nvidia/nemotron-3-ultra",
+      "implementer": "gemini/gemini-2.5-flash",
+      "expectRoute": "QUESTION_ONLY",
+      "expectPhase": "READ_ONLY",
+      "expectArchitect": "openrouter/nvidia/nemotron-3-ultra"
+    }
+  ]
+}

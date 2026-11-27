@@ -15,7 +15,10 @@ class EvolutionStore(val dir: File) {
     private val rejectedFile = File(dir, "rejected.json")
     private val lessonsFile = File(dir, "lessons.json")
     private val metaFile = File(dir, "meta.json")
-    val routing = AdaptiveRoutingStore(File(dir, "routing.json"), File(dir, "stats.json"))
+    val ctg = CostToGreenScorer(File(dir, "ctg.json"))
+    val routing = AdaptiveRoutingStore(File(dir, "routing.json"), File(dir, "stats.json"), ctg)
+    val scopedRules = ScopedRuleStore(File(dir, "scoped_rules.json"))
+    val clusters = ErrorClusterEngine(File(dir, "clusters.json"))
 
     private fun write(f: File, text: String) {
         val tmp = File(dir, f.name + ".tmp")

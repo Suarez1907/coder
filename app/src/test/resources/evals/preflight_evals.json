@@ -1,0 +1,68 @@
+{
+  "component": "preflight",
+  "cases": [
+    {
+      "id": "braces_in_string_and_comment",
+      "path": "Ui.kt",
+      "before": "fun ok(s: String): String {\n    return s\n}\n",
+      "after": "fun ok(s: String): String {\n    // braces in a comment { } ( )\n    val t = \"literal { } ( )\"\n    return t\n}\n",
+      "expectRules": []
+    },
+    {
+      "id": "real_unbalanced",
+      "path": "Broken.kt",
+      "before": "fun bad(): Int {\n    return 1\n}\n",
+      "after": "fun bad(): Int {\n    if (true) {\n        return 1\n}\n",
+      "expectRules": ["unbalanced_brackets"]
+    },
+    {
+      "id": "broken_json",
+      "path": "config.json",
+      "before": "{ \"a\": 1 }\n",
+      "after": "{ \"a\": }\n",
+      "expectRules": ["broken_json"]
+    },
+    {
+      "id": "json_braces_inside_string",
+      "path": "ok.json",
+      "before": "{ \"a\": 1 }\n",
+      "after": "{ \"a\": \"{ not a brace }\" }\n",
+      "expectRules": []
+    },
+    {
+      "id": "yaml_tab",
+      "path": "ci.yml",
+      "before": "name: build\non: push\n",
+      "after": "name: build\non: push\njobs:\n\tbuild:\n\t\truns-on: ubuntu\n",
+      "expectRules": ["yaml_tab"]
+    },
+    {
+      "id": "yaml_spaces_ok",
+      "path": "ci.yml",
+      "before": "name: build\n",
+      "after": "name: build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n",
+      "expectRules": []
+    },
+    {
+      "id": "merge_conflict",
+      "path": "Main.kt",
+      "before": "fun a() = 1\n",
+      "after": "fun a() = 1\n<<<<<<< HEAD\nval x = 1\n=======\nval x = 2\n>>>>>>> branch\n",
+      "expectRules": ["merge_conflict"]
+    },
+    {
+      "id": "accidental_delete",
+      "path": "Big.kt",
+      "before": "fun kept(): String {\n    val message = \"this file is long enough that wiping it is an accident and should be blocked by preflight\"\n    return message\n}\n",
+      "after": "\n",
+      "expectRules": ["accidental_delete"]
+    },
+    {
+      "id": "short_replace_not_delete",
+      "path": "Tiny.kt",
+      "before": "fun a() = 1\n",
+      "after": "fun a() = 2\n",
+      "expectRules": []
+    }
+  ]
+}

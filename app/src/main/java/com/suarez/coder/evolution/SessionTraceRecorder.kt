@@ -43,6 +43,9 @@ object SessionTraceRecorder {
         val patchErrors = tools.filter { it.isError && it.name in setOf("github_apply_diff", "github_write_files") }
         val ci = tools.filter { it.name == "ci_wait" }
         val ciFailed = ci.filter { it.content.contains("\nHatalar (") }
+        fun marker(label: String) = notices.sumOf { n ->
+            Regex("${Regex.escape(label)}:\\s*(\\d+)").find(n.text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        }
         val routes = run.filterIsInstance<ChatMessage.RouteInfo>()
         val stopped = notices.any { n -> n.text.startsWith("Durduruldu") || n.text.startsWith("Bütçe eşiğinde") || n.text.startsWith("Hata:") } ||
             run.any { it is ChatMessage.Assistant && (it.text.startsWith("⚠️") || it.text.startsWith("⏸")) }
@@ -67,6 +70,11 @@ object SessionTraceRecorder {
             stopped = stopped,
             ciRuns = ci.size,
             steps = ProcedureMiner.steps(run),
+            preflightBlocksCount = marker("ön kontrol"),
+            searchReplaceTier2Count = marker("SEARCH kademe 2"),
+            searchReplaceTier3Count = marker("SEARCH kademe 3"),
+            oscillationEscalationsCount = marker("salınım"),
+            prePushGateWarningsCount = marker("push öncesi"),
         )
     }
 

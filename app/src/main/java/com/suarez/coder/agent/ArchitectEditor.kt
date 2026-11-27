@@ -303,7 +303,9 @@ class ArchitectEditor(private val agent: Agent) {
     private fun validate(paths: Collection<String>, originals: Map<String, String?>, state: Map<String, String?>): Map<String, String> =
         paths.mapNotNull { p ->
             val after = state[p] ?: return@mapNotNull null
-            CodeValidator.validate(p, originals[p], after)?.let { p to it }
+            val problems = listOfNotNull(CodeValidator.validate(p, originals[p], after)) +
+                com.suarez.coder.harness.PreFlightValidator.check(p, originals[p], after).map { "ön kontrol (${it.rule}): ${it.detail}" }
+            if (problems.isEmpty()) null else p to problems.joinToString("\n")
         }.toMap()
 
     data class Step(val ref: ModelRef, val role: String)
@@ -422,9 +424,13 @@ class ArchitectEditor(private val agent: Agent) {
             problems += parsed.errors
             val touched = HashSet<String>()
             val failedPaths = HashSet<String>()
+            var tier2 = 0
+            var tier3 = 0
             for ((path, blocks) in parsed.blocks.groupBy { it.path.trim().removePrefix("./") }) {
                 if (path !in paths) { problems += "$path planda yok; atlandı."; continue }
                 val res = SearchReplace.applyToFile(state[path], blocks)
+                tier2 += res.tier2
+                tier3 += res.tier3
                 state[path] = if (res.applied.isEmpty() && state[path] == null) null else res.content
                 if (res.applied.isNotEmpty()) touched += path
                 if (res.failures.isNotEmpty()) {
@@ -436,7 +442,10 @@ class ArchitectEditor(private val agent: Agent) {
             if (untouched.isNotEmpty() && parsed.blocks.isEmpty()) problems += "Hiç geçerli SEARCH/REPLACE bloğu üretilmedi (biçim bozuk)."
             else if (untouched.isNotEmpty()) problems += "Şu dosyalar için blok yok: ${untouched.joinToString()}"
             // Cheap local checks catch broken edits before they cost a CI round trip.
+            if (tier2 + tier3 > 0) history += ChatMessage.Notice("SEARCH kademe 2: $tier2; SEARCH kademe 3: $tier3")
             val invalid = validate(touched, originals, state)
+            val preflight = invalid.values.sumOf { Regex("ön kontrol").findAll(it).count() }
+            if (preflight > 0) history += ChatMessage.Notice("ön kontrol: $preflight")
             invalid.forEach { (p, why) -> problems += "Yerel kontrol, $p: $why"; failedPaths += p }
 
             val label = Agent.roleLabel(step.role)

@@ -59,20 +59,29 @@ class SelfPrOrchestrator(private val agent: Agent, private val onStatus: (String
             return SelfPlan(o.optString("title").ifBlank { "Coder düzeltmesi" }, o.optString("root_cause"), o.optString("change_summary"), all) to null
         }
 
-        fun prBody(p: SelfPlan, si: SelfImprovement, files: List<String>, ciRounds: Int, costUsd: Double): String = buildString {
+        fun prBody(p: SelfPlan, si: SelfImprovement, files: List<String>, ciRounds: Int, costUsd: Double, eval: String? = null): String = buildString {
             append("## Sorun\n").append(si.problem.ifBlank { si.title }).append("\n\n")
             append("## Kök neden\n").append(p.rootCause.ifBlank { "-" }).append("\n\n")
             append("## Yapılan değişiklik\n").append(p.summary.ifBlank { p.title }).append("\n\n")
             files.forEach { append("- `").append(it).append("`\n") }
             append("\n## Eklenen test\n`").append(p.files.first().path).append("`\n\n")
-            append("## Doğrulama\nCI geçti").append(if (ciRounds > 0) " ($ciRounds düzeltme turundan sonra)" else "").append(".\n\n")
+            if (!eval.isNullOrBlank()) append("## Golden Eval\n").append(eval).append("\n\n")
+            append("## Doğrulama\nCI geçti (`./gradlew testDebugUnitTest`, GoldenEvalSuiteTest dahil)")
+                .append(if (ciRounds > 0) " ($ciRounds düzeltme turundan sonra)" else "").append(".\n\n")
             append("## Maliyet\n$").append(String.format(Locale.US, "%.4f", costUsd)).append(" (öz-gelişim modeli)\n\n")
             append("_Coder öz-gelişim hattı tarafından açıldı. Otomatik merge edilmez; Ayarlar > Öz-Gelişim'den onaylanır._\n")
         }
     }
 
-    suspend fun run(si: SelfImprovement, costSoFar: () -> Double): Outcome {
+    suspend fun run(si: SelfImprovement, cluster: ErrorCluster, costSoFar: () -> Double): Outcome {
+        if (cluster.status != ClusterStatus.READY_FOR_PR) {
+            return Outcome(null, "Küme ${cluster.clusterKey} hazır değil; tek seans sinyaliyle PR açılmaz.")
+        }
         val base = gh.defaultBranch(repo)
+        val (evalPath, _) = EvalGate.fileFor(cluster.clusterKey)
+        val existingEval = runCatching { gh.readFileRaw(repo, evalPath, base) }.getOrNull()
+        val prepared = EvalGate.prepare(cluster, existingEval)
+            ?: return Outcome(null, "Golden eval geriledi veya yeni vaka geçmedi; PR açılmadı.")
         val files = si.files.map { it.trim().removePrefix("./") }.filter { !EvolutionGuard.isProtected(it) }.take(EvolutionGuard.MAX_PR_FILES)
         if (files.isEmpty()) return Outcome(null, "Aday dosyalar korumalı veya boş; PR açılmadı.")
         onStatus("Coder dosyaları okunuyor")
@@ -111,8 +120,10 @@ class SelfPrOrchestrator(private val agent: Agent, private val onStatus: (String
                 val (changes, _) = editor.changesFor(plan.files.map { it.path to false }, originals, state)
                 if (changes.isEmpty() && feedback == null) { cleanup(branch); return Outcome(null, "Değişiklik üretilmedi.") }
                 if (changes.isNotEmpty()) {
-                    gh.commitFiles(repo, branch, if (feedback == null) "evo: ${plan.title}" else "evo: CI düzeltmesi ($rounds)", changes, base)
-                    for (c in changes) originals[c.path] = c.content
+                    val evalChange = com.suarez.coder.tools.GitHub.FileChange(prepared.path, prepared.json, false)
+                    val withEval = if (changes.none { it.path == prepared.path }) changes + evalChange else changes
+                    gh.commitFiles(repo, branch, if (feedback == null) "evo: ${plan.title}" else "evo: CI düzeltmesi ($rounds)", withEval, base)
+                    for (c in withEval) if (c.content != null) originals[c.path] = c.content
                 }
                 // 4. CI on the branch.
                 onStatus("CI bekleniyor")
@@ -124,11 +135,15 @@ class SelfPrOrchestrator(private val agent: Agent, private val onStatus: (String
                     // 5. Pull request (never merged here).
                     val changed = plan.files.map { it.path }
                     val cost = costSoFar()
-                    val res = gh.createPullRequest(repo, "evo: ${plan.title}", branch, base, prBody(plan, si, changed, rounds, cost))
+                    val changedWithEval = (changed + prepared.path).distinct()
+                    val card = prepared.card
+                    val res = gh.createPullRequest(repo, "evo: ${plan.title}", branch, base, prBody(plan, si, changedWithEval, rounds, cost, card.line()))
                     val number = Regex("#(\\d+)").find(res)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                     val url = Regex("https://\\S+").find(res)?.value ?: "https://github.com/$repo/pulls"
-                    return Outcome(PendingSelfPr(number, plan.title, url, branch, plan.rootCause.ifBlank { si.problem }.take(400), changed,
-                        ciPassed = true, costUsd = cost, topic = si.topic, createdAt = System.currentTimeMillis()), "PR #$number açıldı.")
+                    return Outcome(PendingSelfPr(number, plan.title, url, branch, plan.rootCause.ifBlank { si.problem }.take(400), changedWithEval,
+                        ciPassed = true, costUsd = cost, topic = si.topic, createdAt = System.currentTimeMillis(),
+                        evalPassed = card.passed, evalTotal = card.total, evalAdded = card.added, evalRegressions = card.regressions,
+                        clusterKey = cluster.clusterKey), "PR #$number açıldı. ${card.line()}")
                 }
                 if (!failed || rounds >= EvolutionGuard.CI_FIX_ROUNDS) {
                     cleanup(branch)
