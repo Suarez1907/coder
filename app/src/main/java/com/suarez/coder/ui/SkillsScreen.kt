@@ -127,6 +127,9 @@ fun SkillsPage(vm: ChatViewModel) {
                             Text("/" + s.name, style = Mono.body, color = strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 3.dp)) {
                                 Tag(s.source.label)
+                                if (s.source == Skill.Source.AUTO_SYNTHESIZED) Tag("Otomatik Sentez")
+                                if (s.status == Skill.Status.DRAFT) Tag("Taslak")
+                                if (s.status == Skill.Status.REVIEW_REQUIRED) Tag("İnceleme Gerekli")
                                 s.workflow?.let { Tag("bulut: $it") }
                                 if (s.origin?.startsWith("evolution:") == true) Tag("öz-gelişim önerisi") else if (s.origin != null) Tag("GitHub")
                                 if (s.hasScripts) Tag("betik içerir")
@@ -134,6 +137,8 @@ fun SkillsPage(vm: ChatViewModel) {
                                 if (findings.isNotEmpty()) Box(Modifier.clickable { warnings = s.name to findings }) { Tag("uyarı ${findings.size}") }
                             }
                             Text(s.description, style = MaterialTheme.typography.bodySmall, color = weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.statLine(), style = Mono.tiny, color = weak)
+                            s.reviewNote?.let { Text(it, style = Mono.tiny, color = weak, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                         }
                         if (s.origin != null && !s.origin.startsWith("evolution:")) IconButton(onClick = { vm.updateSkill(s.name) }) { Icon(Icons.Outlined.Refresh, "Kaynaktan güncelle", tint = weak) }
                         if (s.source != Skill.Source.REPO) {

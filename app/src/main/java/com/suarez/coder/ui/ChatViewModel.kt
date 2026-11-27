@@ -89,6 +89,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var evoRules by mutableStateOf<List<com.suarez.coder.evolution.ScopedRule>>(emptyList())
     var evoCtg by mutableStateOf<List<com.suarez.coder.evolution.CostToGreenScorer.Score>>(emptyList())
         private set
+    var evoGeneral by mutableStateOf<List<com.suarez.coder.evolution.GeneralRule>>(emptyList())
+        private set
+    var evoAb by mutableStateOf<com.suarez.coder.evolution.StrategyAbOptimizer.Report?>(null)
+        private set
+    var evoSentinel by mutableStateOf<List<com.suarez.coder.evolution.SentinelReport>>(emptyList())
+        private set
     var evoLog by mutableStateOf<List<EvolutionLogEntry>>(emptyList())
         private set
     var evoStatus by mutableStateOf<String?>(null)
@@ -178,6 +184,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         activePlan = planStore.recover(currentSessionId)
         wire(agent)
         if (settings.evoEnabled) com.suarez.coder.evolution.WeeklyWorker.schedule(app, settings.evoWifiOnly)
+        if (settings.sentinelEnabled) com.suarez.coder.evolution.RepoSentinelWorker.schedule(app, settings.sentinelHours)
         viewModelScope.launch(Dispatchers.IO) {
             // New crashes and, after a self-update, a crash spike (rolled back at level 3).
             val cycle = com.suarez.coder.evolution.WeeklyCycle(app, settings, evoStore)
@@ -196,6 +203,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         a.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
         a.context.ruleStore = evoStore.scopedRules
         a.context.rulesEnabled = { settings.evoEnabled && settings.evoMemory }
+        a.context.generalRules = {
+            com.suarez.coder.evolution.CrossRepoKnowledge(java.io.File(evoStore.dir, "general_rules.json")).all()
+        }
         a.ciLessons = com.suarez.coder.evolution.CiLessonLearner(evoStore.scopedRules)
         a.tools.attachNotes = { repo, branch, files ->
             if (!settings.syncProjectNotes || a.isEvolutionSession) files
@@ -472,6 +482,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastRating = 0
         val sid = currentSessionId
         val a = agent
+        runCatching {
+            val ab = com.suarez.coder.evolution.StrategyAbOptimizer(java.io.File(evoStore.dir, "ab.json"), settings.architectModel)
+            if (settings.abEnabled) {
+                ab.ensureActive()
+                a.implementerTactic = ab.pin(sid).hint
+            } else a.implementerTactic = null
+        }
         val run = Run(sid, a, messages.toMutableList())
         runs[sid] = run
         val baseRepo = a.tools.normalizeRepo(repoNow())
@@ -970,6 +987,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (sid == currentSessionId) canRate = true
         viewModelScope.launch(Dispatchers.IO) {
             evoStore.addTrace(trace)
+            if (settings.abEnabled) runCatching {
+                val ab = com.suarez.coder.evolution.StrategyAbOptimizer(java.io.File(evoStore.dir, "ab.json"), settings.architectModel)
+                ab.record(sid, trace.totalCostUsd, trace.success)
+                val report = ab.evaluate()
+                if (report.rolledBack) evoStore.addLog(com.suarez.coder.evolution.EvoTier.INFO, "Strateji A/B geri alındı: ${report.note}")
+                if (report.promoted) evoStore.addLog(com.suarez.coder.evolution.EvoTier.INFO, "Strateji A/B terfi etti: ${report.note}")
+            }
             manager.learn(trace)
             lastTraceId = trace.id
             if (settings.evoEnabled) EvolutionWorker.schedule(getApplication(), settings.evoWifiOnly)
@@ -984,12 +1008,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val repo = settings.contextRepo.ifBlank { settings.defaultRepo }
             val rules = evoStore.scopedRules.all().filter { repo.isBlank() || it.repo.equals(repo, true) }
             val scores = evoStore.ctg.scores(null)
+            val general = com.suarez.coder.evolution.CrossRepoKnowledge(java.io.File(evoStore.dir, "general_rules.json")).all()
+            val ab = com.suarez.coder.evolution.StrategyAbOptimizer(java.io.File(evoStore.dir, "ab.json"), settings.architectModel).snapshot()
+            val sentinel = com.suarez.coder.evolution.SentinelReports.read(evoStore.dir)
             withContext(Dispatchers.Main) {
                 evoPending = p
                 evoLog = log
                 evoClusters = clusters
                 evoRules = rules
                 evoCtg = scores
+                evoGeneral = general
+                evoAb = ab
+                evoSentinel = sentinel
             }
         }
     }
@@ -1142,6 +1172,45 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         settings.pinnedImplementer = if (settings.pinnedImplementer == modelId) "" else modelId
         refreshSettings()
     }
+
+    fun evoApproveSkill(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            agent.tools.skills?.approve(name)
+            withContext(Dispatchers.Main) { refreshSkills(); refreshEvolution() }
+        }
+    }
+
+    fun evoResetAb() {
+        viewModelScope.launch(Dispatchers.IO) {
+            com.suarez.coder.evolution.StrategyAbOptimizer(java.io.File(evoStore.dir, "ab.json"), settings.architectModel).reset()
+            refreshEvolution()
+        }
+    }
+
+    fun setAbEnabled(on: Boolean) {
+        settings.abEnabled = on
+        if (on) com.suarez.coder.evolution.StrategyAbOptimizer(java.io.File(evoStore.dir, "ab.json"), settings.architectModel).ensureActive()
+        refreshSettings(); refreshEvolution()
+    }
+
+    fun setSentinelEnabled(on: Boolean) {
+        settings.sentinelEnabled = on
+        if (on) com.suarez.coder.evolution.RepoSentinelWorker.schedule(getApplication(), settings.sentinelHours)
+        else com.suarez.coder.evolution.RepoSentinelWorker.cancel(getApplication())
+        refreshSettings()
+    }
+
+    fun setSentinelHours(hours: Int) {
+        settings.sentinelHours = hours
+        if (settings.sentinelEnabled) com.suarez.coder.evolution.RepoSentinelWorker.schedule(getApplication(), settings.sentinelHours)
+        refreshSettings()
+    }
+
+    fun setSentinelRepos(text: String) { settings.sentinelRepos = text; refreshSettings() }
+
+    fun setSentinelBudget(usd: Double) { settings.sentinelBudget = usd; refreshSettings() }
+
+    fun setSentinelDraft(on: Boolean) { settings.sentinelDraft = on; refreshSettings() }
 
     /** Hides a merged PR card once its APK was offered. */
     fun evoDismiss() {

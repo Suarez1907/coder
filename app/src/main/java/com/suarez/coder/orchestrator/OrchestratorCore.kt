@@ -234,7 +234,8 @@ class OrchestratorPlanner(private val agent: Agent) {
             "Split the request into 2-6 small subtasks and call submit_task_plan once. Each subtask owns its files; never give the " +
             "same file to two subtasks unless one depends_on the other. Give every file precise step-by-step instructions, because " +
             "a cheaper editor implements each subtask seeing only its description, its files and short hand-offs. " +
-            "Add acceptance_criteria a reviewer can check from the diff. Set requires_ci only when CI must pass before continuing."
+            "Add acceptance_criteria a reviewer can check from the diff. Set requires_ci only when CI must pass before continuing." +
+            if (mode == OrchestratorMode.CONTRACT_DAG) " CONTRACT DAG: owned files must not overlap. Put shared signatures and data models in the task text. Use depends_on when one task needs another's result." else ""
     }
 
     /** Bounded like the normal architect: at most two calls, read-only, same prefix; may delegate to the executor. */

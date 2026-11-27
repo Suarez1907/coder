@@ -142,15 +142,16 @@ private fun MonoChips(labels: List<String>, selected: Int, onSelect: (Int) -> Un
 
 @Composable
 fun EvolutionPage(vm: ChatViewModel) {
-    LaunchedEffect(Unit) { vm.refreshEvolution() }
+    LaunchedEffect(Unit) { vm.refreshEvolution(); vm.refreshSkills() }
     var tab by remember { mutableStateOf(0) }
     Column(Modifier.fillMaxWidth().statusBarsPadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        MonoChips(listOf("Özet & PR", "Kümeler", "Hafıza", "Modeller (CTG)"), tab) { tab = it }
+        MonoChips(listOf("Özet & PR", "Kümeler", "Hafıza", "Modeller (CTG)", "Motor"), tab) { tab = it }
         when (tab) {
             0 -> SummaryTab(vm)
             1 -> ClustersTab(vm)
             2 -> MemoryTab(vm)
-            else -> ModelsTab(vm)
+            3 -> ModelsTab(vm)
+            else -> MotorTab(vm)
         }
     }
 }
@@ -204,36 +205,61 @@ private fun SummaryTab(vm: ChatViewModel) {
             MonoSwitch("Prosedür hafızası", "Tekrarlanan başarılı adım dizileri beceri adayı olur; sınavdan geçerse etkinleşir.", pm, enabled) { pm = it; s.procedureMining = it }
             MonoSwitch("Güncellemeden sonra ölçüm", "Uygulama güncellenince sabit değerlendirme seti bir kez çalışır (haftalık sınav bütçesinden).", eu, enabled) { eu = it; s.evalOnUpdate = it }
             HorizontalDivider(color = Mono2.line)
-            var model by remember { mutableStateOf(s.evoModel) }
-            val known = remember { vm.agent.openRouterModels() }
-            val valid = known.isEmpty() || model.trim().removePrefix("openrouter/") in known
-            OutlinedTextField(model, { model = it; s.evoModel = it.ifBlank { "nvidia/nemotron-3-ultra" } }, singleLine = true, textStyle = Mono.body,
-                label = { Text("Evrim modeli (OpenRouter)") }, modifier = Modifier.fillMaxWidth(), isError = !valid,
-                supportingText = {
-                    Text(when {
-                        !valid -> "Bu kimlik OpenRouter listesinde yok; aşağıdan seçin."
-                        known.isEmpty() -> "Liste yok: Sağlayıcılar > OpenRouter > Modelleri getir ile doğrulanır."
-                        else -> "Tüm evrim rolleri yalnızca bu modeli kullanır; sohbet modellerinden bağımsızdır."
-                    })
-                })
-            // Suggestions from the fetched OpenRouter list (Nemotron first), so a changed slug is one tap away.
-            val suggestions = remember(known) {
-                known.keys.filter { it.contains("nemotron", true) }.sortedByDescending { it.contains("ultra", true) }.take(6)
+            Text("Mimar (Kilitli): ${s.architectModel}", style = Mono.tiny, color = Mono2.strong)
+            Text("Evrim modeli Mimar seçimini okumaz ve yazmaz. Gemini, Sağlayıcılar'daki mevcut anahtarı kullanır.", style = Mono.tiny, color = Mono2.weak)
+            var provider by remember { mutableStateOf(s.evoProvider) }
+            MonoChips(listOf("OpenRouter", "Gemini"), if (provider == "GEMINI") 1 else 0) { i ->
+                provider = if (i == 1) "GEMINI" else "OPENROUTER"
+                s.evoProvider = provider
             }
-            if (suggestions.isNotEmpty() && (!valid || suggestions.none { it == model })) {
-                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    suggestions.forEach { id ->
-                        OutlinedButton(onClick = { model = id; s.evoModel = id }, border = BorderStroke(1.dp, Mono2.line)) {
-                            Text(id, style = Mono.tiny, color = Mono2.strong)
+            if (provider == "GEMINI") {
+                var gemini by remember { mutableStateOf(s.evoGeminiModel) }
+                OutlinedTextField(gemini, {
+                    gemini = it
+                    s.evoGeminiModel = it.ifBlank { "gemini-2.5-flash" }
+                }, singleLine = true, textStyle = Mono.body, label = { Text("Gemini modeli") }, modifier = Modifier.fillMaxWidth(),
+                    supportingText = {
+                        Text(if (s.geminiKey.isBlank()) "Gemini anahtarı yok. Sağlayıcılar ekranındaki anahtar alanını doldurun."
+                        else "Doğrudan Gemini API. Sohbet ve Mimar modellerinden ayrıdır.")
+                    })
+                val geminiIds = (s.modelCatalog.filter { it.startsWith("gemini/") }.map { it.removePrefix("gemini/") } +
+                    listOf("gemini-2.5-flash", "gemini-2.5-pro")).distinct()
+                MonoChips(geminiIds.take(12), geminiIds.indexOf(gemini)) { i ->
+                    val id = geminiIds[i]
+                    gemini = id
+                    s.evoGeminiModel = id
+                }
+            } else {
+                var model by remember { mutableStateOf(s.evoModel) }
+                val known = remember { vm.agent.openRouterModels().keys.sorted() }
+                var query by remember { mutableStateOf("") }
+                val valid = known.isEmpty() || model.trim().removePrefix("openrouter/") in known
+                OutlinedTextField(model, { model = it; s.evoModel = it.ifBlank { "nvidia/nemotron-3-ultra" } }, singleLine = true, textStyle = Mono.body,
+                    label = { Text("OpenRouter modeli") }, modifier = Modifier.fillMaxWidth(), isError = !valid,
+                    supportingText = {
+                        Text(when {
+                            !valid -> "Bu kimlik OpenRouter listesinde yok."
+                            known.isEmpty() -> "Liste yok: Sağlayıcılar > OpenRouter > Modelleri getir."
+                            else -> "Varsayılan nvidia/nemotron-3-ultra. Mimar modeli değişmez."
+                        })
+                    })
+                if (known.isNotEmpty()) {
+                    OutlinedTextField(query, { query = it }, singleLine = true, textStyle = Mono.small, label = { Text("Model ara") }, modifier = Modifier.fillMaxWidth())
+                    val shown = (listOf("nvidia/nemotron-3-ultra").filter { it in known } + known.filter { query.isBlank() || it.contains(query, true) })
+                        .distinct().take(12)
+                    if (shown.isNotEmpty()) {
+                        MonoChips(shown, shown.indexOf(model)) { i ->
+                            model = shown[i]
+                            s.evoModel = shown[i]
                         }
                     }
                 }
+                if (s.openrouterKey.isBlank()) Text("OpenRouter anahtarı gerekli (Sağlayıcılar & API).", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
             }
             var budget by remember { mutableStateOf(s.evoDailyBudget.toString()) }
             OutlinedTextField(budget, { budget = it; it.replace(',', '.').toDoubleOrNull()?.let { v -> s.evoDailyBudget = v } }, singleLine = true,
                 textStyle = Mono.body, label = { Text("Günlük evrim bütçesi (USD)") }, modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-            if (s.openrouterKey.isBlank()) Text("OpenRouter anahtarı gerekli (Sağlayıcılar & API).", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(onClick = { vm.evoRunNow() }, enabled = !vm.evoBusy, border = BorderStroke(1.dp, Mono2.line)) {
                     Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp), tint = Mono2.strong)
@@ -521,3 +547,71 @@ private fun CtgRow(vm: ChatViewModel, s: CostToGreenScorer.Score) {
         }
     }
 }
+
+@Composable
+private fun MotorTab(vm: ChatViewModel) {
+    val s = vm.settings
+    val drafts = vm.skills.filter { it.source == com.suarez.coder.skills.Skill.Source.AUTO_SYNTHESIZED && (it.status == com.suarez.coder.skills.Skill.Status.DRAFT || it.status == com.suarez.coder.skills.Skill.Status.REVIEW_REQUIRED) }
+    EvoCard {
+        CardTitle("Sentezlenen Skill Taslakları")
+        if (drafts.isEmpty()) Text("Taslak yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+        drafts.forEach { skill ->
+            Column {
+                Text("/${skill.name}", style = Mono.small, color = Mono2.strong)
+                Text(skill.description, style = Mono.tiny, color = Mono2.weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row {
+                    TextButton(onClick = { vm.evoApproveSkill(skill.name) }) { Text("Onayla", color = Mono2.strong) }
+                    TextButton(onClick = { vm.deleteSkill(skill.name); vm.refreshEvolution() }) { Text("Sil", color = Mono2.strong) }
+                }
+            }
+        }
+    }
+    EvoCard {
+        CardTitle("Çapraz Repo Genel Kuralları")
+        if (vm.evoGeneral.isEmpty()) Text("Terfi eden genel kural yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+        vm.evoGeneral.forEach { rule ->
+            Column {
+                Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
+                    Text(rule.techTag, style = Mono.tiny, color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
+                Text(rule.text, style = Mono.tiny, color = Mono2.strong, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+    EvoCard {
+        CardTitle("Strateji A/B ve Gölge Simülasyon")
+        Text("Kapalı başlar. Açılınca varyant önce github_list_symbols zorunluluğu uygular. Mimar modeli değişmez.", style = Mono.tiny, color = Mono2.weak)
+        MonoSwitch("Uygulayıcı A/B", "Kontrol %70, varyant %30. Oturum başında sabitlenir.", s.abEnabled) { vm.setAbEnabled(it) }
+        val ab = vm.evoAb
+        if (ab == null) Text("Kayıt yok.", style = Mono.tiny, color = Mono2.weak)
+        else {
+            Text("Kontrol ${ab.controlN} görev · CTG ${fmt(ab.controlCtg)}", style = Mono.tiny, color = Mono2.strong)
+            Text("Varyant ${ab.variantN} görev · CTG ${fmt(ab.variantCtg)}", style = Mono.tiny, color = Mono2.strong)
+            if (ab.note.isNotBlank()) Text(ab.note, style = Mono.tiny, color = Mono2.weak)
+        }
+        Text("Mimar (Kilitli): ${s.architectModel}", style = Mono.tiny, color = Mono2.weak)
+        OutlinedButton(onClick = { vm.evoResetAb() }, border = BorderStroke(1.dp, Mono2.line)) { Text("Sıfırla", color = Mono2.strong) }
+    }
+    EvoCard {
+        CardTitle("Proaktif Bekçi")
+        MonoSwitch("Bekçi", "Kapalı başlar. main dalına push veya merge yapmaz.", s.sentinelEnabled) { vm.setSentinelEnabled(it) }
+        MonoChips(listOf("6 saat", "12 saat", "24 saat"), when (s.sentinelHours) { 6 -> 0; 24 -> 2; else -> 1 }) {
+            vm.setSentinelHours(when (it) { 0 -> 6; 2 -> 24; else -> 12 })
+        }
+        MonoSwitch("Taslak düzeltme hazırla", "İzole sentinel dalında taslak PR. Merge edilmez.", s.sentinelDraft, s.sentinelEnabled) { vm.setSentinelDraft(it) }
+        var repos by remember { mutableStateOf(s.sentinelRepos) }
+        var budget by remember { mutableStateOf(s.sentinelBudget.toString()) }
+        OutlinedTextField(repos, { repos = it; vm.setSentinelRepos(it) }, textStyle = Mono.body, label = { Text("İzlenen repolar (en fazla 5)") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(budget, {
+            budget = it
+            it.replace(',', '.').toDoubleOrNull()?.let { v -> vm.setSentinelBudget(v) }
+        }, singleLine = true, textStyle = Mono.body, label = { Text("Günlük bütçe USD") }, modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+        if (vm.evoSentinel.isEmpty()) Text("Bekçi raporu yok.", style = Mono.tiny, color = Mono2.weak)
+        vm.evoSentinel.takeLast(5).asReversed().forEach { report ->
+            Text(report.text, style = Mono.tiny, color = Mono2.strong)
+        }
+    }
+}
+
+private fun fmt(v: Double) = String.format(java.util.Locale.US, "%.4f", v)

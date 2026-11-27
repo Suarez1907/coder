@@ -6,6 +6,7 @@ import com.suarez.coder.cost.Price
 import com.suarez.coder.cost.Pricing
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.orchestrator.ContractDagRunner
 import com.suarez.coder.orchestrator.MultiAgentOrchestrator
 import com.suarez.coder.orchestrator.OrchestratorHooks
 import com.suarez.coder.orchestrator.OrchestratorMode
@@ -465,6 +466,11 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             ?.let { com.suarez.coder.evolution.RouteContext.langShares(it) }?.also { langCache[repo] = it } ?: return null
         return com.suarez.coder.evolution.RouteContext.features(lastComplexity, files, langs)
     }
+    /**
+     * Implementer-only tactic for the current session (strategy A/B). Null on the control arm.
+     * Never applied to the architect prompt.
+     */
+    var implementerTactic: String? = null
     /** What the last run used, for its trace. */
     var lastArm: String? = null
     var lastRoute: String? = null
@@ -546,13 +552,18 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         if (budgetExceeded(history)) approveBudget(history)
         // Failed or interrupted subtasks go back to the queue (their error is kept as context for the retry).
         val plan = plan0.copy(tasks = plan0.tasks.map { if (it.status == TaskStatus.FAILED || it.status == TaskStatus.RUNNING) it.copy(status = TaskStatus.PENDING) else it })
+        val dag = if (plan.mode == OrchestratorMode.CONTRACT_DAG) ContractDagRunner(this, hooks) else null
         val runner = if (plan.mode == OrchestratorMode.FULL_MULTI_AGENT) MultiAgentOrchestrator(this, hooks) else null
-        val seq = if (runner == null) SequentialOrchestrator(this, hooks) else null
+        val seq = if (runner == null && dag == null) SequentialOrchestrator(this, hooks) else null
         try {
-            if (runner != null) runner.run(history, ui, plan) else seq!!.run(history, ui, plan)
+            when {
+                dag != null -> dag.run(history, ui, plan)
+                runner != null -> runner.run(history, ui, plan)
+                else -> seq!!.run(history, ui, plan)
+            }
         } catch (e: Throwable) {
             // Stopped or crashed mid-step: keep the plan resumable.
-            val last = runner?.current ?: seq?.current ?: plan
+            val last = dag?.current ?: runner?.current ?: seq?.current ?: plan
             if (!last.state.finished) hooks.save(last.copy(state = PlanState.PAUSED, note = "Durduruldu: ${e.message ?: e.javaClass.simpleName}".take(200),
                 tasks = last.tasks.map { if (it.status == TaskStatus.RUNNING) it.copy(status = TaskStatus.PENDING) else it }))
             throw e

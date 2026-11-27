@@ -172,6 +172,15 @@ class ToolRegistry(private val settings: Settings) {
         obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
             "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
             "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
+    private val listSymbols = ToolSpec("github_list_symbols",
+        "Bir dosyanın üst düzey sembollerini (class, interface, object, fun, def, func) satır ve zorunlu parametre sayısıyla listeler. " +
+            "İmza değişikliğinden önce çağır. Yerel SHA indeksinden okur; model çağrısı yapmaz.",
+        obj("repo" to str(repoDesc), "path" to str("Dosya yolu"), "ref" to str("Branch (boşsa varsayılan)"), required = listOf("path")))
+    private val findImpact = ToolSpec("github_find_impact",
+        "Bir dosyanın (ve isteğe bağlı bir sembolün) doğrudan çağıranlarını ve import edenlerini dosya:satır olarak listeler. " +
+            "İmza değiştirmeden önce çağır. Yerel grafikten okur; model çağrısı yapmaz.",
+        obj("repo" to str(repoDesc), "path" to str("Değişecek dosya"), "symbolName" to str("Sembol adı (boşsa dosyanın tüm üst düzey sembolleri)"),
+            "ref" to str("Branch (boşsa varsayılan)"), required = listOf("path")))
     private val findReferences = ToolSpec("find_references",
         "Bir sembolün (fonksiyon, sınıf, alan) TANIMINI ve onu KULLANAN tüm satırları dosya:satır olarak bulur. Bir imzayı, adı veya " +
             "davranışı değiştirmeden ÖNCE çağır ve etkilenen her çağıranı da güncelle.",
@@ -220,6 +229,8 @@ class ToolRegistry(private val settings: Settings) {
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
         if (settings.docsLookup) add(lookupDocs)
+        add(listSymbols)
+        add(findImpact)
         add(findReferences)
         add(readSymbol)
         if (writer && cloudOps != null) { add(codemod); add(mutationTest) }
@@ -230,6 +241,10 @@ class ToolRegistry(private val settings: Settings) {
     private val docs = DocsLookup(web) { settings.context7Key }
     /** Set by the Agent when it has app storage. */
     var semantic: com.suarez.coder.context.SemanticIndex? = null
+
+    /** Local import/call graph. Signature checks read it; they do not call a model. */
+    val dependencyGraph = com.suarez.coder.context.RepoDependencyGraph()
+    val symbolIndex = com.suarez.coder.context.SymbolIndexer(dependencyGraph)
 
     /** Runs before a commit with (path, before, after); throws ToolException to block it (self-review). */
     var preCommit: (suspend (repo: String, branch: String, changes: List<Triple<String, String?, String?>>) -> Unit)? = null
@@ -293,7 +308,7 @@ class ToolRegistry(private val settings: Settings) {
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_releases", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol")
+            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact", "github_list_symbols")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -384,7 +399,9 @@ class ToolRegistry(private val settings: Settings) {
                         if (d.escalate) throw ToolException("Salınım eşiği aşıldı (${f.path}: aynı bölge A-B-A). Bu yazma uygulanmadı; farklı bir yama kullan.")
                     }
                 }
-                preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
+                val staged = files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) }
+                assertSignatures(staged)
+                preCommit?.invoke(repo, branch, staged)
                 beforeWrite?.invoke(repo, branch)
                 val withNotes = attachNotes?.invoke(repo, branch, files) ?: files
                 github.commitFiles(repo, branch, req("message"), withNotes, base).also { r ->
@@ -402,6 +419,8 @@ class ToolRegistry(private val settings: Settings) {
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
             "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
+            "github_list_symbols" -> listSymbols(repo(), s("ref"), req("path"))
+            "github_find_impact" -> findImpact(repo(), s("ref"), req("path"), s("symbolName") ?: s("symbol"))
             "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
             "read_symbol" -> readSymbol(repo(), s("ref"), req("symbol").trim(), s("path"))
             "codemod" -> (cloudOps ?: throw ToolException("Codemod bu oturumda kullanılamıyor.")).codemod(repo(), req("branch"), s("base_branch"), a)
@@ -427,6 +446,39 @@ class ToolRegistry(private val settings: Settings) {
             (call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET")
         ) onRepoChanged()
         return result
+    }
+
+    private suspend fun listSymbols(repo: String, ref: String?, path: String): String {
+        refreshGraph(repo, ref)
+        return symbolIndex.format(path)
+    }
+
+    private suspend fun findImpact(repo: String, ref: String?, path: String, symbol: String?): String {
+        refreshGraph(repo, ref)
+        return dependencyGraph.formatImpact(path, symbol)
+    }
+
+    private suspend fun refreshGraph(repo: String, ref: String?) {
+        val tree = runCatching { github.treeEntries(repo, ref) }.getOrNull() ?: return
+        val wanted = tree.second.filter { e ->
+            val ext = e.path.substringAfterLast('.', "").lowercase()
+            ext in setOf("kt", "java", "py", "gd") && e.size in 1..200_000
+        }.take(100)
+        for (e in wanted) {
+            if (!dependencyGraph.needs(e.path, e.sha)) continue
+            val text = runCatching { github.readFileRaw(repo, e.path, ref) }.getOrNull() ?: continue
+            dependencyGraph.update(e.path, e.sha.ifBlank { text.hashCode().toString() }, text)
+        }
+        dependencyGraph.retain(wanted.map { it.path }.toSet())
+    }
+
+    /** Blocks the commit when a signature change leaves a caller stale. Cost is zero. */
+    private fun assertSignatures(changes: List<Triple<String, String?, String?>>) {
+        if (!dependencyGraph.hasIndex()) return
+        val tx = com.suarez.coder.harness.StagedTransaction()
+        changes.forEach { (path, before, after) -> tx.stage(path, before, after) }
+        val gate = com.suarez.coder.harness.PreFlightValidator.signatureGate(dependencyGraph, tx)
+        if (gate.blocked) throw ToolException(gate.repairPrompt())
     }
 
     /** Reads a file from the branch, falling back to the base branch and the default branch. */
@@ -475,7 +527,9 @@ class ToolRegistry(private val settings: Settings) {
             }
         }
         commitNotes.clear()
-        preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
+        val staged = changes.map { Triple(it.path, originals[it.path], it.content) }
+        assertSignatures(staged)
+        preCommit?.invoke(repo, branch, staged)
         beforeWrite?.invoke(repo, branch)
         val withNotes = attachNotes?.invoke(repo, branch, changes) ?: changes
         return github.commitFiles(repo, branch, message, withNotes, base).also { r ->

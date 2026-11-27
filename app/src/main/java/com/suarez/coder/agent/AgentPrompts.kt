@@ -57,6 +57,7 @@ internal class AgentPrompts(private val agent: Agent) {
         if (settings.docsLookup) appendLine("Library APIs: when you are not sure an API exists in the version the project uses (see DEPENDENCIES), " +
             "or a build error points at a library call, call lookup_docs before writing the code.")
         if (settings.semanticSearch && tools.semantic != null && settings.geminiKey.isNotBlank()) appendLine("Finding code: if you do not know which file holds something, use semantic_search (by meaning) before reading files one by one.")
+        agent.implementerTactic?.let { appendLine(it) }
     }
 
     /**
@@ -102,7 +103,9 @@ internal class AgentPrompts(private val agent: Agent) {
         =======
         new lines
         >>>>>>> REPLACE
-    """.trimIndent() + "\n" + section(PromptSections.EXECUTOR) + if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else ""
+    """.trimIndent() + "\n" + section(PromptSections.EXECUTOR) +
+        (if (settings.terseMode) "\nNo greetings, explanations, summaries or comments. Return only SEARCH/REPLACE blocks." else "") +
+        (agent.implementerTactic?.let { "\n$it" } ?: "")
 
     fun questionSystem() = buildString {
         append(header()).append('\n').append(tokenRules).append('\n')

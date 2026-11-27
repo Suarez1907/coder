@@ -49,9 +49,10 @@ class EvolutionEngine(
         }
         if (traces.isEmpty()) return "Değerlendirilecek seans yok."
         // A wrong model id would fail every run: say so once instead of using up sessions.
-        val known = Agent(settings).openRouterModels()
-        if (known.isNotEmpty() && settings.evoModel !in known) {
-            val msg = "Evrim modeli OpenRouter listesinde yok: ${settings.evoModel}. Öz-Gelişim ekranından geçerli bir model seçin."
+        val choice = EvolutionModel.fromFields(settings.architectModel, settings.evoProvider, settings.evoModel, settings.evoGeminiModel)
+        val known = if (choice.provider == EvolutionProvider.OPENROUTER) Agent(settings).openRouterModels() else emptyMap()
+        if (known.isNotEmpty() && choice.modelId !in known) {
+            val msg = "Evrim modeli OpenRouter listesinde yok: ${choice.modelId}. Öz-Gelişim ekranından geçerli bir model seçin."
             if (store.log().lastOrNull()?.summary != msg) store.addLog(EvoTier.INFO, msg)
             return msg
         }
@@ -66,9 +67,11 @@ class EvolutionEngine(
         val startedToday = store.spentToday()
         var spent = 0.0
         var logged = 0.0
+        val choice = EvolutionModel.fromFields(settings.architectModel, settings.evoProvider, settings.evoModel, settings.evoGeminiModel)
+        val evoRef = ModelRef(EvolutionModel.toProvider(choice), choice.modelId)
         val agent = Agent(settings).apply {
             isEvolutionSession = true
-            modelOverride = ModelRef(Provider.OPENROUTER, settings.evoModel)
+            modelOverride = evoRef
             budgetDeferred = true
             onUsage = { spent += it }
             beforeCall = { if (startedToday + spent >= budget) throw StopException("Günlük evrim bütçesi doldu.") }
@@ -77,6 +80,7 @@ class EvolutionEngine(
             store.addLog(tier, text, (spent - logged).coerceAtLeast(0.0), undo)
             logged = spent
         }
+        runCatching { absorbSuccess(t, agent, evoRef) }
         val tiers = buildSet {
             if (settings.evoMemory) add(EvoTier.MEMORY)
             if (settings.evoRouting) add(EvoTier.ROUTING)
@@ -103,7 +107,7 @@ class EvolutionEngine(
             onStatus("Seans değerlendiriliyor")
             val reflector = ReflectorEngine { system, user, maxOut ->
                 // JSON mode where supported, low reasoning (thinking tokens are billed and can crowd out the answer).
-                val m = agent.callModel(ArrayList(), listOf(ChatMessage.User(user)), agent.architectRef(), "reflector", system, emptyList(), silent,
+                val m = agent.callModel(ArrayList(), listOf(ChatMessage.User(user)), evoRef, "reflector", system, emptyList(), silent,
                     useCache = false, maxOut = maxOut, thinking = "low", jsonMode = true)
                 // Some reasoning models leave the JSON in their reasoning and the content empty.
                 if (ReflectorEngine.extractJson(m.text) == null && m.reasoning?.let { ReflectorEngine.extractJson(it) } != null) m.reasoning!! else m.text
@@ -136,8 +140,23 @@ class EvolutionEngine(
             // Tier 2: bounded routing parameters, undoable.
             if (EvoTier.ROUTING in tiers) {
                 store.routing.apply(report)?.let { (before, after) ->
-                    log(EvoTier.ROUTING, describe(before, after), undo = before.toJson().toString())
-                    produced++
+                    val thresholdChanged = before.complexityThreshold != after.complexityThreshold
+                    if (thresholdChanged) {
+                        val replay = ShadowReplayEngine(store.traces())
+                        val proposal = replay.projectThreshold(before.complexityThreshold, after.complexityThreshold)
+                        val base = replay.pool.map { it.totalCostUsd }.filter { it > 0 }.average().let { if (it.isNaN()) 0.01 else it }
+                        val verdict = replay.judge(proposal, base, 1.0)
+                        if (!verdict.accepted) {
+                            store.routing.undo(before.toJson().toString())
+                            log(EvoTier.INFO, "Gölge simülasyon (\$0) eşiği reddetti: ${verdict.reason}")
+                        } else {
+                            log(EvoTier.ROUTING, describe(before, after), undo = before.toJson().toString())
+                            produced++
+                        }
+                    } else {
+                        log(EvoTier.ROUTING, describe(before, after), undo = before.toJson().toString())
+                        produced++
+                    }
                 }
             }
             // Tier 3: self-PR only for a cluster that has crossed the threshold. One session is not enough.
@@ -189,6 +208,33 @@ class EvolutionEngine(
                 store.bump("reviewed")
             }
         }
+    }
+
+    /** Draft skill + cross-repo promotion. Uses the evolution model when budget remains; otherwise the deterministic text. */
+    private suspend fun absorbSuccess(t: SessionTrace, agent: Agent, evoRef: com.suarez.coder.llm.ModelRef) {
+        if (!t.success || t.ciFailureCount > 0) return
+        val choice = EvolutionModel.fromFields(settings.architectModel, settings.evoProvider, settings.evoModel, settings.evoGeminiModel)
+        val left = EvolutionModel.budgetLeft(store.spentToday(), settings.evoDailyBudget)
+        val keyOk = if (choice.provider == EvolutionProvider.GEMINI) settings.geminiKey.isNotBlank() else settings.openrouterKey.isNotBlank()
+        val llm: EvolutionCompleter? = if (!keyOk || left <= 0.0) null else EvolutionCompleter { system, user, maxUsd ->
+            val cap = minOf(maxUsd, left)
+            if (cap <= 0.0) return@EvolutionCompleter null
+            val local = ArrayList<ChatMessage>()
+            val reply = runCatching {
+                agent.callModel(local, listOf(ChatMessage.User(user.take(6_000))), evoRef, "evolution", system, emptyList(), silent,
+                    useCache = false, maxOut = 2_000, thinking = "low")
+            }.getOrNull() ?: return@EvolutionCompleter null
+            val cost = local.filterIsInstance<ChatMessage.UsageRecord>().sumOf { agent.costOf(it) }
+            if (cost > cap) null else EvolutionCompletion(reply.text, cost, choice.modelId, choice.provider)
+        }
+        val skills = com.suarez.coder.skills.SkillRepository(File(context.filesDir, "skills"), { null }, { _, _ -> null })
+        val draft = SkillSynthesizer.draftWithModel(store.traces(), llm, left)
+        if (draft != null && skills.globals().none { it.name == draft.name }) {
+            skills.saveGlobal(draft)
+            skills.setEnabled(draft.name, false)
+            store.addLog(EvoTier.MEMORY, "Skill taslağı: /${draft.name} (DRAFT, ${choice.provider.name}). Yetenekler veya Öz-Gelişim'den onaylanır.")
+        }
+        CrossRepoKnowledge(File(store.dir, "general_rules.json")).promoteWithModel(store.scopedRules.all(), llm, left)
     }
 
     /** At most one proposal a day; never over an existing skill; never one with unsafe content. */

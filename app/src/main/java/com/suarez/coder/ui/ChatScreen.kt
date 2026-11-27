@@ -651,6 +651,7 @@ private fun ControlSheet(vm: ChatViewModel, onOpenContext: () -> Unit) {
             com.suarez.coder.orchestrator.OrchestratorMode.OFF -> "Normal akış; ek çağrı yok."
             com.suarez.coder.orchestrator.OrchestratorMode.LIGHT_SEQUENTIAL -> "Mimar'a giden işler alt görevlere bölünür, sırayla ve ayrı commit'lerle yapılır."
             com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT -> "Tam mod daha pahalıdır: Planlayıcı + paralel işçiler + İnceleyici ayrı çağrılar yapar."
+            com.suarez.coder.orchestrator.OrchestratorMode.CONTRACT_DAG -> "Kontratlı DAG: kilitli Mimar tek kontrat yazar, kesişmeyen alt görevler paralel yürür, tek commit atılır."
         }, style = MaterialTheme.typography.bodySmall,
             color = if (orch == com.suarez.coder.orchestrator.OrchestratorMode.FULL_MULTI_AGENT) coder.cost else coder.muted)
 

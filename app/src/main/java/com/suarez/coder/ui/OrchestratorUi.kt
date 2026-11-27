@@ -116,8 +116,25 @@ fun PlanCard(vm: ChatViewModel, plan: OrchestratorPlan) {
                 }
                 if (plan.state == PlanState.RUNNING || plan.state == PlanState.AWAITING_APPROVAL || plan.state == PlanState.PAUSED) {
                     val frac = if (plan.tasks.isEmpty()) 0f else done.toFloat() / plan.tasks.size
+                    val bar = if (plan.mode == OrchestratorMode.CONTRACT_DAG) MaterialTheme.colorScheme.onSurface else coder.architect
                     Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(3.dp)).background(coder.border)) {
-                        Box(Modifier.fillMaxWidth(frac.coerceIn(0f, 1f)).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(coder.architect))
+                        Box(Modifier.fillMaxWidth(frac.coerceIn(0f, 1f)).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(bar))
+                    }
+                }
+                if (plan.mode == OrchestratorMode.CONTRACT_DAG) {
+                    plan.tasks.forEach { t ->
+                        val frac = when (t.status) {
+                            TaskStatus.DONE, TaskStatus.SKIPPED -> 1f
+                            TaskStatus.RUNNING -> 0.55f
+                            TaskStatus.FAILED -> 0.15f
+                            else -> 0.04f
+                        }
+                        Column {
+                            Text("${t.id} ${t.title}", style = Mono.tiny, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Box(Modifier.fillMaxWidth().height(2.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.outlineVariant)) {
+                                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(MaterialTheme.colorScheme.onSurface))
+                            }
+                        }
                     }
                 }
                 plan.note?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (plan.state == PlanState.PAUSED) coder.cost else coder.muted) }
