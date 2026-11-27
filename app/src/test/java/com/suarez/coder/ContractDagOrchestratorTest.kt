@@ -61,4 +61,21 @@ class ContractDagOrchestratorTest {
         assertEquals(architect, run.architectModelId)
         assertTrue(run.fellBack || run.mode == "sequential")
     }
+
+    @Test fun concurrencyOneNeverOverlapsAndACycleDoesNotCommit() = runBlocking {
+        val orch = ContractDagOrchestrator(architect, 1)
+        val parallel = orch.execute(listOf(node("a", "A.kt"), node("b", "B.kt"))) { n, _ ->
+            NodeResult.Ok(listOf(FileEdit(n.ownedFiles.single(), "", "x")))
+        }
+        assertTrue(parallel.waves.all { it.size == 1 })
+        assertTrue(parallel.maxInFlight <= 1)
+        assertEquals(architect, parallel.architectModelId)
+        val cycle = ContractDagOrchestrator(architect, 2)
+        val nodes = listOf(node("a", "A.kt", listOf("b")), node("b", "B.kt", listOf("a")))
+        assertTrue(cycle.lock(nodes).conflict)
+        val run = cycle.execute(nodes) { _, _ -> NodeResult.Ok(emptyList()) }
+        assertFalse(run.committed)
+        assertTrue(run.staged.edits().isEmpty())
+        assertEquals(architect, run.architectModelId)
+    }
 }

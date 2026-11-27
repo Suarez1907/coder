@@ -67,4 +67,32 @@ object SkillSynthesizer {
         if (skill.triggers.isEmpty() || !skill.body.contains("Kontrol listesi") || !skill.body.contains("Tuzaklar")) return null
         return skill
     }
+
+    /**
+     * Asks the selected evolution model for the skill text. A null completer, an empty budget, a failed call,
+     * an over-budget reply, or a privacy rejection falls back to [consider].
+     */
+    suspend fun draftWithModel(
+        traces: List<SessionTrace>,
+        llm: EvolutionCompleter?,
+        budgetUsd: Double,
+    ): Skill? {
+        val skill = consider(traces) ?: return null
+        if (llm == null || budgetUsd <= 0.0) return skill
+        val repos = traces.map { it.repo }.filter { it.isNotBlank() }.distinct()
+        val completion = runCatching {
+            llm.complete(
+                "Write a SKILL.md body in Turkish. Include the headings 'Kontrol listesi' and 'Tuzaklar'. No repository names, URLs, or tokens.",
+                skill.body,
+                budgetUsd,
+            )
+        }.getOrNull() ?: return skill
+        if (completion.costUsd > budgetUsd) return skill
+        val filtered = PrivacyFilter.apply(completion.text, repos)
+        if (filtered.rejected || filtered.text.isNullOrBlank()) return skill
+        val body = filtered.text
+        if (!body.contains("Kontrol listesi") || !body.contains("Tuzaklar")) return skill
+        val next = skill.copy(body = body)
+        return if (next.toMarkdown().toByteArray(Charsets.UTF_8).size > MAX_BYTES) skill else next
+    }
 }

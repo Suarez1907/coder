@@ -58,4 +58,31 @@ class RepoDependencyGraphTest {
         assertFalse(open.blocked)
         assertEquals(0.0, open.costUsd, 0.0)
     }
+
+    @Test fun deletedSymbolAndUnchangedSignature() {
+        val g = RepoDependencyGraph()
+        g.update("lib.kt", "1", lib)
+        g.update("app.kt", "1", app)
+        val removed = "package demo\nfun other(): Int = 1\n"
+        val tx = StagedTransaction()
+        tx.stage("lib.kt", lib, removed)
+        val gone = PreFlightValidator.signatureGate(g, tx)
+        assertTrue(gone.blocked)
+        assertTrue(gone.sites.any { it.symbol == "add" && it.reason == "silindi" })
+        val same = StagedTransaction()
+        same.stage("lib.kt", lib, lib.replace("a + b", "a + b + 0"))
+        assertFalse(PreFlightValidator.signatureGate(g, same).blocked)
+        assertTrue(g.update("Nope.md", "x", "# hi"))
+        assertTrue(g.symbol("Nope.md", "hi") == null)
+    }
+
+    @Test fun javaMethodIsIndexed() {
+        val g = RepoDependencyGraph()
+        val java = "package demo;\npublic class Box {\n    public int add(int a, int b) { return a + b; }\n}\n"
+        assertTrue(g.update("Box.java", "j", java))
+        assertEquals(2, g.symbol("Box.java", "add")!!.requiredParams)
+        val caller = "import demo.Box;\nclass Main { void m() { new Box().add(1, 2); } }\n"
+        g.update("Main.java", "m", caller)
+        assertTrue(g.impact("Box.java", "add").any { it.path == "Main.java" })
+    }
 }

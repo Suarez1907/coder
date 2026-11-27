@@ -1,5 +1,7 @@
 package com.suarez.coder
 
+import com.suarez.coder.evolution.EvolutionModel
+import com.suarez.coder.evolution.EvolutionProvider
 import com.suarez.coder.evolution.SessionTrace
 import com.suarez.coder.evolution.ShadowProposal
 import com.suarez.coder.evolution.ShadowReplayEngine
@@ -36,6 +38,26 @@ class ShadowReplayAndAbTest {
         val raised = engine.projectThreshold(1.0, 2.0)
         assertTrue(raised.regressions > 0)
         assertFalse(engine.judge(raised, 0.02, 1.0).accepted)
+        val flat = engine.judge(ShadowProposal("preflight", 1.0, 0.0, 0), 0.02, 0.8)
+        assertFalse(flat.accepted)
+        assertEquals(0.0, flat.costUsd, 0.0)
+    }
+
+    @Test fun providerSwitchDoesNotTouchArchitect() {
+        val architect = "gemini/gemini-2.5-pro"
+        val openRouter = EvolutionModel.fromFields(architect, "OPENROUTER", "nvidia/nemotron-3-ultra", "gemini-2.5-flash")
+        val gemini = EvolutionModel.select(architect, EvolutionProvider.GEMINI, "gemini-2.5-pro")
+        val switched = EvolutionModel.select(openRouter.architectModelId, EvolutionProvider.GEMINI, "gemini-2.5-flash")
+        assertEquals(architect, openRouter.architectModelId)
+        assertEquals(architect, gemini.architectModelId)
+        assertEquals(architect, switched.architectModelId)
+        assertEquals(EvolutionProvider.OPENROUTER, openRouter.provider)
+        assertEquals("nvidia/nemotron-3-ultra", openRouter.modelId)
+        assertEquals(EvolutionProvider.GEMINI, switched.provider)
+        assertEquals("gemini-2.5-flash", switched.modelId)
+        assertEquals(EvolutionProvider.GEMINI, gemini.provider)
+        assertFalse(EvolutionModel.canSpend(0.10, 0.10))
+        assertTrue(EvolutionModel.canSpend(0.04, 0.10))
     }
 
     @Test fun failingVariantRollsBackAndArchitectStays() {

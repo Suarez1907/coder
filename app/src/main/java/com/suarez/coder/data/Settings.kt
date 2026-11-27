@@ -349,10 +349,20 @@ class Settings(context: Context) {
     var evoSelfPr: Boolean
         get() = bool("evo_k3", true)
         set(v) = putBool("evo_k3", v)
-    /** OpenRouter id of the isolated evolution model (all evolution roles use only this). */
+    /** OPENROUTER or GEMINI. Independent of the chat provider and of the architect model. */
+    var evoProvider: String
+        get() = if (str("evo_provider", "OPENROUTER").equals("GEMINI", true)) "GEMINI" else "OPENROUTER"
+        set(v) = put("evo_provider", if (v.equals("GEMINI", true)) "GEMINI" else "OPENROUTER")
+
+    /** OpenRouter id of the isolated evolution model. Default is Nemotron. Does not write the architect model. */
     var evoModel: String
         get() = str("evo_model", "nvidia/nemotron-3-ultra")
-        set(v) = put("evo_model", v.trim().removePrefix("openrouter/"))
+        set(v) = put("evo_model", v.trim().removePrefix("openrouter/").ifBlank { "nvidia/nemotron-3-ultra" })
+
+    /** Gemini API model id used when [evoProvider] is GEMINI. Uses [geminiKey], not the architect model. */
+    var evoGeminiModel: String
+        get() = str("evo_gemini_model", "gemini-2.5-flash")
+        set(v) = put("evo_gemini_model", v.trim().removePrefix("gemini/").ifBlank { "gemini-2.5-flash" })
     var evoDailyBudget: Double
         get() = str("evo_budget", "0.15").toDoubleOrNull() ?: 0.15
         set(v) = put("evo_budget", v.coerceIn(0.0, 10.0).toString())

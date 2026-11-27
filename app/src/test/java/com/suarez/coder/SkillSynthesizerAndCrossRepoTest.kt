@@ -1,6 +1,9 @@
 package com.suarez.coder
 
 import com.suarez.coder.evolution.CrossRepoKnowledge
+import com.suarez.coder.evolution.EvolutionCompletion
+import com.suarez.coder.evolution.EvolutionCompleter
+import com.suarez.coder.evolution.EvolutionProvider
 import com.suarez.coder.evolution.GeneralRule
 import com.suarez.coder.evolution.PrivacyFilter
 import com.suarez.coder.evolution.RuleSource
@@ -9,6 +12,7 @@ import com.suarez.coder.evolution.SessionTrace
 import com.suarez.coder.evolution.SkillSynthesizer
 import com.suarez.coder.skills.Skill
 import com.suarez.coder.skills.SkillRepository
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -80,5 +84,46 @@ class SkillSynthesizerAndCrossRepoTest {
         val skipped = CrossRepoKnowledge.merge(repoRules.take(4), general, listOf("notes.txt"))
         assertEquals(4, skipped.size)
         assertTrue(skipped.none { it.repo == "*" })
+    }
+
+    @Test fun modelFailureAndLeakFallBackWithoutCallingTheNetwork() = runBlocking {
+        val traces = listOf(trace("a", "s1"), trace("b", "s2"))
+        var calls = 0
+        val down = EvolutionCompleter { _, _, _ ->
+            calls++
+            null
+        }
+        val fallback = SkillSynthesizer.draftWithModel(traces, down, 0.05)
+        assertEquals(1, calls)
+        assertNotNull(fallback)
+        assertTrue(fallback!!.body.contains("Kontrol listesi"))
+        assertFalse(fallback.body.contains("ghp_"))
+        var blocked = 0
+        val unused = EvolutionCompleter { _, _, _ -> blocked++; error("bütçe yok") }
+        val free = SkillSynthesizer.draftWithModel(traces, unused, 0.0)
+        assertEquals(0, blocked)
+        assertEquals(fallback.body, free!!.body)
+        val leaky = EvolutionCompleter { _, _, _ ->
+            EvolutionCompletion(
+                "Kontrol listesi\n1. SecretOrg/private-app ghp_abcdefghijklmnopqrstuvwxyz https://example.com/x\nTuzaklar\n- sızdı",
+                0.01, "gemini-2.5-flash", EvolutionProvider.GEMINI,
+            )
+        }
+        val masked = SkillSynthesizer.draftWithModel(traces, leaky, 0.05)!!
+        assertFalse(masked.body.contains("ghp_"))
+        assertFalse(masked.body.contains("https://"))
+        assertFalse(masked.body.contains("SecretOrg/private-app"))
+        val knowledge = CrossRepoKnowledge(File(tmp.newFolder("evo2"), "general.json"))
+        val rule = ScopedRule("r2", "SecretOrg/private-app", listOf("**/*.kt"), "kotlin kuralı yeterince uzun olmalı", RuleSource.CI_VERIFIED, preventedErrorCount = 2)
+        var seen = ""
+        val llm = EvolutionCompleter { _, user, _ ->
+            seen = user
+            EvolutionCompletion("SecretOrg/private-app ghp_zzzzzzzzzzzzzzzz için https://github.com/secret/repo kuralı yeterince uzun", 0.01, "openai/gpt", EvolutionProvider.OPENROUTER)
+        }
+        val promoted = knowledge.promoteWithModel(listOf(rule), llm, 0.02)
+        assertTrue(seen.isNotBlank())
+        assertTrue(promoted.isEmpty() || promoted.all { !it.text.contains("ghp_") && !it.text.contains("https://") && !it.text.contains("SecretOrg") })
+        val det = knowledge.promoteWithModel(listOf(rule), llm, 0.0)
+        assertTrue(det.isNotEmpty() || knowledge.all().isNotEmpty())
     }
 }

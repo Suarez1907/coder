@@ -42,6 +42,55 @@ class CrossRepoKnowledge(private val file: File) {
         return created
     }
 
+    /**
+     * One evolution-model paraphrase per eligible rule, charged against [budgetUsd].
+     * A miss, an over-budget reply, or a privacy rejection keeps the deterministic sentence.
+     * The mask runs on every model string before it is stored.
+     */
+    suspend fun promoteWithModel(rules: List<ScopedRule>, llm: EvolutionCompleter?, budgetUsd: Double): List<GeneralRule> {
+        val repos = rules.map { it.repo }.filter { it.isNotBlank() }.distinct()
+        var left = budgetUsd
+        val texts = ArrayList<Pair<ScopedRule, String>>()
+        for (rule in eligible(rules)) {
+            val base = deterministicAbstract(rule)
+            val raw = if (llm != null && left > 0.0) {
+                val completion = runCatching {
+                    llm.complete(
+                        "Rewrite this engineering rule without repository names, URLs, or secrets. One sentence.",
+                        base,
+                        left,
+                    )
+                }.getOrNull()
+                if (completion == null || completion.costUsd > left) base
+                else {
+                    left -= completion.costUsd
+                    completion.text
+                }
+            } else base
+            texts += rule to raw
+        }
+        return accept(rules, texts)
+    }
+
+    @Synchronized private fun accept(rules: List<ScopedRule>, texts: List<Pair<ScopedRule, String>>): List<GeneralRule> {
+        val repos = rules.map { it.repo }.filter { it.isNotBlank() }.distinct()
+        val kept = all().toMutableList()
+        val created = ArrayList<GeneralRule>()
+        for ((rule, raw) in texts) {
+            val tag = techOf(rule) ?: continue
+            val filtered = PrivacyFilter.apply(raw, repos)
+            val text = filtered.text ?: continue
+            if (filtered.rejected) continue
+            if (repos.any { it.isNotBlank() && text.contains(it, true) }) continue
+            if (kept.any { it.techTag == tag && it.text == text }) continue
+            val g = GeneralRule(UUID.randomUUID().toString().take(8), tag, text, repos.size.coerceAtLeast(1))
+            kept += g
+            created += g
+        }
+        if (created.isNotEmpty()) save(kept)
+        return created
+    }
+
     fun matching(paths: List<String>): List<GeneralRule> = all().filter { matches(it.techTag, paths) }
 
     private fun save(rules: List<GeneralRule>) {
