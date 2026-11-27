@@ -62,6 +62,7 @@ class Ledger(private val file: File) {
             "reviewer" -> "İnceleyici"
             "evolution" -> "Öz-gelişim"
             "router", "decision" -> "Yönlendirici"
+            "denetim", "audit", "pre_push_gate" -> "Denetim / Karar"
             "summary" -> "Özet"
             "cache" -> "Önbellek depolama"
             else -> "Ajan"

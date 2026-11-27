@@ -41,6 +41,12 @@ data class SessionTrace(
     val prop: String? = null,
     /** The run's tool steps, abstracted ("read:build.gradle.kts", "diff:*.kt", "ci"), for procedure mining. */
     val steps: List<String> = emptyList(),
+    val preflightBlocksCount: Int = 0,
+    val searchReplaceTier2Count: Int = 0,
+    val searchReplaceTier3Count: Int = 0,
+    val oscillationEscalationsCount: Int = 0,
+    val prePushGateWarningsCount: Int = 0,
+    val surgicalReadRatio: Double = 0.0,
 ) {
     /** Problems that are worth learning from (a clean, cheap run teaches nothing). */
     val troubleScore get() = diffErrorCount + ciFailureCount * 2 + escalations.size + (if (stopped) 1 else 0) + (if (userCorrection) 2 else 0)
@@ -54,6 +60,12 @@ data class SessionTrace(
         .put("rating", rating).put("arm", arm ?: JSONObject.NULL).put("base", baseSha ?: JSONObject.NULL)
         .put("branch", branch ?: JSONObject.NULL).put("route", route ?: JSONObject.NULL)
         .put("ctx", ctx?.let { JSONArray(it) } ?: JSONObject.NULL).put("prop", prop ?: JSONObject.NULL).put("steps", JSONArray(steps))
+        .put("pfBlocks", preflightBlocksCount)
+        .put("srTier2", searchReplaceTier2Count)
+        .put("srTier3", searchReplaceTier3Count)
+        .put("oscEsc", oscillationEscalationsCount)
+        .put("ppgWarn", prePushGateWarningsCount)
+        .put("surgRatio", surgicalReadRatio)
 
     companion object {
         private fun list(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -66,6 +78,12 @@ data class SessionTrace(
             o.optInt("rating"), o.optNullableString("arm"), o.optNullableString("base"), o.optNullableString("branch"), o.optNullableString("route"),
             o.optJSONArray("ctx")?.let { a -> (0 until a.length()).map { a.getDouble(it) } },
             o.optNullableString("prop"), list(o.optJSONArray("steps")),
+            o.optInt("pfBlocks", 0),
+            o.optInt("srTier2", 0),
+            o.optInt("srTier3", 0),
+            o.optInt("oscEsc", 0),
+            o.optInt("ppgWarn", 0),
+            o.optDouble("surgRatio", 0.0),
         )
     }
 }

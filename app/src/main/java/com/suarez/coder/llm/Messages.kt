@@ -42,7 +42,12 @@ sealed class ChatMessage {
     ) : ChatMessage()
 
     /** Shown in the chat only; never sent to the model. [detail] is expandable. */
-    data class Notice(val text: String, val detail: String? = null, val isError: Boolean = false) : ChatMessage()
+    data class Notice(
+        val text: String,
+        val detail: String? = null,
+        val isError: Boolean = false,
+        val kind: String = "info",
+    ) : ChatMessage()
 
     /** Cost bookkeeping for one API call (or cache storage); never sent to the model. */
     data class UsageRecord(
@@ -157,10 +162,12 @@ object MessageJson {
                 is ChatMessage.User -> {
                     o.put("t", "user").put("text", m.text)
                     if (m.images.isNotEmpty()) o.put("imgs", JSONArray(m.images))
+                    if (m.isHarnessInternal) o.put("hi", true)
                 }
                 is ChatMessage.Notice -> {
                     o.put("t", "notice").put("text", m.text).put("err", m.isError)
                     m.detail?.let { o.put("detail", it) }
+                    if (m.kind != "info") o.put("kind", m.kind)
                 }
                 is ChatMessage.Summary -> o.put("t", "summary").put("text", m.text)
                 is ChatMessage.RouteInfo -> {
@@ -198,8 +205,14 @@ object MessageJson {
     fun decode(o: JSONObject): ChatMessage {
             return when (o.getString("t")) {
                 "user" -> ChatMessage.User(o.getString("text"),
-                    o.optJSONArray("imgs")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList())
-                "notice" -> ChatMessage.Notice(o.getString("text"), if (o.has("detail")) o.getString("detail") else null, o.optBoolean("err"))
+                    o.optJSONArray("imgs")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList(),
+                    o.optBoolean("hi", false))
+                "notice" -> ChatMessage.Notice(
+                    o.getString("text"),
+                    if (o.has("detail")) o.getString("detail") else null,
+                    o.optBoolean("err"),
+                    o.optString("kind", "info"),
+                )
                 "summary" -> ChatMessage.Summary(o.getString("text"))
                 "route" -> ChatMessage.RouteInfo(o.getString("text"), if (o.has("detail")) o.getString("detail") else null,
                     o.optString("route"), o.optBoolean("ov"))

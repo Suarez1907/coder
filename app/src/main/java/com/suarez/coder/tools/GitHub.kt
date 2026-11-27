@@ -343,7 +343,9 @@ class GitHub(private val token: () -> String) {
 
     /**
      * Reads a file. Whole-file reads come without per-line numbers (they add ~9% tokens); ranged reads keep them,
-     * since the model needs them to ask for the next range.
+     * since the model needs them to ask for the next range. For files longer than ~250 lines the caller is expected to
+     * go through the symbol map and a range instead of reading the whole file; content stays in [ReadCache] either way,
+     * so a follow-up range read does not hit the API again.
      */
     suspend fun readFile(repo: String, path: String, ref: String?, startLine: Int?, endLine: Int?): String {
         val text = readFileRaw(repo, path, ref) ?: throw ToolException("Dosya bulunamadı: $path")
@@ -366,7 +368,11 @@ class GitHub(private val token: () -> String) {
         return sb.toString()
     }
 
-    /** Creates a single commit with all changes on [branch] (created from [baseBranch]/default if missing). */
+    /**
+     * Creates a single commit with all changes on [branch] (created from [baseBranch]/default if missing). Goes end to end
+     * through the Git Data API (blob -> tree -> commit -> ref), so every file of one call lands in exactly one commit: the
+     * repository is never seen half-written, and [ReadCache] is invalidated for the repo before returning.
+     */
     /**
      * Exam runs: every write must go to the one scratch branch; PRs, merges, deletions and workflow dispatches are refused.
      * Returns why a write is refused, or null when allowed.
@@ -406,6 +412,7 @@ class GitHub(private val token: () -> String) {
             }
             entries.put(e)
         }
+        // One tree, one commit, one ref update: either all files of this call land, or none of them do.
         val newTree = json("POST", "/repos/$repo/git/trees", JSONObject().put("base_tree", baseTree).put("tree", entries)).getString("sha")
         val commit = json("POST", "/repos/$repo/git/commits",
             JSONObject().put("message", message).put("tree", newTree).put("parents", JSONArray().put(headSha)))

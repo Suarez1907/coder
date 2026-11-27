@@ -9,7 +9,10 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 - `ci/AutoShip.kt`: yeşil build → sürüm eşleştirme; yalnızca kesin sha (veya aynı sürüm adı) eşleşir, taslak atlanır, eşleşme yoksa "yayınlanmadı" uyarısı — eski sürüm asla yeni build diye gösterilmez. `ToolRegistry.ciWait` uyarıyı `takeShipNotice()` ile saklar, `CiController` (evrim oturumu hariç) tek satır `ChatMessage.Notice` ekler.
 - `skills/SkillSync.kt`: commit edilen `.coder/skills/<ad>/...` yollarından yetenek adı çıkarır; `Agent.afterCommit` `SkillRepository.invalidate(repo)` + tek satır `Notice` ekler (katalog sonraki istekte tazelenir).
 - `agent/ReadOnlyMismatchRecovery.kt`: READ_ONLY faz kararı + yetki kurtarma (1 yükseltme → Uygulayıcı'ya devir).
-- `tools/ToolRegistry.kt`: `accessError` (readOnly/allowOps erişim kuralları); salt okunur `github_releases` (sürüm + asset bağlantıları, `GitHub.releaseSummary` saf biçimlendirici).
+- `context/SymbolIndexer.kt`: cerrahi okuma indeksleyici (`github_list_symbols`, `github_read_range`).
+- `harness/{SearchReplace,PreFlightValidator,StagedTransaction,OscillationBreaker}.kt`: diff v2, push öncesi sözdizimi ön kontrolü, atomik hazırlık ve salınım kesici.
+- `decision/PrePushGate.kt`: Jev push öncesi kapsam/risk denetimi (3sn fail-open).
+- `tools/ToolRegistry.kt`: `accessError` (readOnly/allowOps erişim kuralları); salt okunur `github_releases`, `github_list_symbols`, `github_read_range`.
 - `ui/ChatScreen.kt` + `ui/ChatViewModel.kt`: sohbet zaman çizelgesi (Notice satırları görünür).
 
 ## Kurallar
