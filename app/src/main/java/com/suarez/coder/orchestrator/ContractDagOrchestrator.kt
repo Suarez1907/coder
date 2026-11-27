@@ -171,11 +171,13 @@ class ContractDagOrchestrator(
         // CrossRepo twin: yalnızca tamamlanmış staged tx üzerinde, doğrulama adımında kırılma kontrolü.
         val crossRepoWarnings = if (pending.isEmpty()) try {
             crossRepoCheck?.invoke(tx).orEmpty()
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             listOf("CrossRepoContractTwin doğrulama hatası: ${t.message}")
         } else emptyList()
         if (crossRepoWarnings.isNotEmpty()) {
-            onNotice?.invoke("CrossRepoContractTwin: ${crossRepoWarnings.joinToString("; ").replace('\n', ' ')}")
+            onNotice?.invoke("CrossRepoContractTwin: ${crossRepoWarnings.joinToString("; ").replace('\n', ' ').replace('\r', ' ')}")
             errors += crossRepoWarnings
         }
         val validation = if (pending.isEmpty()) validate(tx) else listOf("tamamlanmadı")

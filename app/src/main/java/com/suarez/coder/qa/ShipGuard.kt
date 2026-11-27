@@ -14,6 +14,18 @@ class ShipGuard {
     @Volatile var mutationLogicDiff: Boolean = true
     @Volatile var userApproved: Boolean = false
 
+    /** Records a [DiffMutationTester.MutationRun] so Auto-Ship can block on surviving mutants in logic diffs. */
+    fun recordMutationRun(run: DiffMutationTester.MutationRun) {
+        mutationLogicDiff = run.mutatedCount > 0 || run.survived.isNotEmpty()
+        if (run.survived.isNotEmpty()) {
+            mutationSummary = run.summaryLine
+            mutationReport = run.formatSurvivorFeedback()
+        } else {
+            mutationSummary = null
+            mutationReport = null
+        }
+    }
+
     fun reset() {
         visual = null
         visualRounds = 0
@@ -73,5 +85,8 @@ class ShipGuard {
         /** Full survivor feedback (line + mutant detail) for the chat/PR body. */
         fun mutationDetail(report: String?): String =
             if (!blocksMutation(report)) "" else report.orEmpty().trim()
+
+        fun blocksMutationRun(run: DiffMutationTester.MutationRun?): Boolean =
+            run != null && run.blocksMerge
     }
 }
