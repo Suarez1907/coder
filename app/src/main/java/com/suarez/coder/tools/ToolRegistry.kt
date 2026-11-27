@@ -154,6 +154,13 @@ class ToolRegistry(private val settings: Settings) {
         "Sistem talimatındaki SKILLS listesinden bir yeteneğin tam talimatlarını yükler. Böyle bir işe başlamadan önce çağır.",
         obj("name" to str("Yetenek adı, ör. blender-3d"),
             "file" to str("İsteğe bağlı: yeteneğin yanında gelen bir dosya (ör. references/api.md)"), required = listOf("name")))
+    private val listBlueprints = ToolSpec("list_blueprints",
+        "Aktif repo (.coder/blueprints/) ve yerel BlueprintStore'daki parametrik blueprint kataloğunu listeler.",
+        obj())
+    private val applyBlueprint = ToolSpec("apply_blueprint",
+        "Bir blueprint'i verilen slot parametreleriyle atomik olarak uygular.",
+        obj("name" to str("Blueprint adı"), "params_json" to str("Slot parametreleri JSON nesnesi"),
+            "branch" to str("Hedef branch (boşsa varsayılan)"), required = listOf("name", "params_json")))
 
     /** Runs a script in GitHub Actions (Blender headless or Python/FFmpeg); no local computer is involved. */
     private val runCloudTool = ToolSpec("run_cloud_tool",
@@ -248,11 +255,12 @@ class ToolRegistry(private val settings: Settings) {
             required = listOf("query")))
 
     val specs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
-        createBranch, createPr, mergePr, releases, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool) + extraSpecs(true)
+        createBranch, createPr, mergePr, releases, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill,
+        listBlueprints, applyBlueprint, runCloudTool) + extraSpecs(true)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
     val readOnlySpecs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors,
-        githubApi, submitPlan, loadSkill) + extraSpecs(false)
+        githubApi, submitPlan, loadSkill, listBlueprints) + extraSpecs(false)
 
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
@@ -297,6 +305,7 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Set by the Agent when it has app storage (not for evolution agents). */
     var skills: com.suarez.coder.skills.SkillRepository? = null
+    var blueprintStore: com.suarez.coder.skills.BlueprintStore? = null
     var cloud: com.suarez.coder.cloudtools.CloudToolRunner? = null
 
     /** The repository skills belong to: the pinned context repo, else the default repo. */
@@ -333,7 +342,7 @@ class ToolRegistry(private val settings: Settings) {
         /** Tools that change files, run things or change the repository. */
         val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
             "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool", "codemod", "mutation_test",
-            "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file")
+            "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file", "apply_blueprint")
 
         /** Hard guard for planning roles: only read tools, and github_api only with GET. */
         fun architectDenied(name: String, method: String?): String? {
@@ -345,7 +354,7 @@ class ToolRegistry(private val settings: Settings) {
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_releases", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "fetch_live_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact", "github_list_symbols")
+            "list_blueprints", "lookup_docs", "fetch_live_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact", "github_list_symbols")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -469,6 +478,8 @@ class ToolRegistry(private val settings: Settings) {
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
+            "list_blueprints" -> listBlueprints(activeRepo())
+            "apply_blueprint" -> applyBlueprint(repo(), req("name"), req("params_json"), s("branch"))
             "lookup_docs", "fetch_live_docs" -> liveDocs().fetch(req("library"), req("topic"), s("version"), settings.context7Key, settings.docsLlmsUrl.ifBlank { null })
             "github_list_symbols" -> listSymbols(repo(), s("ref"), req("path"))
             "github_find_impact" -> findImpact(repo(), s("ref"), req("path"), s("symbolName") ?: s("symbol"))
@@ -493,7 +504,7 @@ class ToolRegistry(private val settings: Settings) {
             else -> if (call.name.startsWith("mcp_")) mcpCall(call.name, s("arguments_json")) else throw ToolException("Bilinmeyen araç: ${call.name}")
         }
         if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request",
-                "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file") ||
+                "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file", "apply_blueprint") ||
             (call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET")
         ) onRepoChanged()
         return result
@@ -529,6 +540,60 @@ class ToolRegistry(private val settings: Settings) {
                 else dependencyGraph.update(e.path, e.after.hashCode().toString(), e.after)
             }
         } + "\n" + outcome.summary
+    }
+
+    private suspend fun listBlueprints(repo: String): String {
+        val repoBps = loadRepoBlueprints(repo)
+        val localBps = blueprintStore?.list().orEmpty()
+        return com.suarez.coder.skills.BlueprintEngine.catalogSummary(repoBps, localBps)
+    }
+
+    private suspend fun loadRepoBlueprints(repo: String): List<com.suarez.coder.skills.Blueprint> {
+        if (repo.isBlank()) return emptyList()
+        val entries = runCatching { filteredTree(repo, null) }.getOrNull().orEmpty()
+            .filter { it.path.startsWith(".coder/blueprints/") && it.path.endsWith(".json") }
+        return entries.mapNotNull { e ->
+            val raw = runCatching { github.readFileRaw(repo, e.path, null) }.getOrNull() ?: return@mapNotNull null
+            runCatching { com.suarez.coder.skills.BlueprintEngine.fromJson(raw) }.getOrNull()
+        }
+    }
+
+    private suspend fun applyBlueprint(repo: String, name: String, paramsJson: String, branch: String?): String {
+        val bp = blueprintStore?.get(name)
+            ?: loadRepoBlueprints(repo).firstOrNull { it.name == name }
+            ?: throw ToolException("Blueprint bulunamadı: $name")
+        val paramsObj = runCatching { JSONObject(paramsJson) }.getOrElse {
+            throw ToolException("params_json geçerli bir JSON nesnesi değil")
+        }
+        val params = paramsObj.keys().asSequence().associateWith { paramsObj.optString(it, "") }
+        val targetBranch = branch ?: runCatching { github.defaultBranch(repo) }.getOrDefault("main")
+
+        val currentFiles = HashMap<String, String?>()
+        for (tpl in bp.fileTemplates) {
+            var resolvedPath = tpl.pathTemplate
+            params.forEach { (k, v) -> resolvedPath = resolvedPath.replace("{{$k}}", v) }
+            if (!resolvedPath.contains("{{")) {
+                currentFiles[resolvedPath] = runCatching { readForEdit(repo, targetBranch, null, resolvedPath) }.getOrNull()
+            }
+        }
+
+        val tx = com.suarez.coder.harness.StagedTransaction()
+        val outcome = com.suarez.coder.skills.BlueprintEngine.apply(bp, params, currentFiles, tx)
+        if (!outcome.ok) throw ToolException(outcome.error ?: "Blueprint uygulanamadı: $name")
+
+        val files = tx.staged().map { (path, _, after) ->
+            GitHub.FileChange(path, after, delete = after == null)
+        }
+        val staged = tx.staged()
+        commitNotes.clear()
+        assertSignatures(staged)
+        assertSecurity(staged)
+        preCommit?.invoke(repo, targetBranch, staged)
+        beforeWrite?.invoke(repo, targetBranch)
+        val withNotes = attachNotes?.invoke(repo, targetBranch, files) ?: files
+        return github.commitFiles(repo, targetBranch, "chore(blueprint): apply $name", withNotes, null).also { r ->
+            afterCommit?.invoke(repo, r, files.map { it.path }, files.count { currentFiles[it.path] == null })
+        } + staleNote(files.map { it.path }) + notes()
     }
 
     private suspend fun listSymbols(repo: String, ref: String?, path: String): String {
