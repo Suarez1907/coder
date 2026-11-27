@@ -11,6 +11,7 @@ class ShipGuard {
     @Volatile var criticRounds: Int = 0
     @Volatile var mutationReport: String? = null
     @Volatile var mutationSummary: String? = null
+    @Volatile var mutationLogicDiff: Boolean = true
     @Volatile var userApproved: Boolean = false
 
     fun reset() {
@@ -20,6 +21,7 @@ class ShipGuard {
         criticRounds = 0
         mutationReport = null
         mutationSummary = null
+        mutationLogicDiff = true
         userApproved = false
     }
 
@@ -42,8 +44,8 @@ class ShipGuard {
             else "Bulgular bir düzeltme turuna aktarılabilir (${criticRounds}/${AdversarialCritic.MAX_FIX_ROUNDS})."
             return "Karşıt eleştirmen: BLOCK_CRITICAL. Otomatik merge durdu. $tail\n$sites"
         }
-        if (mutationOn && blocksMutation(mutationReport)) {
-            val summary = mutationSummary?.takeIf { it.isNotBlank() } ?: "Diff mutasyon testi: hayatta kalan mutant var."
+        if (mutationOn && mutationLogicDiff && blocksMutation(mutationReport)) {
+            val summary = mutationSummary?.takeIf { it.isNotBlank() } ?: "Diff mutasyon testi: mantık değişikliğinde hayatta kalan mutant var."
             return "$summary Otomatik merge durdu.\n$mutationReport"
         }
         return null

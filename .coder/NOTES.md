@@ -12,7 +12,7 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 - `tools/ToolRegistry.kt`: `accessError` (readOnly/allowOps erişim kuralları); salt okunur `github_releases` (sürüm + asset bağlantıları, `GitHub.releaseSummary` saf biçimlendirici).
 - `ui/ChatScreen.kt` + `ui/ChatViewModel.kt`: sohbet zaman çizelgesi (Notice satırları görünür).
 - Faz 5B: `SpeculativeSwarmEngine` (Implementer turnuvası), `DiffMutationTester` (Auto-Ship öncesi mutasyon kapısı), `BlueprintEngine` (parametrik replay), `MetaHarnessCompressor` (öz-sıkıştıran evrim), `CrossRepoContractTwin` (çoklu-repo kontrat ağı).
-- Faz 5B bağlantısı: `ShipGuard.hold(mutationOn=true)` Auto-Ship öncesi `DiffMutationTester` raporunu kapıya alır (`blocksMutation`); `ContractDagOrchestrator` `speculativeSwarm`/`crossRepoCheck`/`onNotice` kancaları Mimar kilidi bozulmadan bağlanır.
+- Faz 5B bağlantısı: `ShipGuard.hold(mutationOn=true, mutationLogicDiff)` Auto-Ship öncesi `DiffMutationTester` raporunu kapıya alır (`blocksMutation`); `ContractDagOrchestrator` `speculativeSwarm`/`crossRepoCheck`/`onNotice` kancaları Mimar kilidi bozulmadan bağlanır; `MetaHarnessCompressor` `EvolutionWorker` haftalık evrim döngüsüne tool-log sıkıştırması sağlar.
 
 ## Kurallar
 - Faz 5B kırmızı çizgileri: Mimar modeli kesin kilitli (`retarget` yasak), sıfır otomatik self-merge (`ShipGuard` mutasyon/QA kapısı), çoklu-repo değişiklikleri yalnızca onaylı izole PR ile.

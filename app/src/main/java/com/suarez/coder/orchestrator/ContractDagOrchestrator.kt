@@ -156,9 +156,10 @@ class ContractDagOrchestrator(
                 errors += "sıralı moda düşüldü"
             }
         }
+        // CrossRepo twin: yalnızca tamamlanmış staged tx üzerinde kırılma kontrolü.
         val crossRepoWarnings = if (pending.isEmpty()) crossRepoCheck?.invoke(tx).orEmpty() else emptyList()
         if (crossRepoWarnings.isNotEmpty()) {
-            onNotice?.invoke("CrossRepoContractTwin: ${crossRepoWarnings.joinToString("; ")}")
+            onNotice?.invoke("CrossRepoContractTwin: ${crossRepoWarnings.joinToString("; ").replace('\n', ' ')}")
             errors += crossRepoWarnings
         }
         val validation = if (pending.isEmpty()) validate(tx) else listOf("tamamlanmadı")
