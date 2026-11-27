@@ -14,12 +14,12 @@ class ShipGuard {
     @Volatile var mutationLogicDiff: Boolean = true
     @Volatile var userApproved: Boolean = false
 
-    /** Records a [DiffMutationTester.MutationRun] so Auto-Ship can block on surviving mutants in logic diffs. */
-    fun recordMutationRun(run: DiffMutationTester.MutationRun) {
-        mutationLogicDiff = run.mutatedCount > 0 || run.survived.isNotEmpty()
-        if (run.survived.isNotEmpty()) {
+    /** Records a [DiffMutationTester.MutationEvaluation] so Auto-Ship can block on surviving mutants in logic diffs. */
+    fun recordMutationRun(run: DiffMutationTester.MutationEvaluation) {
+        mutationLogicDiff = !run.skipped && (run.totalMutants > 0 || run.survivingMutants.isNotEmpty())
+        if (!run.allowMerge && run.survivingMutants.isNotEmpty()) {
             mutationSummary = run.summaryLine
-            mutationReport = run.formatSurvivorFeedback()
+            mutationReport = run.recoveryPrompt.ifBlank { run.summaryLine }
         } else {
             mutationSummary = null
             mutationReport = null
@@ -86,7 +86,7 @@ class ShipGuard {
         fun mutationDetail(report: String?): String =
             if (!blocksMutation(report)) "" else report.orEmpty().trim()
 
-        fun blocksMutationRun(run: DiffMutationTester.MutationRun?): Boolean =
-            run != null && run.blocksMerge
+        fun blocksMutationRun(run: DiffMutationTester.MutationEvaluation?): Boolean =
+            run != null && !run.allowMerge
     }
 }

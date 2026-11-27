@@ -107,7 +107,7 @@ class SpeculativeSwarmEngine(
 
         val ranked = if (scorer != null) {
             eligible.sortedByDescending { model ->
-                scorer.statsFor(model, domain)?.selectionScore ?: 0.5
+                scorer.score(model, domain).efficiencyScore
             }
         } else {
             eligible
@@ -225,10 +225,17 @@ class SpeculativeSwarmEngine(
 
         if (winner != null) {
             costToGreenScorer?.record(
-                model = winner.arm.model,
+                modelId = winner.arm.model,
                 domain = domain,
-                costUsd = winner.actualCostUsd,
-                green = true,
+                sample = CostToGreenScorer.Sample(
+                    success = true,
+                    firstPassCi = true,
+                    firstPassCostUsd = winner.actualCostUsd,
+                    healCostUsd = 0.0,
+                    preflightBlocks = 0,
+                    oscillated = false,
+                ),
+                baselineModelId = lockedArchitectModel,
             )
         }
 

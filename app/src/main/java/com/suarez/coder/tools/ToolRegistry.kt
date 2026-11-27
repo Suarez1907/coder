@@ -581,10 +581,10 @@ class ToolRegistry(private val settings: Settings) {
         val outcome = com.suarez.coder.skills.BlueprintEngine.apply(bp, params, currentFiles, tx)
         if (!outcome.ok) throw ToolException(outcome.error ?: "Blueprint uygulanamadı: $name")
 
-        val files = tx.staged().map { (path, _, after) ->
+        val staged = tx.edits().map { Triple(it.path, it.before, it.after) }
+        val files = staged.map { (path, _, after) ->
             GitHub.FileChange(path, after, delete = after == null)
         }
-        val staged = tx.staged()
         commitNotes.clear()
         assertSignatures(staged)
         assertSecurity(staged)

@@ -76,22 +76,21 @@ class WeeklyWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             val store = EvolutionEngine.storeFor(ctx)
             if (settings.metaHarnessMode == "weekly") {
                 val compressor = MetaHarnessCompressor()
-                val spentToday = store.spentSince(WeeklyCycle.dayStart(System.currentTimeMillis()))
-                if (compressor.isWithinBudget(settings.metaHarnessBudgetUsd, settings.evolutionDailyBudget, spentToday, 0.05)) {
-                    store.log(EvoTier.INFO, "Meta-Harness haftalık sıkıştırma kontrolü hazır (autoMerge=false).")
+                val spentToday = store.spentSince(EvolutionGuard.dayStart(System.currentTimeMillis()))
+                if (compressor.isWithinBudget(settings.metaHarnessBudgetUsd, settings.evoDailyBudget, spentToday, 0.05)) {
+                    store.addLog(EvoTier.INFO, "Meta-Harness haftalık sıkıştırma kontrolü hazır (autoMerge=false).")
                 }
             }
-            val recentTraces = store.recentTraces(50)
-            val blueprintEngine = com.suarez.coder.skills.BlueprintEngine()
+            val recentTraces = store.traces().takeLast(50)
             recentTraces.filter { it.success && it.codeModFilesTouched >= 3 }.forEach { trace ->
-                val draft = blueprintEngine.distillCandidate(
-                    name = "auto-${trace.id.take(8)}",
-                    steps = trace.steps,
-                    touchedFiles = trace.codeModFilesTouched,
-                    singlePassGreen = trace.ciFailureCount == 0 && trace.diffErrorCount == 0,
+                val draft = com.suarez.coder.skills.BlueprintEngine.distillCandidate(
+                    repo = trace.repo,
+                    taskTitle = trace.request.take(60).ifBlank { "auto-${trace.id.take(8)}" },
+                    changedFiles = emptyMap(),
+                    firstPassGreen = trace.ciFailureCount == 0 && trace.diffErrorCount == 0,
                 )
                 if (draft != null) {
-                    store.log(EvoTier.INFO, "Taslak blueprint önerisi oluşturuldu: ${draft.name}")
+                    store.addLog(EvoTier.INFO, "Taslak blueprint önerisi oluşturuldu: ${draft.name}")
                 }
             }
         }
