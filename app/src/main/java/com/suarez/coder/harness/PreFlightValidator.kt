@@ -1,5 +1,6 @@
 package com.suarez.coder.harness
 
+import com.suarez.coder.context.CrossRepoContractTwin
 import com.suarez.coder.context.RepoDependencyGraph
 import com.suarez.coder.context.SymbolParse
 import org.json.JSONArray
@@ -57,6 +58,14 @@ object PreFlightValidator {
 
     /** $0 secret and manifest scan. A blocked report stops the push. No model call. */
     fun securityGate(tx: StagedTransaction): SecurityScanner.Report = SecurityScanner.scan(tx)
+
+    /** Çoklu-repo kontrat kırılmalarını [Finding] olarak döndürür. */
+    fun checkContracts(sourceRepo: String, tx: StagedTransaction, twin: CrossRepoContractTwin?): List<Finding> {
+        if (twin == null) return emptyList()
+        return twin.detectBreakages(sourceRepo, tx).map { breakage ->
+            Finding("cross_repo_contract", breakage.formatNotice())
+        }
+    }
 
     private fun callerFixed(after: String, old: RepoDependencyGraph.Symbol, neu: RepoDependencyGraph.Symbol?): Boolean {
         if (neu == null) return !SymbolParse.mentions(after, old.name)
