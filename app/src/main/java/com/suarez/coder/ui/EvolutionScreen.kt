@@ -142,15 +142,16 @@ private fun MonoChips(labels: List<String>, selected: Int, onSelect: (Int) -> Un
 
 @Composable
 fun EvolutionPage(vm: ChatViewModel) {
-    LaunchedEffect(Unit) { vm.refreshEvolution() }
+    LaunchedEffect(Unit) { vm.refreshEvolution(); vm.refreshSkills() }
     var tab by remember { mutableStateOf(0) }
     Column(Modifier.fillMaxWidth().statusBarsPadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        MonoChips(listOf("Özet & PR", "Kümeler", "Hafıza", "Modeller (CTG)"), tab) { tab = it }
+        MonoChips(listOf("Özet & PR", "Kümeler", "Hafıza", "Modeller (CTG)", "Motor"), tab) { tab = it }
         when (tab) {
             0 -> SummaryTab(vm)
             1 -> ClustersTab(vm)
             2 -> MemoryTab(vm)
-            else -> ModelsTab(vm)
+            3 -> ModelsTab(vm)
+            else -> MotorTab(vm)
         }
     }
 }
@@ -521,3 +522,70 @@ private fun CtgRow(vm: ChatViewModel, s: CostToGreenScorer.Score) {
         }
     }
 }
+
+@Composable
+private fun MotorTab(vm: ChatViewModel) {
+    val s = vm.settings
+    val drafts = vm.skills.filter { it.source == com.suarez.coder.skills.Skill.Source.AUTO_SYNTHESIZED && (it.status == com.suarez.coder.skills.Skill.Status.DRAFT || it.status == com.suarez.coder.skills.Skill.Status.REVIEW_REQUIRED) }
+    EvoCard {
+        CardTitle("Sentezlenen Skill Taslakları")
+        if (drafts.isEmpty()) Text("Taslak yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+        drafts.forEach { skill ->
+            Column {
+                Text("/${skill.name}", style = Mono.small, color = Mono2.strong)
+                Text(skill.description, style = Mono.tiny, color = Mono2.weak, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row {
+                    TextButton(onClick = { vm.evoApproveSkill(skill.name) }) { Text("Onayla", color = Mono2.strong) }
+                    TextButton(onClick = { vm.deleteSkill(skill.name); vm.refreshEvolution() }) { Text("Sil", color = Mono2.strong) }
+                }
+            }
+        }
+    }
+    EvoCard {
+        CardTitle("Çapraz Repo Genel Kuralları")
+        if (vm.evoGeneral.isEmpty()) Text("Terfi eden genel kural yok.", style = MaterialTheme.typography.bodySmall, color = Mono2.weak)
+        vm.evoGeneral.forEach { rule ->
+            Column {
+                Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
+                    Text(rule.techTag, style = Mono.tiny, color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
+                Text(rule.text, style = Mono.tiny, color = Mono2.strong, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+    EvoCard {
+        CardTitle("Strateji A/B ve Gölge Simülasyon")
+        MonoSwitch("Uygulayıcı A/B", "Mimar modeli değişmez. Kontrol %70, varyant %30.", s.abEnabled) { vm.setAbEnabled(it) }
+        val ab = vm.evoAb
+        if (ab == null) Text("Kayıt yok.", style = Mono.tiny, color = Mono2.weak)
+        else {
+            Text("Kontrol ${ab.controlN} görev · CTG ${fmt(ab.controlCtg)}", style = Mono.tiny, color = Mono2.strong)
+            Text("Varyant ${ab.variantN} görev · CTG ${fmt(ab.variantCtg)}", style = Mono.tiny, color = Mono2.strong)
+            if (ab.note.isNotBlank()) Text(ab.note, style = Mono.tiny, color = Mono2.weak)
+        }
+        Text("Mimar (Kilitli): ${s.architectModel}", style = Mono.tiny, color = Mono2.weak)
+        OutlinedButton(onClick = { vm.evoResetAb() }, border = BorderStroke(1.dp, Mono2.line)) { Text("Sıfırla", color = Mono2.strong) }
+    }
+    EvoCard {
+        CardTitle("Proaktif Bekçi")
+        MonoSwitch("Bekçi", "Kapalı başlar. main dalına push veya merge yapmaz.", s.sentinelEnabled) { vm.setSentinelEnabled(it) }
+        MonoChips(listOf("6 saat", "12 saat", "24 saat"), when (s.sentinelHours) { 6 -> 0; 24 -> 2; else -> 1 }) {
+            vm.setSentinelHours(when (it) { 0 -> 6; 2 -> 24; else -> 12 })
+        }
+        MonoSwitch("Taslak düzeltme hazırla", "İzole sentinel dalında taslak PR. Merge edilmez.", s.sentinelDraft, s.sentinelEnabled) { vm.setSentinelDraft(it) }
+        var repos by remember { mutableStateOf(s.sentinelRepos) }
+        var budget by remember { mutableStateOf(s.sentinelBudget.toString()) }
+        OutlinedTextField(repos, { repos = it; vm.setSentinelRepos(it) }, textStyle = Mono.body, label = { Text("İzlenen repolar (en fazla 5)") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(budget, {
+            budget = it
+            it.replace(',', '.').toDoubleOrNull()?.let { v -> vm.setSentinelBudget(v) }
+        }, singleLine = true, textStyle = Mono.body, label = { Text("Günlük bütçe USD") }, modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+        if (vm.evoSentinel.isEmpty()) Text("Bekçi raporu yok.", style = Mono.tiny, color = Mono2.weak)
+        vm.evoSentinel.takeLast(5).asReversed().forEach { report ->
+            Text(report.text, style = Mono.tiny, color = Mono2.strong)
+        }
+    }
+}
+
+private fun fmt(v: Double) = String.format(java.util.Locale.US, "%.4f", v)

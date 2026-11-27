@@ -30,6 +30,8 @@ class SkillRepository(
         const val REPO_TTL_MS = 10 * 60_000L
         const val MAX_REPO_SKILLS = 20
         const val MAX_BODY_CHARS = 30_000
+        const val REVIEW_STREAK = 2
+        const val REVIEW_NOTE = "Art arda CI başarısızlığı. Kontrol listesini daralt, son hatayı tuzaklara ekle, tetikleyicileri gözden geçir."
         private val REPO_SKILL = Regex("^\\.coder/skills/([^/]+)/SKILL\\.md$", RegexOption.IGNORE_CASE)
 
         fun repoSkillPaths(paths: List<String>): List<Pair<String, String>> =
@@ -38,7 +40,7 @@ class SkillRepository(
 
         /** The catalog block for the system prompt (sorted, one line per skill), or null when there is none. */
         fun catalogText(skills: List<Skill>): String? {
-            val active = skills.filter { it.enabled }.sortedBy { it.name }
+            val active = skills.filter { it.enabled && it.status != Skill.Status.DRAFT }.sortedBy { it.name }
             if (active.isEmpty()) return null
             return "SKILLS (call load_skill(name) to get the full instructions before doing such work):\n" +
                 active.joinToString("\n") { it.catalogLine() }
@@ -75,6 +77,9 @@ class SkillRepository(
                 val res = o.optJSONObject("res")?.let { r -> r.keys().asSequence().associateWith { r.optString(it) } }.orEmpty()
                 SkillParser.parse(o.optString("md"), o.optString("name"), src)?.copy(
                     enabled = true, origin = o.optString("origin").ifBlank { null }, resources = res,
+                    status = runCatching { Skill.Status.valueOf(o.optString("status")) }.getOrDefault(Skill.Status.ACTIVE),
+                    usageCount = o.optInt("usage"), ciSuccesses = o.optInt("ciOk"), ciAttempts = o.optInt("ciN"),
+                    consecutiveCiFailures = o.optInt("streak"), reviewNote = o.optString("review").ifBlank { null },
                 )?.let { it.copy(enabled = it.name !in disabled) }
             }
         }
@@ -90,6 +95,9 @@ class SkillRepository(
     private fun writeGlobals(list: List<Skill>) = globalFile.writeText(JSONArray().also { a ->
         list.sortedBy { it.name }.forEach { s ->
             val o = JSONObject().put("name", s.name).put("src", s.source.name).put("md", s.toMarkdown())
+                .put("status", s.status.name).put("usage", s.usageCount).put("ciOk", s.ciSuccesses).put("ciN", s.ciAttempts)
+                .put("streak", s.consecutiveCiFailures)
+            s.reviewNote?.let { o.put("review", it) }
             s.origin?.let { o.put("origin", it) }
             if (s.resources.isNotEmpty()) o.put("res", JSONObject().also { r -> s.resources.forEach { (k, v) -> r.put(k, v) } })
             a.put(o)
@@ -134,6 +142,39 @@ class SkillRepository(
         val d = disabled().toMutableSet()
         if (enabled) d -= name else d += name
         disabledFile.writeText(JSONArray(d.sorted()).toString())
+        if (enabled) {
+            val next = globals().map {
+                if (it.name == name && it.status != Skill.Status.ACTIVE) it.copy(status = Skill.Status.ACTIVE, reviewNote = null, consecutiveCiFailures = 0) else it
+            }
+            if (next != globals()) writeGlobals(next)
+        }
+    }
+
+    /** Turns a synthesized draft into an active skill. One tap from Yetenekler or Öz-Gelişim. */
+    @Synchronized fun approve(name: String) = setEnabled(name, true)
+
+    /**
+     * Counts a load and, when [ciSuccess] is passed later via [recordOutcome], the post-load CI rate.
+     * Two CI failures in a row flag the skill for review. The architect model is not involved.
+     */
+    @Synchronized fun recordOutcome(name: String, ciSuccess: Boolean): Skill? {
+        val cur = globals().firstOrNull { it.name == name } ?: return null
+        val streak = if (ciSuccess) 0 else cur.consecutiveCiFailures + 1
+        val review = streak >= REVIEW_STREAK
+        val next = cur.copy(
+            usageCount = cur.usageCount + 1,
+            ciAttempts = cur.ciAttempts + 1,
+            ciSuccesses = cur.ciSuccesses + if (ciSuccess) 1 else 0,
+            consecutiveCiFailures = streak,
+            status = when {
+                review -> Skill.Status.REVIEW_REQUIRED
+                cur.status == Skill.Status.REVIEW_REQUIRED && ciSuccess -> Skill.Status.ACTIVE
+                else -> cur.status
+            },
+            reviewNote = if (review) REVIEW_NOTE else if (ciSuccess) null else cur.reviewNote,
+        )
+        writeGlobals(globals().map { if (it.name == name) next else it })
+        return next
     }
 
     // ---- Repo skills ----
@@ -174,7 +215,8 @@ class SkillRepository(
         val n = SkillParser.normalizeName(name.removePrefix("/"))
         val all = all(repo)
         val s = all.firstOrNull { it.name == n } ?: return "Yetenek bulunamadı: $name. Mevcut: ${all.filter { it.enabled }.joinToString { it.name }}"
-        if (!s.enabled) return "Yetenek kapalı: ${s.name} (Ayarlar > Yetenekler'den açılabilir)."
+        if (!s.enabled || s.status == Skill.Status.DRAFT) return "Yetenek kapalı: ${s.name} (Ayarlar > Yetenekler'den açılabilir)."
+        if (file.isNullOrBlank() && s.source != Skill.Source.REPO) bumpUsage(s.name)
         if (!file.isNullOrBlank()) {
             val key = file.trim().removePrefix("./").trim('/')
             return s.resources[key]?.let { "FILE ${s.name}/$key\n\n$it" }
@@ -184,4 +226,9 @@ class SkillRepository(
     }
 
     @Synchronized fun global(name: String): Skill? = globals().firstOrNull { it.name == name }
+
+    @Synchronized private fun bumpUsage(name: String) {
+        val next = globals().map { if (it.name == name) it.copy(usageCount = it.usageCount + 1) else it }
+        if (next.any { it.name == name }) writeGlobals(next)
+    }
 }

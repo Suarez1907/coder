@@ -659,6 +659,32 @@ class Settings(context: Context) {
         get() = prefs.getInt("orch_max_parallel", 2).coerceIn(1, 3)
         set(v) = prefs.edit().putInt("orch_max_parallel", v.coerceIn(1, 3)).apply()
 
+    /** Implementer A/B tactics. Off until the user enables them; the architect model is not an arm. */
+    var abEnabled: Boolean
+        get() = bool("ab_enabled", false)
+        set(v) = putBool("ab_enabled", v)
+
+    /** Proactive sentinel. Off by default. */
+    var sentinelEnabled: Boolean
+        get() = bool("sentinel_enabled", false)
+        set(v) = putBool("sentinel_enabled", v)
+
+    var sentinelHours: Int
+        get() = prefs.getInt("sentinel_hours", 12).let { if (it == 6 || it == 24) it else 12 }
+        set(v) = prefs.edit().putInt("sentinel_hours", if (v == 6 || v == 24) v else 12).apply()
+
+    var sentinelRepos: String
+        get() = str("sentinel_repos")
+        set(v) = put("sentinel_repos", v.lines().map { it.trim() }.filter { it.isNotBlank() }.distinct().take(5).joinToString("\n"))
+
+    var sentinelBudget: Double
+        get() = str("sentinel_budget", "0.10").toDoubleOrNull()?.coerceIn(0.0, 5.0) ?: 0.10
+        set(v) = put("sentinel_budget", v.coerceIn(0.0, 5.0).toString())
+
+    var sentinelDraft: Boolean
+        get() = bool("sentinel_draft", false)
+        set(v) = putBool("sentinel_draft", v)
+
     var orchMaxReviewRounds: Int
         get() = prefs.getInt("orch_max_review_rounds", 2).coerceIn(0, 5)
         set(v) = prefs.edit().putInt("orch_max_review_rounds", v.coerceIn(0, 5)).apply()

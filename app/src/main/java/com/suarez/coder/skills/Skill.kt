@@ -16,11 +16,29 @@ data class Skill(
     val origin: String? = null,
     /** Files bundled next to SKILL.md (references, scripts, templates), by path relative to the skill folder. */
     val resources: Map<String, String> = emptyMap(),
+    val status: Status = Status.ACTIVE,
+    val usageCount: Int = 0,
+    val ciSuccesses: Int = 0,
+    val ciAttempts: Int = 0,
+    val consecutiveCiFailures: Int = 0,
+    val reviewNote: String? = null,
 ) {
     /** Bundled scripts expect a computer; Coder can only run them in GitHub Actions. */
     val hasScripts get() = resources.keys.any { SkillImporter.isScript(it) }
 
-    enum class Source(val label: String) { BUILTIN("yerleşik"), GLOBAL("genel"), REPO("repo") }
+    /** Null until a load has been followed by a CI result. */
+    val postLoadCiSuccessRate: Double? get() = if (ciAttempts == 0) null else ciSuccesses.toDouble() / ciAttempts
+
+    fun statLine(): String {
+        val ci = postLoadCiSuccessRate?.let { " · %${(it * 100).toInt()} CI" }.orEmpty()
+        return "$usageCount kullanım$ci"
+    }
+
+    enum class Source(val label: String) {
+        BUILTIN("yerleşik"), GLOBAL("genel"), REPO("repo"), AUTO_SYNTHESIZED("otomatik sentez"),
+    }
+
+    enum class Status { ACTIVE, DRAFT, REVIEW_REQUIRED }
 
     /** One catalog line: kept short and stable so the system prompt prefix stays cacheable. */
     fun catalogLine() = "- $name: ${description.lines().first().take(140)}"

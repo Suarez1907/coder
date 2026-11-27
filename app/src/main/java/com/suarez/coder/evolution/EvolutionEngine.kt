@@ -77,6 +77,7 @@ class EvolutionEngine(
             store.addLog(tier, text, (spent - logged).coerceAtLeast(0.0), undo)
             logged = spent
         }
+        runCatching { absorbSuccess(t) }
         val tiers = buildSet {
             if (settings.evoMemory) add(EvoTier.MEMORY)
             if (settings.evoRouting) add(EvoTier.ROUTING)
@@ -136,8 +137,23 @@ class EvolutionEngine(
             // Tier 2: bounded routing parameters, undoable.
             if (EvoTier.ROUTING in tiers) {
                 store.routing.apply(report)?.let { (before, after) ->
-                    log(EvoTier.ROUTING, describe(before, after), undo = before.toJson().toString())
-                    produced++
+                    val thresholdChanged = before.complexityThreshold != after.complexityThreshold
+                    if (thresholdChanged) {
+                        val replay = ShadowReplayEngine(store.traces())
+                        val proposal = replay.projectThreshold(before.complexityThreshold, after.complexityThreshold)
+                        val base = replay.pool.map { it.totalCostUsd }.filter { it > 0 }.average().let { if (it.isNaN()) 0.01 else it }
+                        val verdict = replay.judge(proposal, base, 1.0)
+                        if (!verdict.accepted) {
+                            store.routing.undo(before.toJson().toString())
+                            log(EvoTier.INFO, "Gölge simülasyon (\$0) eşiği reddetti: ${verdict.reason}")
+                        } else {
+                            log(EvoTier.ROUTING, describe(before, after), undo = before.toJson().toString())
+                            produced++
+                        }
+                    } else {
+                        log(EvoTier.ROUTING, describe(before, after), undo = before.toJson().toString())
+                        produced++
+                    }
                 }
             }
             // Tier 3: self-PR only for a cluster that has crossed the threshold. One session is not enough.
@@ -189,6 +205,19 @@ class EvolutionEngine(
                 store.bump("reviewed")
             }
         }
+    }
+
+    /** Draft skill + cross-repo promotion for a green session. No architect call and no extra model. */
+    private fun absorbSuccess(t: SessionTrace) {
+        if (!t.success || t.ciFailureCount > 0) return
+        val skills = com.suarez.coder.skills.SkillRepository(File(context.filesDir, "skills"), { null }, { _, _ -> null })
+        val draft = SkillSynthesizer.consider(store.traces())
+        if (draft != null && skills.globals().none { it.name == draft.name }) {
+            skills.saveGlobal(draft)
+            skills.setEnabled(draft.name, false)
+            store.addLog(EvoTier.MEMORY, "Skill taslağı: /${draft.name} (DRAFT). Yetenekler veya Öz-Gelişim'den onaylanır.")
+        }
+        CrossRepoKnowledge(File(store.dir, "general_rules.json")).promote(store.scopedRules.all())
     }
 
     /** At most one proposal a day; never over an existing skill; never one with unsafe content. */

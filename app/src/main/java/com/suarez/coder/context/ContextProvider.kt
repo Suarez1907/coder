@@ -1,6 +1,8 @@
 package com.suarez.coder.context
 
 import com.suarez.coder.data.Settings
+import com.suarez.coder.evolution.CrossRepoKnowledge
+import com.suarez.coder.evolution.GeneralRule
 import com.suarez.coder.evolution.ScopedRuleStore
 import com.suarez.coder.tools.GitHub
 
@@ -22,15 +24,17 @@ class ContextProvider(private val settings: Settings, private val github: GitHub
     /** Conditional lessons. Injected per turn, never into the stable system prefix. */
     var ruleStore: ScopedRuleStore? = null
     var rulesEnabled: () -> Boolean = { false }
+    /** Promoted cross-repo rules. Injected only into this turn's context, never the stable prefix. */
+    var generalRules: () -> List<GeneralRule> = { emptyList() }
 
     /**
      * Rules whose globs match [paths], as a compact block for the volatile task context.
      * Returns null when memory is off or nothing matches. Matching rules get a hit.
      */
     fun matchingRulesBlock(repo: String, paths: List<String>, now: Long = System.currentTimeMillis()): String? {
-        if (!rulesEnabled()) return null
-        val store = ruleStore ?: return null
-        return ScopedRuleStore.formatBlock(store.selectForTurn(repo, paths, now))
+        val repoRules = if (rulesEnabled()) ruleStore?.selectForTurn(repo, paths, now).orEmpty() else emptyList()
+        val merged = CrossRepoKnowledge.merge(repoRules, generalRules(), paths)
+        return ScopedRuleStore.formatBlock(merged)
     }
 
     /** Exam runs: a different repo/branch and no pinned files, without touching the user's settings. */

@@ -442,12 +442,14 @@ class GitHub(private val token: () -> String) {
         return "Branch oluşturuldu: $branch ($base üzerinden, ${sha.take(7)})"
     }
 
-    suspend fun createPullRequest(repo: String, title: String, head: String, base: String?, body: String?): String {
+    suspend fun createPullRequest(repo: String, title: String, head: String, base: String?, body: String?, draft: Boolean = false): String {
         checkWrite(repo, null)
         val b = base?.takeIf { it.isNotBlank() } ?: defaultBranch(repo)
-        val pr = json("POST", "/repos/$repo/pulls",
-            JSONObject().put("title", title).put("head", head).put("base", b).put("body", body ?: ""))
-        return "PR #${pr.getInt("number")} açıldı: ${pr.getString("html_url")}"
+        val payload = JSONObject().put("title", title).put("head", head).put("base", b).put("body", body ?: "")
+        if (draft) payload.put("draft", true)
+        val pr = json("POST", "/repos/$repo/pulls", payload)
+        val kind = if (draft || pr.optBoolean("draft")) "Taslak PR" else "PR"
+        return "$kind #${pr.getInt("number")} açıldı: ${pr.getString("html_url")}"
     }
 
     suspend fun mergePullRequest(repo: String, number: Int, method: String, title: String?): String {

@@ -1,5 +1,7 @@
 package com.suarez.coder.harness
 
+import com.suarez.coder.context.RepoDependencyGraph
+import com.suarez.coder.context.SymbolParse
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -10,6 +12,55 @@ import org.json.JSONObject
  */
 object PreFlightValidator {
     data class Finding(val rule: String, val detail: String)
+
+    data class StaleCaller(val path: String, val line: Int, val symbol: String, val reason: String) {
+        val site get() = "$path:$line"
+    }
+
+    /** Local signature check. [costUsd] is always 0: no model and no network. */
+    data class SignatureGate(val blocked: Boolean, val sites: List<StaleCaller>, val costUsd: Double = 0.0) {
+        fun repairPrompt(): String = if (!blocked) "" else buildString {
+            append("Çapraz imza kontrolü push'u durdurdu. Güncellenmemiş çağıranlar:\n")
+            sites.forEach { append(it.site).append(' ').append(it.symbol).append(" (").append(it.reason).append(")\n") }
+            append("Aynı turda bu dosya:satırları da güncelle.")
+        }
+    }
+
+    /**
+     * When a staged edit deletes a function/class or changes its required parameter count, every caller the graph
+     * already knows must be in the same transaction and must no longer use the old signature.
+     */
+    fun signatureGate(graph: RepoDependencyGraph, tx: StagedTransaction): SignatureGate {
+        val sites = ArrayList<StaleCaller>()
+        for (edit in tx.edits()) {
+            if (edit.after == null && edit.before == null) continue
+            val before = SymbolParse.symbols(edit.path, edit.before.orEmpty())
+            val after = SymbolParse.symbols(edit.path, edit.after.orEmpty()).associateBy { it.name }
+            for (old in before) {
+                val neu = after[old.name]
+                val reason = when {
+                    neu == null -> "silindi"
+                    old.requiredParams >= 0 && neu.requiredParams >= 0 && old.requiredParams != neu.requiredParams -> "parametre"
+                    else -> null
+                } ?: continue
+                for (hit in graph.impact(edit.path, old.name)) {
+                    if (hit.path == edit.path) continue
+                    val staged = tx.edit(hit.path)
+                    val updated = staged != null && staged.before != staged.after && callerFixed(staged.after.orEmpty(), old, neu)
+                    if (!updated) sites += StaleCaller(hit.path, hit.line, old.name, reason)
+                }
+            }
+        }
+        val distinct = sites.distinctBy { "${it.path}:${it.line}:${it.symbol}:${it.reason}" }
+        return SignatureGate(distinct.isNotEmpty(), distinct, 0.0)
+    }
+
+    private fun callerFixed(after: String, old: RepoDependencyGraph.Symbol, neu: RepoDependencyGraph.Symbol?): Boolean {
+        if (neu == null) return !SymbolParse.mentions(after, old.name)
+        val counts = SymbolParse.callArgCounts(after, old.name)
+        if (counts.isEmpty()) return !SymbolParse.mentions(after, old.name)
+        return counts.all { it >= neu.requiredParams }
+    }
 
     fun check(path: String, before: String?, after: String?): List<Finding> {
         if (after == null) return emptyList()

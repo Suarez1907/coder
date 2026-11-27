@@ -7,7 +7,9 @@ enum class OrchestratorMode(val label: String, val short: String) {
     /** The architect plans a task list; subtasks run one by one, each committed, with short hand-offs. */
     LIGHT_SEQUENTIAL("Hafif Sıralı", "Sıralı"),
     /** Planner → isolated workers (parallel when files do not overlap) → reviewer; one commit at the end. */
-    FULL_MULTI_AGENT("Tam", "Tam");
+    FULL_MULTI_AGENT("Tam", "Tam"),
+    /** One locked architect contract, then parallel implementers whose files do not overlap, then one commit. */
+    CONTRACT_DAG("Kontratlı DAG", "DAG");
 
     companion object {
         fun of(name: String?) = entries.firstOrNull { it.name == name } ?: OFF
