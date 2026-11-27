@@ -3,6 +3,8 @@ package com.suarez.coder.agent
 import kotlinx.coroutines.async
 
 import com.suarez.coder.diff.SearchReplace
+import com.suarez.coder.harness.OscillationBreaker
+import com.suarez.coder.harness.PreFlightValidator
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
@@ -220,6 +222,21 @@ class ArchitectEditor(private val agent: Agent) {
         val (changes, summary) = changesFor(files.map { it.path to (it.action == "delete") }, originals, state)
         if (changes.isEmpty()) return Outcome(false, "Uygulayıcı hiçbir değişiklik üretmedi.")
 
+        val staged = changes.filter { !it.delete && it.content != null }
+            .map { PreFlightValidator.StagedFile(it.path, it.content!!) }
+        when (val pf = PreFlightValidator.validate(staged)) {
+            is PreFlightValidator.Result.Blocked -> {
+                history += ChatMessage.Notice(
+                    "Ön kontrol: ${pf.issues.size} sözdizimi hatası push öncesi yakalandı (\$0 CI)",
+                    pf.report,
+                    isError = true,
+                )
+                ui.update()
+                return Outcome(false, "Ön kontrol commit'i durdurdu, GitHub API çağrılmadı:\n${pf.report}", repairable = true)
+            }
+            PreFlightValidator.Result.Valid -> Unit
+        }
+
         if (!agent.settings.autoApprove) {
             val ok = ui.confirm(
                 "Commit onayı",
@@ -388,6 +405,7 @@ class ArchitectEditor(private val agent: Agent) {
         // Executor-only self-repair: never the architect. The last attempts may use the (executor-class) escalation model.
         val ladder = executorLadder(agent.settings.maxExecutorRetries, agent.editorRef(), agent.escalationChain(),
             early = agent.earlyEscalation(agent.editorRef().model))
+        val breaker = OscillationBreaker(agent.architectRef())
         var pending = group
         var feedback: String? = null
         var failedNow: Set<String> = emptySet()
@@ -422,32 +440,60 @@ class ArchitectEditor(private val agent: Agent) {
             problems += parsed.errors
             val touched = HashSet<String>()
             val failedPaths = HashSet<String>()
+            var tier2 = 0
+            var tier3 = 0
             for ((path, blocks) in parsed.blocks.groupBy { it.path.trim().removePrefix("./") }) {
                 if (path !in paths) { problems += "$path planda yok; atlandı."; continue }
                 val res = SearchReplace.applyToFile(state[path], blocks)
                 state[path] = if (res.applied.isEmpty() && state[path] == null) null else res.content
-                if (res.applied.isNotEmpty()) touched += path
+                if (res.applied.isNotEmpty()) {
+                    touched += path
+                    tier2 += res.applied.count { it.tier.name == "WHITESPACE_NORMALIZED" }
+                    tier3 += res.applied.count { it.tier.name == "LINE_ANCHOR" }
+                }
                 if (res.failures.isNotEmpty()) {
                     failedPaths += path
                     problems += SearchReplace.describeFailures(res.failures)
                 }
             }
+            if (tier2 > 0 || tier3 > 0) agent.tools.onSearchReplaceTiers?.invoke(tier2, tier3)
             val untouched = pending.filter { it.path !in touched && it.path !in failedPaths }.map { it.path }
             if (untouched.isNotEmpty() && parsed.blocks.isEmpty()) problems += "Hiç geçerli SEARCH/REPLACE bloğu üretilmedi (biçim bozuk)."
             else if (untouched.isNotEmpty()) problems += "Şu dosyalar için blok yok: ${untouched.joinToString()}"
             // Cheap local checks catch broken edits before they cost a CI round trip.
             val invalid = validate(touched, originals, state)
             invalid.forEach { (p, why) -> problems += "Yerel kontrol, $p: $why"; failedPaths += p }
+            val stagedTouched = touched.mapNotNull { p -> state[p]?.let { PreFlightValidator.StagedFile(p, it) } }
+            when (val pf = PreFlightValidator.validate(stagedTouched)) {
+                is PreFlightValidator.Result.Blocked -> {
+                    pf.issues.forEach { issue ->
+                        problems += "${issue.path}:${issue.line}: ${issue.reason}"
+                        failedPaths += issue.path
+                    }
+                    history += ChatMessage.Notice(
+                        "Ön kontrol: ${pf.issues.size} sözdizimi hatası yakalandı (\$0 CI)",
+                        pf.report,
+                        isError = true,
+                    )
+                }
+                PreFlightValidator.Result.Valid -> Unit
+            }
 
             val label = Agent.roleLabel(step.role)
             history += ChatMessage.Notice(
-                "✏️ $label: ${parsed.blocks.size} blok, ${touched.size} dosya" + if (problems.isNotEmpty()) " (${problems.size} sorun)" else "",
+                "$label: ${parsed.blocks.size} blok, ${touched.size} dosya" + if (problems.isNotEmpty()) " (${problems.size} sorun)" else "",
                 reply.text,
                 isError = problems.isNotEmpty(),
             )
             ui.update()
             if (problems.isEmpty()) return Outcome(true, "")
             feedback = problems.joinToString("\n")
+            val verdict = breaker.recordFailure(feedback.hashCode().toString(), feedback, "Uygulayıcı hatası")
+            if (verdict.action == OscillationBreaker.Action.ESCALATE_TO_ARCHITECT) {
+                history += ChatMessage.Notice(verdict.userNotice, isError = true)
+                ui.update()
+                return Outcome(false, verdict.internalMessage, repairable = true)
+            }
             pending = group.filter { it.path in failedPaths || it.path in untouched }
             failedNow = (failedPaths + untouched).toSet()
         }

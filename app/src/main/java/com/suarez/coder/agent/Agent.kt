@@ -275,6 +275,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         const val MAX_FAILOVERS = 2
         /** Read-only tools that may run at the same time. */
         val PARALLEL_SAFE = setOf("github_read_file", "github_read_files", "github_get_tree", "github_search_code", "github_list_repos",
+            "github_list_symbols", "github_read_range",
             "web_search", "web_fetch", "lookup_docs", "find_references", "ci_errors", "load_skill")
         /** Roles whose output cap is learned (adaptive budget). */
         val ADAPTIVE_ROLES = setOf("agent", "editor", "escalation", "architect")
@@ -330,6 +331,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     private var architectThinkingOverride: String? = null
 
     fun architectRef() = modelOverride ?: roleOverrides["architect"] ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
+    fun lockedArchitectRef() = ModelRef.parse(settings.architectModel) ?: singleRef()
     fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
     fun editorRef() = modelOverride ?: roleOverrides["editor"] ?: ModelRef.parse(settings.editorModel) ?: singleRef()
     fun mainRef() = if (settings.architectMode) architectRef() else singleRef()

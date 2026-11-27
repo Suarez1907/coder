@@ -59,7 +59,10 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Rule
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.SyncProblem
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowUpward
@@ -153,6 +156,10 @@ private fun buildItems(messages: List<ChatMessage>): List<DItem> {
                     m.toolCalls.forEach { c -> g += c to results[c.id] }
                 }
             }
+            is ChatMessage.User -> if (!m.isHarnessInternal) {
+                close()
+                out += DItem.Msg(m, "m$i")
+            }
             else -> {
                 close()
                 out += DItem.Msg(m, "m$i")
@@ -226,7 +233,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 MarkdownText(m.text)
                                 ApkActions(vm, m.text)
                             }
-                            is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError)
+                            is ChatMessage.Notice -> NoticeItem(m.text, m.detail, m.isError, m.kind)
                             is ChatMessage.Summary -> NoticeItem("Eski mesajlar özetlendi", m.text, false)
                             is ChatMessage.RouteInfo -> RouteBar(m, isLatest = m === lastRoute) { vm.rerunAsArchitect() }
                             is ChatMessage.ContextBlock -> NoticeItem("Bağlam: ${m.label}", m.text.take(20_000), false)
@@ -844,7 +851,7 @@ private fun stripLeadingEmoji(s: String): String {
 }
 
 @Composable
-private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
+private fun NoticeItem(text: String, detail: String?, isError: Boolean, kind: String = "") {
     var open by remember { mutableStateOf(false) }
     val clean = remember(text) { stripLeadingEmoji(text) }
     val isCost = text.startsWith("\uD83D\uDCB0") || clean.startsWith("Maliyet", ignoreCase = true)
@@ -855,6 +862,9 @@ private fun NoticeItem(text: String, detail: String?, isError: Boolean) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             val icon = when {
                 isError -> Icons.Rounded.ErrorOutline
+                kind == "preflight" -> Icons.Outlined.Shield
+                kind == "oscillation" -> Icons.Outlined.SyncProblem
+                kind == "prepush" -> Icons.Outlined.Rule
                 isCost -> Icons.Outlined.AccountBalanceWallet
                 text.startsWith("\uD83D\uDDFA") -> Icons.Outlined.Layers
                 else -> Icons.Outlined.Info

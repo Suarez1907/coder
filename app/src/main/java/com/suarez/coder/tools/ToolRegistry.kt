@@ -31,6 +31,18 @@ class ToolRegistry(private val settings: Settings) {
     /** Called after any successful write so cached file contents can be dropped. */
     var onRepoChanged: () -> Unit = {}
 
+    /** Read telemetry: true when a surgical read (symbol or range) was used. */
+    var onFileRead: ((surgical: Boolean) -> Unit)? = null
+
+    /** PreFlight blocked a commit before any GitHub call: (issue count, diff hash, report). */
+    var onPreflightBlocked: ((issueCount: Int, diffHash: String, report: String) -> Unit)? = null
+
+    /** SearchReplace tier usage (2 = whitespace normalized, 3 = line anchor). */
+    var onSearchReplaceTiers: ((tier2: Int, tier3: Int) -> Unit)? = null
+
+    /** Push gate: returns null to continue the push, or a message that stops it and goes back to the model. */
+    var prePushCheck: (suspend (repo: String, branch: String, staged: List<com.suarez.coder.harness.PreFlightValidator.StagedFile>, added: Int, removed: Int) -> String?)? = null
+
     /** Live CI watching (the app shows a foreground notification while ci_wait runs). */
     interface CiListener {
         fun started(repo: String, label: String)
@@ -63,14 +75,28 @@ class ToolRegistry(private val settings: Settings) {
         "Repodaki dosya yollarını listeler (build, bağımlılık, binary ve .gitignore'daki dosyalar gizlenir).",
         obj("repo" to str(repoDesc), "ref" to str("Branch/tag/commit (boşsa varsayılan)"), required = listOf("repo")))
     private val readFile = ToolSpec("github_read_file",
-        "Tek dosya okur. Tam okumada satır numarası yoktur; start_line/end_line verilirse o aralık satır numaralarıyla gelir.",
+        "Tek dosya okur. Tam okumada satır numarası yoktur; start_line/end_line verilirse o aralık satır numaralarıyla gelir. " +
+            "Dosya 250 satırdan uzunsa önce github_list_symbols, sonra github_read_range ile yalnızca gereken aralığı oku.",
         obj("repo" to str(repoDesc), "path" to str("Dosya yolu"), "ref" to str("Branch/tag/commit"),
             "start_line" to int("İlk satır"), "end_line" to int("Son satır"),
+            "line_numbers" to bool("Tam okumada da satır numarası ekle"),
             "force" to bool("Filtrelenen (lock/binary) dosyayı yine de oku"), required = listOf("repo", "path")))
     private val readFiles = ToolSpec("github_read_files",
         "Birden fazla dosyayı TEK çağrıda okur (adım ve token tasarrufu). Gereken tüm dosyaları birlikte iste.",
         obj("repo" to str(repoDesc), "paths" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string"))
             .put("description", "Dosya yolları"), "ref" to str("Branch/tag/commit"), required = listOf("repo", "paths")))
+    private val listSymbols = ToolSpec("github_list_symbols",
+        "Dosyanın sembol haritasını (sınıf/fonksiyon/metot adları ve satır aralıkları) kompakt olarak döndürür. " +
+            "250 satırdan uzun dosyalarda tam okuma yerine önce bunu çağır, ardından github_read_range ile yalnızca gereken aralığı oku.",
+        obj("repo" to str(repoDesc), "path" to str("Dosya yolu"), "ref" to str("Branch/tag/commit"),
+            required = listOf("repo", "path")))
+    private val readRange = ToolSpec("github_read_range",
+        "Dosyanın yalnızca verilen satır aralığını satır numaralı olarak okur (en fazla 250 satır). " +
+            "Uzun dosyalarda token tasarrufu için tam okuma yerine bunu kullan.",
+        obj("repo" to str(repoDesc), "path" to str("Dosya yolu"),
+            "start_line" to int("İlk satır"), "startLine" to int("İlk satır (alternatif ad)"),
+            "end_line" to int("Son satır"), "endLine" to int("Son satır (alternatif ad)"),
+            "ref" to str("Branch/tag/commit"), required = listOf("repo", "path")))
     private val ciWait = ToolSpec("ci_wait",
         "Bir commit/branch için GitHub Actions bitene kadar bekler (en fazla timeout_minutes) ve sonucu döndürür; başarısızsa " +
             "hata satırlarını da ekler. CI'ı github_api ile tekrar tekrar sorgulamak yerine bunu bir kez çağır.",
@@ -201,12 +227,12 @@ class ToolRegistry(private val settings: Settings) {
         obj("repo" to str(repoDesc), "query" to str("Ne aradığın, doğal dilde"), "ref" to str("Branch (boşsa varsayılan)"),
             required = listOf("query")))
 
-    val specs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, applyDiff, writeFiles,
+    val specs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, listSymbols, readRange, applyDiff, writeFiles,
         createBranch, createPr, mergePr, releases, runWorkflow, searchCode, ciWait, ciErrors, githubApi, loadSkill, runCloudTool) + extraSpecs(true)
 
     /** Tools the architect may use while planning (github_api is restricted to GET at run time). */
-    val readOnlySpecs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, searchCode, ciErrors,
-        githubApi, submitPlan, loadSkill) + extraSpecs(false)
+    val readOnlySpecs: List<ToolSpec> get() = listOf(webSearch, webFetch, listRepos, getTree, readFile, readFiles, listSymbols, readRange,
+        searchCode, ciErrors, githubApi, submitPlan, loadSkill) + extraSpecs(false)
 
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
@@ -283,8 +309,8 @@ class ToolRegistry(private val settings: Settings) {
 
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
-            "github_read_files", "github_search_code", "ci_errors", "github_releases", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol")
+            "github_read_files", "github_list_symbols", "github_read_range", "github_search_code", "ci_errors", "github_releases",
+            "github_api", "submit_plan", "load_skill", "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -349,10 +375,29 @@ class ToolRegistry(private val settings: Settings) {
                 if (FileFilter.isBinaryOrLock(path) && !a.optBoolean("force")) {
                     throw ToolException("$path binary/lock dosyası olduğu için filtrelendi (token israfı). Gerçekten gerekiyorsa force=true ile oku.")
                 }
-                github.readFile(repo(), path, s("ref"), i("start_line"), i("end_line"))
+                val r = repo()
+                val ranged = i("start_line") != null || i("end_line") != null
+                val text = github.readFile(r, path, s("ref"), i("start_line"), i("end_line"))
+                onFileRead?.invoke(ranged)
+                if (!ranged && a.optBoolean("line_numbers")) numbered(github.readFileRaw(r, path, s("ref")) ?: text) else text
+            }
+            "github_list_symbols" -> {
+                val path = req("path")
+                val text = github.readFileRaw(repo(), path, s("ref")) ?: throw ToolException("Dosya bulunamadı: $path")
+                onFileRead?.invoke(true)
+                com.suarez.coder.context.SymbolIndexer.formatCompact(path, text)
+            }
+            "github_read_range" -> {
+                val path = req("path")
+                val start = i("start_line") ?: i("startLine") ?: throw ToolException("'start_line' parametresi gerekli")
+                val end = i("end_line") ?: i("endLine") ?: throw ToolException("'end_line' parametresi gerekli")
+                val text = github.readFileRaw(repo(), path, s("ref")) ?: throw ToolException("Dosya bulunamadı: $path")
+                onFileRead?.invoke(true)
+                com.suarez.coder.context.SymbolIndexer.readRange(text, start, end)
             }
             "github_read_files" -> readMany(repo(), Args.stringList(a, "paths")?.takeIf { it.isNotEmpty() }
                 ?: throw ToolException("'paths' dosya yolu dizisi olmalı, ör. {\"paths\": [\"app/src/A.kt\", \"build.gradle.kts\"]}"), s("ref"))
+                .also { onFileRead?.invoke(false) }
             "ci_wait" -> ciWait(repo(), s("ref"), (i("timeout_minutes") ?: 15).coerceIn(1, 30))
             "ci_errors" -> ciErrors(repo(), a.optLong("run_id").takeIf { it > 0 } ?: throw ToolException("'run_id' gerekli"))
             "github_apply_diff" -> applyDiff(repo(), req("branch"), req("message"), req("diff"), s("base_branch"))
@@ -367,7 +412,17 @@ class ToolRegistry(private val settings: Settings) {
                 val problems = files.filter { !it.delete && it.content != null }.mapNotNull { f ->
                     CodeValidator.validate(f.path, befores[f.path], f.content!!)?.let { "${f.path}: $it" }
                 }
-                if (problems.isNotEmpty()) throw ToolException("Yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n"))
+                if (problems.isNotEmpty()) {
+                    val report = problems.joinToString("\n")
+                    onPreflightBlocked?.invoke(problems.size, report.hashCode().toUInt().toString(16), report)
+                    throw ToolException("Ön kontrol başarısız, hiçbir şey yazılmadı (GitHub API çağrılmadı):\n" + report)
+                }
+                val added = files.filter { !it.delete }.sumOf { f -> f.content?.count { it == '\n' } ?: 0 }
+                val removed = files.filter { it.delete }.sumOf { f -> befores[f.path]?.count { it == '\n' } ?: 0 }
+                prePushCheck?.let { check ->
+                    val stop = check(repo, branch, emptyList(), added, removed)
+                    if (!stop.isNullOrBlank()) return stop
+                }
                 commitNotes.clear()
                 preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
                 beforeWrite?.invoke(repo, branch)
@@ -428,6 +483,8 @@ class ToolRegistry(private val settings: Settings) {
         val originals = HashMap<String, String?>()
         val failures = ArrayList<SearchReplace.Failure>()
         val summary = StringBuilder()
+        var added = 0
+        var removed = 0
         for ((path, blocks) in parsed.blocks.groupBy { it.path }) {
             val original = readForEdit(repo, branch, base, path)
             originals[path] = original
@@ -436,6 +493,7 @@ class ToolRegistry(private val settings: Settings) {
             if (res.failures.isEmpty()) {
                 changes += GitHub.FileChange(path, res.content, false)
                 val (add, rem) = SearchReplace.lineDelta(original, res.content)
+                added += add; removed += rem
                 summary.append("$path +$add −$rem\n")
             }
         }
@@ -449,8 +507,14 @@ class ToolRegistry(private val settings: Settings) {
         }
         val problems = changes.mapNotNull { c -> CodeValidator.validate(c.path, originals[c.path], c.content ?: return@mapNotNull null)?.let { "${c.path}: $it" } }
         if (problems.isNotEmpty()) {
-            throw ToolException("Diff uygulandı ama yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n") +
+            val report = problems.joinToString("\n")
+            onPreflightBlocked?.invoke(problems.size, report.hashCode().toUInt().toString(16), report)
+            throw ToolException("Diff uygulandı ama ön kontrol başarısız, hiçbir şey yazılmadı (GitHub API çağrılmadı):\n" + report +
                 "\nDüzeltilmiş blokları tekrar gönder.")
+        }
+        prePushCheck?.let { check ->
+            val stop = check(repo, branch, emptyList(), added, removed)
+            if (!stop.isNullOrBlank()) return stop
         }
         commitNotes.clear()
         preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
@@ -459,6 +523,8 @@ class ToolRegistry(private val settings: Settings) {
             afterCommit?.invoke(repo, r, changes.map { it.path }, changes.count { originals[it.path] == null })
         } + "\n" + summary + staleNote(changes.map { it.path }) + notes()
     }
+
+    private fun numbered(text: String): String = text.lines().mapIndexed { i, l -> "${i + 1}: $l" }.joinToString("\n")
 
     private fun staleNote(paths: List<String>): String {
         val stale = paths.filter { isInSnapshot(it) }

@@ -385,6 +385,11 @@ private fun ArchitectPage(vm: ChatViewModel) {
         }
         TextSetting("Ucuz sınıflandırma modeli", s.routerModel, mono = true, placeholder = "boş = otomatik",
             info = "Yerel kural emin olamazsa ve Decision 1 kullanılamazsa tek kelimelik sınıflandırma yapan model (sağlayıcı/model).") { s.routerModel = it }
+        SwitchSetting(
+            "Push öncesi kapsam/risk denetimi (Jev)",
+            ">=3 dosya, >=120 satır veya kritik dosya değişikliklerinde 3sn fail-open kapsam denetimi",
+            s.prePushGate,
+        ) { s.prePushGate = it }
     }
 }
 
