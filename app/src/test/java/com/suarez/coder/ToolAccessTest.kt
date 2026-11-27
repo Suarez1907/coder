@@ -82,4 +82,15 @@ class ToolAccessTest {
         assertFalse(ReadOnlyMismatchRecovery.readOnlyForRoute(Route.QUESTION_ONLY, "hatayı düzelt ve commit et"))
         assertNull(accessError("github_apply_diff", null, readOnly = false, allowOps = false))
     }
+
+    @Test fun escalationKeepsReadWriteForWriteTasksAndSurgicalReadsStayAllowed() {
+        // PreFlight/salınım fazında cerrahi okuma araçları READ_ONLY'de engellenmez.
+        assertNull(accessError("github_list_symbols", null, readOnly = true, allowOps = false))
+        assertNull(accessError("github_read_range", null, readOnly = true, allowOps = false))
+        // Yazma görevi eskalasyonda READ_WRITE yetkisini korur (READ_ONLY'ye düşmez).
+        assertNull(accessError("github_write_files", null, readOnly = false, allowOps = false))
+        assertNull(accessError("github_apply_diff", null, readOnly = false, allowOps = false))
+        // Salt okunur fazda yazma araçları reddedilir.
+        assertNotNull(accessError("github_write_files", null, readOnly = true, allowOps = false))
+    }
 }

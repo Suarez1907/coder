@@ -284,4 +284,15 @@ class ArchitectLockTest {
         assertEquals(lockedArchitect, settings.architectModel)
         assertEquals(lockedArchitect, agent.architectRef().key)
     }
+
+    @Test fun escalationNeverSwapsTheLockedArchitectForARepairModel() {
+        val locked = settings.architectModel
+        val breaker = OscillationBreaker()
+        repeat(OscillationBreaker.DEFAULT_THRESHOLD) { breaker.recordFailure("A.kt", "SEARCH bloğu bulunamadı") }
+        assertTrue(breaker.isTripped("A.kt"))
+        val agent = Agent(settings)
+        assertEquals("deepseek/arch", locked)
+        assertEquals(locked, agent.architectRef().key)
+        assertEquals("deepseek/arch", settings.architectModel)
+    }
 }
