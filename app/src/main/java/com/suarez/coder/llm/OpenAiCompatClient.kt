@@ -1,5 +1,8 @@
 package com.suarez.coder.llm
 
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -88,6 +91,11 @@ class OpenAiCompatClient(
             }
             body.put("tools", arr)
         }
+        if (options.priceSort && openRouter) body.put("provider", JSONObject().put("sort", "price"))
+        if (options.serviceTier == "flex" && !name.equals("DeepSeek", true)) body.put("service_tier", "flex")
+        options.watchdog?.let { dog ->
+            observe(JSONObject(body.toString()), dog)?.let { return it }
+        }
         val req = Request.Builder()
             .url("$baseUrl/chat/completions")
             .withHeaders()
@@ -113,6 +121,9 @@ class OpenAiCompatClient(
             body.remove("response_format")
             res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
         }
+        if (res.code == 400 && com.suarez.coder.cost.FinOpsArbitrageEngine.stripUnsupported(body, errorMessage(res.body))) {
+            res = send(req.newBuilder().post(body.toString().toRequestBody(Http.JSON)).build())
+        }
         if (res.code !in 200..299) {
             val retried = if (isTransient(res.code)) " (${backoffMs.size} yeniden denemeden sonra; geçici sağlayıcı hatası)" else ""
             throw LlmException("$name hatası (${res.code})$retried: ${errorMessage(res.body)}")
@@ -128,6 +139,133 @@ class OpenAiCompatClient(
         val finish = json.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason") ?: ""
         val cost = u?.takeIf { it.has("cost") && !it.isNull("cost") }?.optDouble("cost")?.takeIf { !it.isNaN() && it >= 0 }
         return LlmResponse(parse(json), usage, truncated = finish == "length", costUsd = cost)
+    }
+
+    /**
+     * SSE when the endpoint streams. A JSON body (tests, or a provider that ignored stream=true) is parsed
+     * as a normal completion and still passed through the watchdog. Returns null when streaming itself is rejected,
+     * so the caller retries the standard request.
+     */
+    private suspend fun observe(body: JSONObject, dog: MidStreamWatchdog): LlmResponse? {
+        body.put("stream", true)
+        body.put("stream_options", JSONObject().put("include_usage", true))
+        val req = Request.Builder().url("$baseUrl/chat/completions").withHeaders()
+            .post(body.toString().toRequestBody(Http.JSON)).build()
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            suspendCancellableCoroutine { cont ->
+                val call = Http.client.newCall(req)
+                cont.invokeOnCancellation { call.cancel() }
+                call.enqueue(object : okhttp3.Callback {
+                    override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                        if (cont.isActive) cont.resumeWithException(e)
+                    }
+
+                    override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                        response.use { r ->
+                            try {
+                                if (!r.isSuccessful) {
+                                    val text = r.body?.string().orEmpty()
+                                    if (r.code == 400 && errorMessage(text).contains("stream", ignoreCase = true)) {
+                                        if (cont.isActive) cont.resume(null)
+                                    } else if (cont.isActive) {
+                                        cont.resumeWithException(LlmException("$name hatası (${r.code}): ${errorMessage(text)}"))
+                                    }
+                                    return
+                                }
+                                val src = r.body!!.source()
+                                if (!src.request(1)) {
+                                    if (cont.isActive) cont.resume(LlmResponse(ChatMessage.Assistant("", model = model), Usage()))
+                                    return
+                                }
+                                val prefix = src.peek().readByte()
+                                if (prefix == '{'.code.toByte() || prefix == '['.code.toByte()) {
+                                    val watched = JsonBodyWatch.read(src, dog, cancel = { call.cancel() })
+                                    if (watched.cut != null) {
+                                        throw WatchdogCut(
+                                            watched.cut.reason!!,
+                                            watched.cut.consumedChars,
+                                            dog.captured().ifBlank { watched.text },
+                                        )
+                                    }
+                                    val json = JSONObject(watched.raw)
+                                    val message = parse(json)
+                                    if (cont.isActive) cont.resume(responseOf(json, message))
+                                    return
+                                }
+                                val acc = StringBuilder()
+                                val calls = java.util.TreeMap<Int, ToolPiece>()
+                                var usage = Usage()
+                                var cut: MidStreamWatchdog.Verdict? = null
+                                while (true) {
+                                    val line = src.readUtf8Line() ?: break
+                                    if (!line.startsWith("data:")) continue
+                                    val data = line.removePrefix("data:").trim()
+                                    if (data.isEmpty() || data == "[DONE]") continue
+                                    val json = JSONObject(data)
+                                    json.optJSONObject("usage")?.let { usage = usageOf(json) }
+                                    val delta = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                                    val piece = if (delta.isNull("content")) "" else delta.optString("content")
+                                    delta.optJSONArray("tool_calls")?.let { arr ->
+                                        for (i in 0 until arr.length()) {
+                                            val c = arr.optJSONObject(i) ?: continue
+                                            val idx = c.optInt("index", i)
+                                            val slot = calls.getOrPut(idx) { ToolPiece() }
+                                            c.optString("id").takeIf { it.isNotBlank() }?.let { slot.id = it }
+                                            c.optJSONObject("function")?.let { fn ->
+                                                fn.optString("name").takeIf { it.isNotBlank() }?.let { slot.name = it }
+                                                slot.args.append(fn.optString("arguments"))
+                                            }
+                                        }
+                                    }
+                                    if (piece.isNotEmpty()) acc.append(piece)
+                                    val verdict = dog.observe(piece, calls.isNotEmpty())
+                                    if (verdict.cut) {
+                                        cut = verdict
+                                        call.cancel()
+                                        break
+                                    }
+                                }
+                                if (cut != null) throw WatchdogCut(cut.reason!!, cut.consumedChars, dog.captured().ifBlank { acc.toString() }, usage)
+                                val tools = calls.values.filter { it.name.isNotBlank() }.map { slot ->
+                                    val raw = slot.args.toString().ifBlank { "{}" }
+                                    val args = runCatching { JSONObject(raw) }.getOrElse { JSONObject().put("_raw", raw) }
+                                    ToolCall(slot.id.ifBlank { "call_" + UUID.randomUUID().toString().take(8) }, slot.name, args)
+                                }
+                                val text = acc.toString()
+                                val message = ChatMessage.Assistant(
+                                    text = if (text.isEmpty() && tools.isEmpty()) "(Model boş yanıt döndü)" else text,
+                                    toolCalls = tools,
+                                    model = model,
+                                )
+                                if (cont.isActive) cont.resume(LlmResponse(message, usage))
+                            } catch (e: WatchdogCut) {
+                                if (cont.isActive) cont.resumeWithException(e)
+                            } catch (e: java.io.IOException) {
+                                if (cont.isActive) cont.resumeWithException(e)
+                            } catch (e: org.json.JSONException) {
+                                if (cont.isActive) cont.resumeWithException(LlmException("$name akışı okunamadı: ${e.message}"))
+                            }
+                        }
+                    }
+                })
+            }
+        }
+    }
+
+    private fun usageOf(json: JSONObject): Usage {
+        val u = json.optJSONObject("usage") ?: return Usage()
+        return Usage(
+            input = u.optLong("prompt_tokens"),
+            output = u.optLong("completion_tokens"),
+            cached = u.optLong("prompt_cache_hit_tokens", u.optJSONObject("prompt_tokens_details")?.optLong("cached_tokens") ?: 0L),
+        )
+    }
+
+    private fun responseOf(json: JSONObject, message: ChatMessage.Assistant): LlmResponse {
+        val u = json.optJSONObject("usage")
+        val finish = json.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason") ?: ""
+        val cost = u?.takeIf { it.has("cost") && !it.isNull("cost") }?.optDouble("cost")?.takeIf { !it.isNaN() && it >= 0 }
+        return LlmResponse(message, usageOf(json), truncated = finish == "length", costUsd = cost)
     }
 
     private fun errorMessage(body: String): String =
@@ -226,6 +364,8 @@ class OpenAiCompatClient(
         if (res.code !in 200..299) throw LlmException("$name hatası (${res.code}): ${errorMessage(res.body)}")
         return res.body
     }
+
+    private class ToolPiece(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder())
 
     override suspend fun listModels(): List<String> {
         val arr = JSONObject(modelsBody()).optJSONArray("data") ?: return emptyList()

@@ -238,7 +238,11 @@ private fun ProfileEditor(p: ProjectProfile, canDelete: Boolean, onSave: (Projec
 @Composable
 fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
     var data by remember { mutableStateOf<CostBreakdown?>(null) }
-    LaunchedEffect(Unit) { data = vm.costBreakdown() }
+    var finops by remember { mutableStateOf<com.suarez.coder.cost.FinOpsReport.Summary?>(null) }
+    LaunchedEffect(Unit) {
+        data = vm.costBreakdown()
+        finops = vm.finOpsSummary()
+    }
     val rate = vm.settings.usdTry
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         SystemBarsEffect()
@@ -258,6 +262,7 @@ fun CostDashboard(vm: ChatViewModel, onDismiss: () -> Unit) {
                         StatCard("Toplam", d.totalUsd, rate, Modifier.weight(1f))
                         StatCard("Bu ay", d.monthUsd, rate, Modifier.weight(1f))
                     }
+                    finops?.let { FinOpsSavingsCard(it) }
                     DashGroup("Önbellek isabeti") {
                         Text(d.cacheHitRate?.let { "%${(it * 100).toInt()}" } ?: "–", style = Mono.body.copy(fontSize = MaterialTheme.typography.headlineSmall.fontSize, fontFeatureSettings = "tnum"),
                             color = d.cacheHitRate?.let { if (it >= 0.6) coder.cacheGood else if (it >= 0.3) coder.cacheMid else coder.muted } ?: coder.muted)

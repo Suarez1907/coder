@@ -15,7 +15,10 @@ import kotlinx.coroutines.CancellationException
 class ContractDagRunner(agent: Agent, hooks: OrchestratorHooks) : OrchestratorBase(agent, hooks) {
     suspend fun run(history: MutableList<ChatMessage>, ui: AgentUi, start: OrchestratorPlan): OrchestratorPlan {
         val architectId = agent.architectRef().key
-        val orch = ContractDagOrchestrator(architectId, settings.orchMaxParallel.coerceIn(1, 3))
+        val orch = ContractDagOrchestrator(architectId, settings.orchMaxParallel.coerceIn(1, 3)).also {
+            it.cacheTracker = agent.cacheTtl
+            it.cacheProvider = agent.cacheProviderKey()
+        }
         val nodes = start.tasks.map { t -> DagNode(t.id, t.dependsOn, t.ownedFiles, t.acceptance, t.title, t.description) }
         val contract = orch.lock(nodes)
         if (contract.conflict || contract.architectModelId != architectId) {

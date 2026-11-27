@@ -489,6 +489,26 @@ class Settings(context: Context) {
         get() = bool("background_flex", true)
         set(v) = putBool("background_flex", v)
 
+    /** Background jobs may use provider Flex / economic routing. Unsupported providers stay on the standard endpoint. */
+    var flexArbitrage: Boolean
+        get() = bool("flex_arbitrage", false)
+        set(v) = putBool("flex_arbitrage", v)
+
+    /** Cut a live answer that is looping, rambling, or rewriting a whole file. */
+    var streamWatchdog: Boolean
+        get() = bool("stream_watchdog", true)
+        set(v) = putBool("stream_watchdog", v)
+
+    /** Pack the most relevant symbols before the first coding call. */
+    var turn0Pack: Boolean
+        get() = bool("turn0_pack", true)
+        set(v) = putBool("turn0_pack", v)
+
+    /** Character cap of the Turn-0 pack. Symbols win over call sites, tests and rules. */
+    var turn0CharCap: Int
+        get() = prefs.getInt("turn0_char_cap", 14_000)
+        set(v) = prefs.edit().putInt("turn0_char_cap", v.coerceIn(2_000, 80_000)).apply()
+
     /** Executor starts with low thinking and learned output caps; raised when it struggles. */
     var adaptiveBudget: Boolean
         get() = bool("adaptive_budget", true)

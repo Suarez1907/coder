@@ -21,6 +21,20 @@ class RepoDependencyGraph {
 
     fun indexedPaths(): Set<String> = files.keys.toSet()
 
+    /** Indexed source, or null when this path was never parsed. */
+    fun source(path: String): String? {
+        val key = resolve(path) ?: return null
+        return texts[key]
+    }
+
+    fun sources(): Map<String, String> = texts.toMap()
+
+    fun remove(path: String) {
+        val key = resolve(path) ?: path.trim().removePrefix("./")
+        files.remove(key)
+        texts.remove(key)
+    }
+
     fun hasIndex(): Boolean = files.isNotEmpty()
 
     fun needs(path: String, sha: String): Boolean = files[path]?.sha != sha

@@ -23,14 +23,16 @@ class StreamAccumulator {
     private var calls = 0
     private var lastThought = ""
 
-    fun add(chunk: JSONObject) {
+    /** @return answer text added by this chunk (thoughts are not included). */
+    fun add(chunk: JSONObject): String {
+        val delta = StringBuilder()
         chunk.optJSONObject("usageMetadata")?.let { usage = it }
         chunk.optString("serviceTier").takeIf { it.isNotBlank() }?.let { tier = it }
         chunk.optJSONObject("promptFeedback")?.let { feedback = it }
-        val cand = chunk.optJSONArray("candidates")?.optJSONObject(0) ?: return
+        val cand = chunk.optJSONArray("candidates")?.optJSONObject(0) ?: return ""
         cand.optString("finishReason").takeIf { it.isNotBlank() }?.let { finish = it }
         cand.optString("continuationToken").takeIf { it.isNotBlank() }?.let { token = it }
-        val ps = cand.optJSONObject("content")?.optJSONArray("parts") ?: return
+        val ps = cand.optJSONObject("content")?.optJSONArray("parts") ?: return ""
         for (i in 0 until ps.length()) {
             val p = ps.optJSONObject(i) ?: continue
             when {
@@ -42,12 +44,15 @@ class StreamAccumulator {
                     appendText(p, thought = true)
                 }
                 p.has("text") || p.has("thoughtSignature") -> {
-                    textChars += p.optString("text").length
+                    val t = p.optString("text")
+                    textChars += t.length
+                    delta.append(t)
                     appendText(p, thought = false)
                 }
                 else -> parts.put(JSONObject(p.toString()))
             }
         }
+        return delta.toString()
     }
 
     /** Joins a text piece onto the previous part when both are plain text of the same kind (thought or answer). */

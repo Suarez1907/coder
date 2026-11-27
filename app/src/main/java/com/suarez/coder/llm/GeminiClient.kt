@@ -101,12 +101,18 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
      * Sends the request with streamGenerateContent (SSE), so progress is visible and a stuck request is told apart
      * from a slow one. On the Flex tier retries 503/429 with backoff and never silently upgrades.
      */
-    private suspend fun generate(body: JSONObject, flex: Boolean, stallMs: Long?, onProgress: ((StreamProgress) -> Unit)?): Http.Result {
+    private suspend fun generate(
+        body: JSONObject,
+        flex: Boolean,
+        stallMs: Long?,
+        onProgress: ((StreamProgress) -> Unit)?,
+        watchdog: MidStreamWatchdog?,
+    ): Http.Result {
         val client = if (flex) flexClient else stallMs?.let { clientFor(it) } ?: Http.client
-        if (!flex) return stream(body, client, onProgress)
+        if (!flex) return stream(body, client, onProgress, watchdog)
         var attempt = 0
         while (true) {
-            val res = stream(body, client, onProgress)
+            val res = stream(body, client, onProgress, watchdog)
             if (res.code == 400 && Regex("service.?tier|flex", RegexOption.IGNORE_CASE).containsMatchIn(errorMessage(res.body))) {
                 throw FlexUnavailableException("Bu model Flex'i desteklemiyor: ${errorMessage(res.body).take(150)}")
             }
@@ -222,12 +228,17 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
     }
 
     private suspend fun hop(body: JSONObject, flex: Boolean, o: CallOptions): Http.Result {
-        val run: suspend () -> Http.Result = { generate(body, flex, o.stallTimeoutMs, o.onProgress) }
+        val run: suspend () -> Http.Result = { generate(body, flex, o.stallTimeoutMs, o.onProgress, o.watchdog) }
         return if (o.hopTimeoutMs == null) run() else kotlinx.coroutines.withTimeout(o.hopTimeoutMs) { run() }
     }
 
     /** One SSE request; returns the joined response as JSON text, or the error body for non-2xx answers. */
-    private suspend fun stream(body: JSONObject, client: OkHttpClient, onProgress: ((StreamProgress) -> Unit)?): Http.Result =
+    private suspend fun stream(
+        body: JSONObject,
+        client: OkHttpClient,
+        onProgress: ((StreamProgress) -> Unit)?,
+        watchdog: MidStreamWatchdog?,
+    ): Http.Result =
         withContext(Dispatchers.IO) {
             suspendCancellableCoroutine { cont ->
                 val req = Request.Builder().url("$base/models/$model:streamGenerateContent?alt=sse")
@@ -255,11 +266,19 @@ class GeminiClient(private val apiKey: String, override val model: String) : Llm
                                     if (!line.startsWith("data:")) continue
                                     val data = line.substring(5).trim()
                                     if (data.isEmpty() || data == "[DONE]") continue
-                                    acc.add(JSONObject(data))
+                                    val delta = acc.add(JSONObject(data))
+                                    val verdict = watchdog?.observe(delta, acc.progress().toolCalls > 0)
+                                    if (verdict != null && verdict.cut) {
+                                        call.cancel()
+                                        val usage = parseUsage(acc.result().optJSONObject("usageMetadata"))
+                                        throw WatchdogCut(verdict.reason!!, verdict.consumedChars, watchdog.captured(), usage)
+                                    }
                                     val now = System.currentTimeMillis()
                                     if (onProgress != null && now - lastReport > 1_000) { lastReport = now; onProgress(acc.progress()) }
                                 }
                                 if (cont.isActive) cont.resume(Http.Result(200, acc.result().toString(), "application/json"))
+                            } catch (e: WatchdogCut) {
+                                if (cont.isActive) cont.resumeWithException(e)
                             } catch (e: IOException) {
                                 if (cont.isActive) cont.resumeWithException(stallOr(e, client))
                             } catch (e: org.json.JSONException) {

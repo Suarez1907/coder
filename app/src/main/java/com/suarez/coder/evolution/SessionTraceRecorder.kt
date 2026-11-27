@@ -47,6 +47,7 @@ object SessionTraceRecorder {
         fun marker(label: String) = notices.sumOf { n ->
             Regex("${Regex.escape(label)}:\\s*(\\d+)").find(n.text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         }
+        val fin = finOps(run)
         val routes = run.filterIsInstance<ChatMessage.RouteInfo>()
         val stopped = notices.any { n -> n.text.startsWith("Durduruldu") || n.text.startsWith("Bütçe eşiğinde") || n.text.startsWith("Hata:") } ||
             run.any { it is ChatMessage.Assistant && (it.text.startsWith("⚠️") || it.text.startsWith("⏸")) }
@@ -77,7 +78,77 @@ object SessionTraceRecorder {
             oscillationEscalationsCount = oscillationEscalations,
             prePushGateWarningsCount = marker("push öncesi"),
             failureWindows = FailureWindows.from(run, request, routes.any { it.text.contains("yükseltildi") || it.text.contains("geçersiz kıldı") }),
+            turn0PackUsed = fin.turn0,
+            turn0CharsPacked = fin.turn0Chars,
+            firstTurnEditSuccess = fin.firstEdit,
+            watchdogCuts = fin.cuts,
+            estimatedSavedOutputTokens = fin.savedTokens,
+            watchdogSavedUsd = fin.watchUsd,
+            codeModFilesTouched = fin.codeFiles,
+            codeModSavedTokens = fin.codeTokens,
+            flexSavedUsd = usage.filter { it.label == "flex" }.sumOf(costOf),
         )
+    }
+
+    private data class Fin(
+        val turn0: Boolean,
+        val turn0Chars: Int,
+        val firstEdit: Boolean,
+        val cuts: Int,
+        val savedTokens: Long,
+        val watchUsd: Double,
+        val codeFiles: Int,
+        val codeTokens: Long,
+    )
+
+    private fun finOps(run: List<ChatMessage>): Fin {
+        val block = run.filterIsInstance<ChatMessage.ContextBlock>().firstOrNull {
+            it.label.contains("TURN-0") || it.text.contains("[TURN-0 BAĞLAM PAKETİ]")
+        }
+        val inUser = run.filterIsInstance<ChatMessage.User>().any { it.text.contains("[TURN-0 BAĞLAM PAKETİ]") }
+        val notices = run.filterIsInstance<ChatMessage.Notice>()
+        val cutNotes = notices.filter { it.text.startsWith("Akış devre kesicisi") }
+        var saved = 0L
+        var usd = 0.0
+        for (n in cutNotes) {
+            saved += Regex("kurtarılanToken=(\\d+)").find(n.text)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            usd += Regex("kurtarılanUsd=([0-9.]+)").find(n.text)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+        }
+        var files = 0
+        var codeTokens = 0L
+        for (t in run.filterIsInstance<ChatMessage.ToolResult>()) {
+            if (t.isError || !t.name.startsWith("code_mod_")) continue
+            val f = Regex("files=(\\d+)").find(t.content)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            val tok = Regex("savedTokens=(\\d+)").find(t.content)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            files += f
+            codeTokens += tok
+        }
+        return Fin(
+            turn0 = block != null || inUser,
+            turn0Chars = block?.text?.length ?: if (inUser) run.filterIsInstance<ChatMessage.User>()
+                .first { it.text.contains("[TURN-0 BAĞLAM PAKETİ]") }.text.substringAfter("[TURN-0 BAĞLAM PAKETİ]").length + "[TURN-0 BAĞLAM PAKETİ]".length else 0,
+            firstEdit = firstEdit(run),
+            cuts = cutNotes.size,
+            savedTokens = saved,
+            watchUsd = usd,
+            codeFiles = files,
+            codeTokens = codeTokens,
+        )
+    }
+
+    private val EDIT_TOOLS = setOf(
+        "github_apply_diff", "github_write_files", "codemod",
+        "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file",
+    )
+
+    /** True when the first assistant turn's edit tool succeeded. */
+    fun firstEdit(run: List<ChatMessage>): Boolean {
+        val assistant = run.firstOrNull { it is ChatMessage.Assistant } as? ChatMessage.Assistant ?: return false
+        val writes = assistant.toolCalls.filter { it.name in EDIT_TOOLS }
+        if (writes.isEmpty()) return false
+        val idx = run.indexOf(assistant)
+        val results = run.drop(idx + 1).filterIsInstance<ChatMessage.ToolResult>()
+        return writes.any { c -> results.any { it.callId == c.id && !it.isError } }
     }
 
     /** First meaningful error lines of a CI report (the same short form the agent already sees). */

@@ -132,6 +132,7 @@ class RepoSentinelWorker(context: Context, params: WorkerParameters) : Coroutine
     }
 
     companion object {
+        val priorityTier: com.suarez.coder.cost.PriorityTier = com.suarez.coder.cost.PriorityTier.BACKGROUND_FLEX
         private const val NAME = "coder-sentinel"
 
         fun schedule(context: Context, hours: Int) {
