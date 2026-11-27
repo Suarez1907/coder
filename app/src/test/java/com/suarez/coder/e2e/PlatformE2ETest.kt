@@ -133,7 +133,7 @@ class PlatformE2ETest {
             }
             world.script += { req -> assertTrue(toolResults(req).last().contains("gizli anahtar")); reply("Durdum.") }
             runBlocking { agent().run(mutableListOf(ChatMessage.User("bağımlılık ekle")), ui) }
-            assertEquals(listOf("Şüpheli bağımlılık", "Sır gibi görünen değer"), asked)
+            assertEquals(listOf("Şüpheli bağımlılık"), asked)
             assertFalse(world.branches.containsKey("dep")) // nothing was committed
         } finally { registry.shutdown() }
     }

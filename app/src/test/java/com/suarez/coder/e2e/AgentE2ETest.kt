@@ -176,7 +176,7 @@ class AgentE2ETest {
         assertEquals(1, world.pulls.size)
     }
 
-    @Test fun rewindMovesTheBranchBackToTheCheckpoint() = runBlocking {
+    @Test fun rewindDoesNotForceResetMain() = runBlocking {
         world.script += { reply("", applyDiff("main", diff("app/Main.kt", "merhaba", "bozuk"))) }
         world.script += { reply("Tamam.") }
         val a = agent()
@@ -184,8 +184,12 @@ class AgentE2ETest {
         assertEquals(main.replace("merhaba", "bozuk"), world.file("main", "app/Main.kt"))
         val cp = h.filterIsInstance<ChatMessage.Notice>().mapNotNull { Checkpoints.find(it.detail) }.single()
         assertNotNull(cp.sha)
-        a.tools.github.resetBranch(cp.repo, cp.branch, cp.sha)
-        assertEquals(main, world.file("main", "app/Main.kt"))
+        val denied = runCatching { a.tools.github.resetBranch(cp.repo, "main", cp.sha) }
+        assertTrue(denied.isFailure)
+        assertTrue(denied.exceptionOrNull()!!.message!!.contains("Force reset"))
+        assertEquals(main.replace("merhaba", "bozuk"), world.file("main", "app/Main.kt"))
+        a.tools.github.createBranchAt(cp.repo, "coder/rewind-1", cp.sha!!)
+        assertEquals(main, world.file("coder/rewind-1", "app/Main.kt"))
     }
 
     @Test fun readsInOneStepRunTogetherAndKeepTheirOrder() {

@@ -81,7 +81,7 @@ object ProcedureMiner {
         "github_write_files" -> c.args.optJSONArray("files")?.let { a -> (0 until a.length()).map { "write:" + abstractPath(a.optJSONObject(it)?.optString("path").orEmpty()) } }.orEmpty().distinct()
         "ci_wait" -> listOf("ci")
         "run_cloud_tool" -> listOf("cloud:" + c.args.optString("tool"))
-        "lookup_docs" -> listOf("docs:" + c.args.optString("library").lowercase().take(30))
+        "fetch_live_docs", "lookup_docs" -> listOf("docs:" + c.args.optString("library").lowercase().take(30))
         "github_create_pull_request" -> listOf("pr")
         "update_todos", "load_skill" -> emptyList()
         else -> listOf(c.name)

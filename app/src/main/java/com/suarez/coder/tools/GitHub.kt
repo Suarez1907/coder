@@ -111,16 +111,14 @@ class GitHub(private val token: () -> String) {
         return JSONObject(r.body).getJSONObject("object").getString("sha")
     }
 
-    /** Moves a branch back to [sha] (force), or deletes it when [sha] is null (it did not exist before). */
+    /**
+     * Force-reset and force-push are closed, including on main and master.
+     * Rewind opens a new branch at [sha] via [createBranchAt] instead.
+     */
     suspend fun resetBranch(repo: String, branch: String, sha: String?) {
         checkWrite(repo, branch)
-        if (sha == null) {
-            val r = call("DELETE", "/repos/$repo/git/refs/heads/${enc(branch)}")
-            if (r.code !in 200..299 && r.code != 422) throw ToolException("Branch silinemedi: HTTP ${r.code} ${r.body.take(200)}")
-            return
-        }
-        val r = call("PATCH", "/repos/$repo/git/refs/heads/${enc(branch)}", JSONObject().put("sha", sha).put("force", true))
-        if (r.code !in 200..299) throw ToolException("Geri alınamadı: HTTP ${r.code} ${r.body.take(300)}")
+        throw ToolException("Force reset kapalı ($branch${sha?.let { " @ ${it.take(7)}" } ?: ""}). " +
+            "Geri alma yalnızca coder/rewind-* dalı açar; main ve master hareket ettirilmez.")
     }
 
     /** Paths changed between two commits/branches (compare API), at most a few hundred. */

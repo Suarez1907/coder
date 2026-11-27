@@ -276,7 +276,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         const val MAX_FAILOVERS = 2
         /** Read-only tools that may run at the same time. */
         val PARALLEL_SAFE = setOf("github_read_file", "github_read_files", "github_get_tree", "github_search_code", "github_list_repos",
-            "web_search", "web_fetch", "lookup_docs", "find_references", "ci_errors", "load_skill")
+            "web_search", "web_fetch", "fetch_live_docs", "lookup_docs", "find_references", "ci_errors", "load_skill")
         /** Roles whose output cap is learned (adaptive budget). */
         val ADAPTIVE_ROLES = setOf("agent", "editor", "escalation", "architect")
 
@@ -613,7 +613,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         if (kind == "architect") repoMapFor(history, ui)?.let { parts += "REPO MAP (paths, types, signatures; bodies removed):\n$it"; hasMap = true }
         context.load()?.let { parts += it.text }
         if (settings.docsLookup) runCatching { requestContext.dependencies() }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
-            parts += "DEPENDENCIES (versions the project uses; write code for these, check unsure APIs with lookup_docs):\n" + it.joinToString(", ")
+            parts += "DEPENDENCIES (versions the project uses; write code for these, check unsure APIs with fetch_live_docs):\n" + it.joinToString(", ")
         }
         if (kind == "architect") architectHasMap = hasMap
         // No date in the prefix: an identical snapshot stays cacheable across days.
@@ -873,7 +873,10 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 requestContext.mentionContext(request.text)?.let { history.add(at++, it); ui.update() }
                 val repoNow = tools.activeRepo()
                 if (settings.similarTasks) similarFor?.let { f -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { f(repoNow, request.text) } }?.let {
-                    history.add(at, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
+                    history.add(at++, ChatMessage.ContextBlock(it, "benzer geçmiş görevler"))
+                }
+                tools.mcpTaskContext().takeIf { it.isNotBlank() }?.let {
+                    history.add(at, ChatMessage.ContextBlock(it, "mcp"))
                 }
             }
             val mode = if (override == null && !isEvolutionSession) activeMode() else null

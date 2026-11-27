@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
@@ -23,6 +24,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,10 +57,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
+import androidx.compose.material.icons.outlined.AccountTree
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Report
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Add
@@ -213,7 +218,9 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (items.isEmpty()) item { EmptyState() }
+                if (items.isEmpty() && vm.crashBanner == null && vm.pendingSpec == null) item { EmptyState() }
+                vm.crashBanner?.let { item(key = "crash-banner") { CrashRecoveryBanner { vm.fixLastCrash() } } }
+                vm.pendingSpec?.let { card -> item(key = "spec-card") { SpecCard(card, vm::approveSpec, vm::cancelSpec) } }
                 items(items, key = { it.key }) { item ->
                     when (item) {
                         is DItem.Tools -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -221,7 +228,12 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             ApkActions(vm, item.calls.mapNotNull { it.second?.content }.joinToString("\n"), skipUrls = shownApkUrls)
                         }
                         is DItem.Msg -> when (val m = item.m) {
-                            is ChatMessage.User -> UserBubble(m.text, m.images)
+                            is ChatMessage.User -> {
+                                val turn = vm.messages.indexOfFirst { it === m }.let { idx ->
+                                    if (idx < 0) 0 else vm.messages.take(idx + 1).count { it is ChatMessage.User } - 1
+                                }
+                                UserBubble(m.text, m.images, { vm.rewindToTurn(turn) }, { vm.forkFromTurn(turn) })
+                            }
                             is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 MarkdownText(m.text)
                                 ApkActions(vm, m.text)
@@ -249,7 +261,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             // System speech recognizer: no API cost, no microphone permission needed by this app.
             val speech = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
                 r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { spoken ->
-                    input = (input.trimEnd() + " " + spoken).trim()
+                    val polished = vm.polishVoice(spoken)
+                    input = (input.trimEnd() + " " + polished).trim()
                     vm.onInputChanged(input)
                 }
             }
@@ -772,19 +785,51 @@ private fun EmptyState() {
 }
 
 @Composable
-private fun UserBubble(text: String, images: List<String> = emptyList()) {
+private fun CrashRecoveryBanner(onFix: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().border(1.dp, coder.border, RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Report, null, tint = coder.muted, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(com.suarez.coder.qa.CrashLoopRecorder.BANNER, style = Mono.tiny, color = coder.muted, modifier = Modifier.weight(1f))
+        TextButton(onClick = onFix, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+            Text(com.suarez.coder.qa.CrashLoopRecorder.FIX, style = Mono.tiny, color = MaterialTheme.colorScheme.onSurface)
+        }
+    }
+}
+
+@Composable
+private fun UserBubble(text: String, images: List<String> = emptyList(), onRewind: () -> Unit = {}, onFork: () -> Unit = {}) {
+    var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         if (images.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 4.dp)) {
                 images.forEach { Thumb(it, 72) }
             }
         }
-        Surface(
-            shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
-            color = MaterialTheme.colorScheme.primaryContainer,
-            modifier = Modifier.padding(start = 40.dp),
-        ) {
-            SelectionContainer { Text(text, Modifier.padding(horizontal = 12.dp, vertical = 9.dp), style = MaterialTheme.typography.bodyMedium) }
+        Box {
+            Surface(
+                shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.padding(start = 40.dp).pointerInput(text) {
+                    detectTapGestures(onLongPress = { menu = true })
+                },
+            ) {
+                SelectionContainer { Text(text, Modifier.padding(horizontal = 12.dp, vertical = 9.dp), style = MaterialTheme.typography.bodyMedium) }
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Buraya Geri Sar", style = Mono.small) },
+                    leadingIcon = { Icon(Icons.Outlined.History, null) },
+                    onClick = { menu = false; onRewind() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Buradan Dallan", style = Mono.small) },
+                    leadingIcon = { Icon(Icons.Outlined.AccountTree, null) },
+                    onClick = { menu = false; onFork() },
+                )
+            }
         }
     }
 }

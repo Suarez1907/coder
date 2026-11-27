@@ -55,6 +55,9 @@ object PreFlightValidator {
         return SignatureGate(distinct.isNotEmpty(), distinct, 0.0)
     }
 
+    /** $0 secret and manifest scan. A blocked report stops the push. No model call. */
+    fun securityGate(tx: StagedTransaction): SecurityScanner.Report = SecurityScanner.scan(tx)
+
     private fun callerFixed(after: String, old: RepoDependencyGraph.Symbol, neu: RepoDependencyGraph.Symbol?): Boolean {
         if (neu == null) return !SymbolParse.mentions(after, old.name)
         val counts = SymbolParse.callArgCounts(after, old.name)

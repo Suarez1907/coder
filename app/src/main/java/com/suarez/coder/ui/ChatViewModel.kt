@@ -128,6 +128,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     val messages = mutableStateListOf<ChatMessage>()
 
+    var crashBanner by mutableStateOf<com.suarez.coder.qa.CrashLoopRecorder.Record?>(null)
+        private set
+    var pendingSpec by mutableStateOf<com.suarez.coder.session.SpecCardModel?>(null)
+        private set
+
     /** Prepared (resized JPEG) images waiting to be sent with the next message. */
     val attachments = mutableStateListOf<String>()
     /** Set when images would go to a model that cannot see them; the UI asks before sending. */
@@ -185,6 +190,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         wire(agent)
         if (settings.evoEnabled) com.suarez.coder.evolution.WeeklyWorker.schedule(app, settings.evoWifiOnly)
         if (settings.sentinelEnabled) com.suarez.coder.evolution.RepoSentinelWorker.schedule(app, settings.sentinelHours)
+        com.suarez.coder.qa.CrashLoopRecorder.screen = { "sohbet" }
+        com.suarez.coder.qa.CrashLoopRecorder.repo = { repoNow() }
+        com.suarez.coder.qa.CrashLoopRecorder.version = {
+            runCatching { app.packageManager.getPackageInfo(app.packageName, 0).versionName }.getOrNull().orEmpty()
+        }
+        com.suarez.coder.qa.CrashLoopRecorder.install(app.filesDir)
+        crashBanner = com.suarez.coder.qa.CrashLoopRecorder.pending(app.filesDir)
+        com.suarez.coder.notifications.MissionBus.stop = { stop() }
         viewModelScope.launch(Dispatchers.IO) {
             // New crashes and, after a self-update, a crash spike (rolled back at level 3).
             val cycle = com.suarez.coder.evolution.WeeklyCycle(app, settings, evoStore)
@@ -214,6 +227,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         a.modelPicker = { route, ctx, paths, intent -> manager.pick(route, ctx, paths, intent) }
         a.promptOverrides = { if (settings.evoEnabled) evoStore.promptOverrides() else emptyMap() }
         a.policyText = { manager.policyText() }
+        a.tools.docsCacheDir = java.io.File(getApplication<Application>().filesDir, "live-docs")
         a.adaptiveRouting = { if (settings.evoEnabled && settings.evoRouting) evoStore.routing.current() else AdaptiveRouting() }
         a.similarFor = { repo, request ->
             com.suarez.coder.agent.SimilarTasks.hint(com.suarez.coder.agent.SimilarTasks.pick(runCatching { evoStore.traces() }.getOrDefault(emptyList()), request, repo))
@@ -319,6 +333,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         override fun status(text: String?) {
             status = text
             statusSince = System.currentTimeMillis()
+            if (!text.isNullOrBlank()) publishMission(text)
         }
         override suspend fun confirm(title: String, body: String, okText: String, cancelText: String): Boolean {
             val p = PendingConfirm(title, body, okText, cancelText, CompletableDeferred())
@@ -362,7 +377,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val docBlocks = docs.mapNotNull { d -> d.text?.let { com.suarez.coder.docs.DocumentReader.block(d.name, it) } }
         docs.clear(); docStatus = null
         val body = expandSkillCommand(text.trim()).ifBlank { if (docBlocks.isNotEmpty()) "Ekteki belgeyi oku." else "(Ekran görüntüsüne bak.)" }
-        messages += ChatMessage.User(if (docBlocks.isEmpty()) body else body + "\n\n" + docBlocks.joinToString("\n\n"), images)
+        val masked = if (settings.tier0Redact) tier0().redact(body).masked else body
+        if (settings.tier0Classify && offline() && tier0().classify(body) != com.suarez.coder.edge.Tier0Class.COMPLEX) {
+            messages += ChatMessage.User(if (docBlocks.isEmpty()) masked else masked + "\n\n" + docBlocks.joinToString("\n\n"), images)
+            com.suarez.coder.edge.PrepQueue(java.io.File(getApplication<Application>().filesDir, "tier0-queue.txt")).enqueue(tier0().classify(body).name, masked)
+            messages += ChatMessage.Notice("Çevrimdışı ön-sınıflandırma kuyruğuna alındı")
+            save()
+            return
+        }
+        recordCheckpoint()
+        messages += ChatMessage.User(if (docBlocks.isEmpty()) masked else masked + "\n\n" + docBlocks.joinToString("\n\n"), images)
+        if (com.suarez.coder.qa.CrashLoopRecorder.looksLikeCrash(body)) {
+            val frames = com.suarez.coder.qa.CrashLoopRecorder.parseCrashTrace(body)
+            if (frames.isNotEmpty()) {
+                messages += ChatMessage.ContextBlock(frames.take(20).joinToString("\n") { "${it.file}:${it.line} ${it.symbol}" }, "çökme izi")
+            }
+        }
         save()
         // "Hayır, olmadı" right after a run is a correction signal for the previous trace.
         lastTraceId?.takeIf { SessionTraceRecorder.isCorrection(text) }?.let { id ->
@@ -375,6 +405,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         lastTraceId = null
+        val mode = com.suarez.coder.orchestrator.OrchestratorMode.of(settings.orchestratorMode)
+        if (com.suarez.coder.session.SpecApprovalGate.needsApproval(settings.specApproval, body, mode)) {
+            holdSpec(body)
+            return
+        }
         start(null)
     }
 
@@ -524,6 +559,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     status = null
                     running = false
                     save(now = true)
+                    com.suarez.coder.notifications.CoderMissionService.stop(getApplication())
                 } else {
                     saveSession(sid, work, now = true)
                     notifyBackgroundDone(work)
@@ -570,17 +606,181 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Rewinds a branch to the checkpoint saved before the agent's first write (asks first; force update). */
+    fun rewindToTurn(turnIndex: Int) {
+        if (running) return
+        val cp = checkpoints().load().lastOrNull { it.turnIndex == turnIndex } ?: return
+        val plan = checkpoints().rewind(cp.checkpointId)
+        if (plan.git.force || plan.git.forcePushesMain) {
+            messages += ChatMessage.Notice("Geri sarma reddedildi: main dalına force-push yok.", isError = true)
+            save()
+            return
+        }
+        val kept = messages.take(plan.messageCount)
+        messages.clear()
+        messages.addAll(kept)
+        save()
+        val sha = plan.git.sha
+        if (plan.git.action == "create_branch" && !sha.isNullOrBlank() && plan.git.repo.isNotBlank()) {
+            viewModelScope.launch {
+                val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.createBranchAt(plan.git.repo, plan.git.branch, sha) } }
+                messages += ChatMessage.Notice(
+                    r.fold({ "Geri alma dalı: ${plan.git.branch}" }, { "Dal oluşturulamadı: ${it.message?.take(160)}" }),
+                    isError = r.isFailure,
+                )
+                save()
+            }
+        } else {
+            messages += ChatMessage.Notice("Sohbet bu tura döndü.")
+            save()
+        }
+    }
+
+    fun forkFromTurn(turnIndex: Int) {
+        if (running) return
+        val cp = checkpoints().load().lastOrNull { it.turnIndex == turnIndex } ?: return
+        val fork = checkpoints().fork(cp.checkpointId)
+        if (fork.force) return
+        val kept = messages.take(fork.messageCount).toList()
+        val id = sessionStore.newId()
+        sessionStore.save(id, kept, cp.repo, cp.cumulativeCostUsd)
+        viewModelScope.launch {
+            val sha = cp.commitSha
+            if (!sha.isNullOrBlank() && cp.repo.isNotBlank()) {
+                runCatching { withContext(Dispatchers.IO) { agent.tools.github.createBranchAt(cp.repo, fork.branch, sha) } }
+            }
+            sessions = sessionStore.list()
+            openSession(id)
+            messages += ChatMessage.Notice("Bu noktadan dallanıldı: ${fork.branch}")
+            save()
+        }
+    }
+
+    fun approveSpec(disabled: Set<String>, note: String) {
+        val card = pendingSpec ?: return
+        val locked = settings.architectModel
+        pendingSpec = null
+        val approved = com.suarez.coder.session.SpecApprovalGate.approve(
+            com.suarez.coder.session.SpecApprovalGate.lock(card, locked), disabled, note,
+        )
+        messages += ChatMessage.Notice("Spec onaylandı · ${approved.risk}", approved.summary())
+        save()
+        start(null)
+    }
+
+    fun cancelSpec() { pendingSpec = null }
+
+    /** Shows a $0 card immediately, then lets the locked architect replace the text. The architect id is never written. */
+    private fun holdSpec(body: String) {
+        val locked = settings.architectModel
+        pendingSpec = com.suarez.coder.session.SpecApprovalGate.lock(
+            com.suarez.coder.session.SpecApprovalGate.draft(body, locked), locked,
+        )
+        viewModelScope.launch {
+            val json = runCatching {
+                val tmp = ArrayList<ChatMessage>()
+                val system = "Kilitli mimarsın. Yalnızca şu JSON'u üret, başka metin yazma: " +
+                    "{\"items\":[{\"title\":\"...\"}],\"files\":[\"yol\"],\"costLow\":0.02,\"costHigh\":0.08,\"risk\":\"Düşük\"}. " +
+                    "risk yalnızca Düşük, Orta veya Yüksek. Model kimliğini değiştirme."
+                agent.callModel(tmp, listOf(ChatMessage.User(body.take(4_000))), agent.architectRef(), "architect", system,
+                    emptyList(), ui, useCache = false, maxOut = 700, thinking = "low").text
+            }.getOrNull() ?: return@launch
+            val parsed = com.suarez.coder.session.SpecApprovalGate.parse(json, locked) ?: return@launch
+            if (pendingSpec != null && settings.architectModel == locked) {
+                pendingSpec = com.suarez.coder.session.SpecApprovalGate.lock(parsed, locked)
+            }
+        }
+    }
+
+    fun fixLastCrash() {
+        val rec = crashBanner ?: return
+        val prompt = com.suarez.coder.qa.CrashLoopRecorder.prompt(rec)
+        com.suarez.coder.qa.CrashLoopRecorder.resolve(getApplication<Application>().filesDir)
+        crashBanner = null
+        doSend(prompt)
+    }
+
+    fun polishVoice(text: String): String = if (!settings.tier0Voice) text else tier0().structureVoiceNow(text)
+
+    fun tier0Status(): String = com.suarez.coder.edge.LiteRtLmBackend(settings.tier0ModelPath.ifBlank { null }).status()
+
+    fun clearDocsCache() {
+        java.io.File(getApplication<Application>().filesDir, "live-docs").listFiles()?.forEach { it.delete() }
+    }
+
+    private fun tier0() = com.suarez.coder.edge.Tier0EdgeEngine(
+        edgeBackend(),
+        com.suarez.coder.edge.Tier0Flags(settings.tier0Redact, settings.tier0Voice, settings.tier0Classify),
+    )
+
+    private fun edgeBackend(): com.suarez.coder.edge.LocalEdgeModelBackend {
+        val path = settings.tier0ModelPath
+        return if (path.isBlank()) com.suarez.coder.edge.HeuristicFallbackBackend()
+        else com.suarez.coder.edge.LiteRtLmBackend(path)
+    }
+
+    private fun checkpoints() = com.suarez.coder.session.CheckpointManager(
+        java.io.File(getApplication<Application>().filesDir, "checkpoints/$currentSessionId.json"),
+    )
+
+    private fun recordCheckpoint() {
+        checkpoints().record(
+            currentSessionId, messages.count { it is ChatMessage.User }, repoNow(),
+            settings.defaultBranch.ifBlank { "main" }, null, messages.size,
+            agent.sessionCost(messages.toList()), System.currentTimeMillis(),
+        )
+    }
+
+    private fun offline(): Boolean = runCatching {
+        val ctx = getApplication<Application>()
+        val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val net = cm.activeNetwork ?: return true
+        val caps = cm.getNetworkCapabilities(net) ?: return true
+        !caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }.getOrDefault(false)
+
+    private fun publishMission(stage: String) {
+        val long = settings.orchestratorMode == "CONTRACT_DAG" || settings.autoShip || settings.untilGreen
+        if (!running || !long) return
+        val phase = when {
+            stage.contains("APK", true) -> com.suarez.coder.notifications.MissionSnapshot.Phase.APK_READY
+            stage.contains("PR", true) -> com.suarez.coder.notifications.MissionSnapshot.Phase.PR_READY
+            else -> com.suarez.coder.notifications.MissionSnapshot.Phase.RUNNING
+        }
+        com.suarez.coder.notifications.CoderMissionService.start(
+            getApplication(),
+            com.suarez.coder.notifications.MissionSnapshot(repoNow().ifBlank { "Coder" }, stage.take(80), agent.sessionCost(messages.toList()), phase),
+        )
+    }
+
+    fun testSandbox(onResult: (String) -> Unit) {
+        val url = settings.sandboxUrl
+        if (url.isBlank()) { onResult("Adres yok"); return }
+        viewModelScope.launch {
+            val hot = com.suarez.coder.execution.HotSandboxBackend(
+                url, settings.sandboxToken, com.suarez.coder.execution.defaultSandboxHttp(),
+                com.suarez.coder.execution.GitHubActionsBackend(),
+            )
+            onResult(runCatching { hot.pingLabel() }.getOrDefault("Erişilemedi · GitHub Actions"))
+        }
+    }
+
+    /** Rewinds by opening a new branch at the saved commit. Never force-resets and never moves main. */
     fun rewind(p: com.suarez.coder.agent.Checkpoints.Point) {
         if (running) return
         viewModelScope.launch {
-            val what = if (p.sha == null) "${p.branch} dalı bu görevde oluşturuldu; SİLİNECEK." else
-                "${p.branch} dalı ${p.sha.take(7)} commit'ine zorla geri alınacak. Sonraki commit'ler daldan çıkar (GitHub'da sha ile hâlâ bulunabilir)."
-            val warn = if (p.branch == settings.defaultBranch || p.branch == "main" || p.branch == "master") "\n\nDİKKAT: bu varsayılan dal olabilir." else ""
-            if (!ui.confirm("Kontrol noktasına dön", "${p.repo}\n$what$warn", "Geri dön", "Vazgeç")) return@launch
-            val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.resetBranch(p.repo, p.branch, p.sha) } }
-            messages += ChatMessage.Notice(r.fold({ "Geri alındı: ${p.branch}" + (p.sha?.let { " → ${it.take(7)}" } ?: " silindi") },
-                { "Geri alınamadı: ${it.message?.take(200)}" }), isError = r.isFailure)
+            val sha = p.sha
+            if (sha.isNullOrBlank()) {
+                messages += ChatMessage.Notice("Bu noktanın commit'i yok. Dal silinmedi ve force-reset yapılmadı.")
+                save()
+                return@launch
+            }
+            val branch = "coder/rewind-${System.currentTimeMillis()}"
+            if (!ui.confirm("Kontrol noktasına dön", "${p.repo}\n$branch dalı ${sha.take(7)} üzerine açılacak. main hareket ettirilmez.", "Geri dön", "Vazgeç")) return@launch
+            val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.createBranchAt(p.repo, branch, sha) } }
+            messages += ChatMessage.Notice(
+                r.fold({ "Geri alma dalı: $branch" }, { "Dal oluşturulamadı: ${it.message?.take(200)}" }),
+                isError = r.isFailure,
+            )
             agent.invalidateSnapshot(); agent.context.invalidate()
             save()
         }
