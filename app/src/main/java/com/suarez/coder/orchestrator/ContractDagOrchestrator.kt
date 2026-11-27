@@ -110,7 +110,16 @@ class ContractDagOrchestrator(
                         maxFlight.updateAndGet { m -> maxOf(m, now) }
                         try {
                             val isImplementer = contract.implementers[node.id] != contract.architectModelId
-                            val swarmResult = if (isImplementer) speculativeSwarm?.invoke(node, contract) else null
+                            // Mimar kilidi sabit; turnuva yalnızca Implementer adımında ve hata verirse worker'a düşer.
+                            val swarmResult = try {
+                                if (isImplementer) speculativeSwarm?.invoke(node, contract) else null
+                            } catch (ce: kotlinx.coroutines.CancellationException) {
+                                throw ce
+                            } catch (t: Throwable) {
+                                val msg = "SpeculativeSwarm: ${node.id} turnuva hatası (${t.message}); worker'a düşüldü"
+                                onNotice?.invoke(msg.replace('\n', ' ').replace('\r', ' '))
+                                null
+                            }
                             if (swarmResult != null) {
                                 val notice = "SpeculativeSwarm: ${node.id} (Mimar kilitli: ${contract.architectModelId})"
                                 onNotice?.invoke(notice.replace('\n', ' ').replace('\r', ' '))
@@ -156,8 +165,12 @@ class ContractDagOrchestrator(
                 errors += "sıralı moda düşüldü"
             }
         }
-        // CrossRepo twin: yalnızca tamamlanmış staged tx üzerinde kırılma kontrolü.
-        val crossRepoWarnings = if (pending.isEmpty()) crossRepoCheck?.invoke(tx).orEmpty() else emptyList()
+        // CrossRepo twin: yalnızca tamamlanmış staged tx üzerinde, doğrulama adımında kırılma kontrolü.
+        val crossRepoWarnings = if (pending.isEmpty()) try {
+            crossRepoCheck?.invoke(tx).orEmpty()
+        } catch (t: Throwable) {
+            listOf("CrossRepoContractTwin doğrulama hatası: ${t.message}")
+        } else emptyList()
         if (crossRepoWarnings.isNotEmpty()) {
             onNotice?.invoke("CrossRepoContractTwin: ${crossRepoWarnings.joinToString("; ").replace('\n', ' ')}")
             errors += crossRepoWarnings

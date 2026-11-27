@@ -25,6 +25,7 @@ Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok 
 - `./gradlew testDebugUnitTest assembleDebug` (CI: coder-quick.yml = quick check, build.yml = APK + release).
 - Faz 5B doğrulaması: `./gradlew testDebugUnitTest assembleDebug`; `GoldenEvalSuiteTest` ile yeni Faz 5B testleri birlikte yeşil olmalı.
 - Kapı bağlantısı: `ShipGuard.hold(mutationOn=true)` mutant varsa merge durur; `ContractDagOrchestrator` cross-repo uyarısı `DagRun.errors` üretir ve commit'i engeller.
-- Swarm kancası yalnızca Implementer adımında tetiklenir (`implementers[id] != architectModelId`); Mimar düğümü her zaman doğrudan `worker`'a gider.
+- Swarm kancası yalnızca Implementer adımında tetiklenir (`implementers[id] != architectModelId`); Mimar düğümü her zaman doğrudan `worker`'a gider; turnuva hatası tek satır `Notice` + worker'a düşüş.
+- Faz 5B CI doğrulaması yeşil: `./gradlew testDebugUnitTest assembleDebug` (`GoldenEvalSuiteTest`, SpeculativeSwarm/DiffMutation/Blueprint/MetaHarness/CrossRepo/ContractDag testleri birlikte).
 - Yetki testleri: `app/src/test/java/com/suarez/coder/ToolAccessTest.kt`.
 - Tuzak: Kotlin blok yorumları iç içe geçer; bir KDoc satırında yıldız-slash kalıbı (örn. evo dalı yazımı) dosyanın kalanını yoruma çevirir ve yüzlerce sahte "unresolved reference" üretir. Böyle satırlar `//` ile yazılır.

@@ -45,8 +45,11 @@ class ShipGuard {
             return "Karşıt eleştirmen: BLOCK_CRITICAL. Otomatik merge durdu. $tail\n$sites"
         }
         if (mutationOn && mutationLogicDiff && blocksMutation(mutationReport)) {
-            val summary = mutationSummary?.takeIf { it.isNotBlank() } ?: "Diff mutasyon testi: mantık değişikliğinde hayatta kalan mutant var."
-            return "$summary Otomatik merge durdu.\n$mutationReport"
+            val summary = (mutationSummary?.takeIf { it.isNotBlank() }
+                ?: "Diff mutasyon testi: mantık değişikliğinde hayatta kalan mutant var.")
+                .replace('\n', ' ').replace('\r', ' ').trim()
+            val detail = mutationReport.orEmpty().trim()
+            return "$summary Otomatik merge durdu.\n$detail"
         }
         return null
     }
