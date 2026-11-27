@@ -398,28 +398,28 @@ private fun ArchitectPage(vm: ChatViewModel) {
 
     Group {
         Title("Spekülatif Sürü & Mutasyon Testi", "Zor görevlerde veya CI hatasında paralel aday üretimi ve diff mutasyon doğrulaması.")
-        var swarmMode by remember { mutableStateOf(s.swarmMode) }
+        var swarmMode by remember { mutableStateOf(s.speculativeSwarmMode) }
         Segmented(
             listOf("off" to "Kapalı", "after_ci_fail" to "1. CI Hatasında", "hard_tasks" to "Zor Görevlerde"),
             swarmMode,
-        ) { swarmMode = it; s.swarmMode = it; vm.refreshSettings() }
-        var candidates by remember { mutableStateOf(s.swarmCandidates.toString()) }
+        ) { swarmMode = it; s.speculativeSwarmMode = it; vm.refreshSettings() }
+        var candidates by remember { mutableStateOf(s.speculativeSwarmCandidates.toString()) }
         Label("Aday sayısı", coder.muted)
         Segmented(listOf("2" to "2 Aday", "3" to "3 Aday"), candidates) {
             candidates = it
-            s.swarmCandidates = it.toIntOrNull() ?: 2
+            s.speculativeSwarmCandidates = it.toIntOrNull() ?: 2
         }
         TextSetting(
             "Sürü bütçe tavanı (USD)",
-            s.swarmBudgetUsd.toString(),
+            s.speculativeSwarmBudgetUsd.toString(),
             keyboard = KeyboardType.Decimal,
             mono = true,
-        ) { s.swarmBudgetUsd = it.replace(',', '.').toDoubleOrNull() ?: 0.02 }
+        ) { s.speculativeSwarmBudgetUsd = it.replace(',', '.').toDoubleOrNull() ?: 0.02 }
         SwitchSetting(
             "Diff Mutasyon Testi",
             "Üretilen yamayı sentetik mutasyonlarla doğrula",
-            s.diffMutationTest,
-        ) { s.diffMutationTest = it }
+            s.diffMutationEnabled,
+        ) { s.diffMutationEnabled = it }
     }
 }
 
