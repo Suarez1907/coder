@@ -295,4 +295,35 @@ class ArchitectLockTest {
         assertEquals(locked, agent.architectRef().key)
         assertEquals("deepseek/arch", settings.architectModel)
     }
+
+    @Test fun reviewEscalationResolvesOnlyTheLockedArchitectNeverTheRepairLadder() {
+        val agent = Agent(settings)
+        val lockedKey = settings.architectModel
+        val locked = ModelRef.parse(lockedKey)!!
+        assertEquals(lockedKey, agent.architectRef().key)
+
+        // Salınım kesici tetiklenir ve PrePushGate mimar incelemesi ister.
+        val breaker = OscillationBreaker()
+        repeat(OscillationBreaker.DEFAULT_THRESHOLD) { breaker.recordFailure("A.kt", "SEARCH bloğu bulunamadı") }
+        val verdict = PrePushGate.evaluate(
+            PrePushGate.Input(
+                changedFiles = listOf("A.kt", "B.kt", "C.kt", "D.kt", "E.kt", "F.kt"),
+                totalDiffLines = 600,
+                hasArchitectReview = false,
+                oscillationTripped = breaker.isTripped("A.kt")
+            )
+        )
+        assertEquals(PrePushGate.Action.REQUIRE_ARCHITECT_REVIEW, verdict.action)
+
+        // Onarım merdiveni asla kilitli mimar modeliyle ya da "architect" rolüyle çağırmaz.
+        val ladder = ArchitectEditor.executorLadder(
+            settings.maxExecutorRetries, ModelRef.parse("deepseek/edit")!!, ModelRef.parse("deepseek/mid")!!
+        )
+        assertTrue(ladder.none { it.ref.key == locked.key })
+        assertTrue(ladder.none { it.role == "architect" })
+
+        // Kilit durur: eskalasyon settings.architectModel dışına çıkmaz.
+        assertEquals(lockedKey, settings.architectModel)
+        assertEquals(lockedKey, agent.architectRef().key)
+    }
 }

@@ -90,6 +90,9 @@ class ToolAccessTest {
         // Yazma görevi eskalasyonda READ_WRITE yetkisini korur (READ_ONLY'ye düşmez).
         assertNull(accessError("github_write_files", null, readOnly = false, allowOps = false))
         assertNull(accessError("github_apply_diff", null, readOnly = false, allowOps = false))
+        // Rota eskalasyon sırasında QUESTION'a düşse bile yazma niyeti READ_WRITE'ı korur.
+        assertFalse(ReadOnlyMismatchRecovery.readOnlyForRoute(Route.QUESTION_ONLY, "salınım sonrası hatayı düzelt ve commit et"))
+        assertTrue(ReadOnlyMismatchRecovery.hasWriteIntent("dosyayı güncelle"))
         // Salt okunur fazda yazma araçları reddedilir.
         assertNotNull(accessError("github_write_files", null, readOnly = true, allowOps = false))
     }
