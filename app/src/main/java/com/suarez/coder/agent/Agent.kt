@@ -68,6 +68,10 @@ sealed class ArchOutcome {
 class Agent(val settings: Settings, private val filesDir: java.io.File? = null) {
     val tools = ToolRegistry(settings)
     val context = ContextProvider(settings, tools.github)
+    /** Provider cache lifetime for the chat indicator and the DAG pacer. */
+    val cacheTtl = com.suarez.coder.cost.CacheTtlTracker()
+    private val costToGreen = filesDir?.let { com.suarez.coder.evolution.CostToGreenScorer(java.io.File(it, "cost-to-green.json")) }
+    private var watchdogProse = false
     val repoMaps = com.suarez.coder.repomap.RepoMapService(tools.github, filesDir)
 
     init {
@@ -333,6 +337,16 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     fun architectRef() = modelOverride ?: roleOverrides["architect"] ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
     fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
     fun editorRef() = modelOverride ?: roleOverrides["editor"] ?: ModelRef.parse(settings.editorModel) ?: singleRef()
+
+    fun cacheProviderKey(): String = when (editorRef().provider) {
+        Provider.GEMINI -> "gemini"
+        Provider.OPENROUTER -> "openrouter"
+        Provider.DEEPSEEK -> "deepseek"
+    }
+
+    /** Monochrome meta line, only while the provider cache is still warm. */
+    fun cacheWarmLabel(hitPercent: Int?, now: Long = System.currentTimeMillis()): String? =
+        com.suarez.coder.cost.CacheTtlTracker.label(hitPercent, cacheTtl.view(cacheProviderKey(), now))
     fun mainRef() = if (settings.architectMode) architectRef() else singleRef()
 
     fun client(ref: ModelRef): LlmClient = when (ref.provider) {
@@ -730,15 +744,36 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         val prefix = stable?.let { listOf(ChatMessage.User(it), ChatMessage.Assistant(STABLE_ACK)) } ?: emptyList()
         val full = prefix + messages
         // Background work (self-improvement, queue) may wait: it uses Flex (half price) when enabled.
-        val background = settings.backgroundFlex && (isEvolutionSession || unattended)
-        val flex = (settings.economyMode || background) && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
+        val background = (isEvolutionSession || unattended)
+        val flex = (settings.economyMode || (settings.backgroundFlex && background)) && ref.provider == Provider.GEMINI && role != "router" && !flexDisabledForRun
+        val economic = com.suarez.coder.cost.FinOpsArbitrageEngine.route(
+            ref.provider.name, ref.model,
+            if (background) com.suarez.coder.cost.PriorityTier.BACKGROUND_FLEX else com.suarez.coder.cost.PriorityTier.INTERACTIVE,
+            settings.flexArbitrage,
+        )
+        val tier = when {
+            flex -> "flex"
+            economic.supported && economic.serviceTier == "flex" && ref.provider != Provider.GEMINI -> "flex"
+            else -> null
+        }
+        val large = if (settings.streamWatchdog) tools.dependencyGraph.sources().filterValues { it.lines().size > 200 }.entries
+            .sortedByDescending { it.value.length }.take(8).associate { it.key to it.value } else emptyMap()
+        val dog = if (settings.streamWatchdog && role !in setOf("router", "decision", "summary", "critic", "review")) {
+            com.suarez.coder.llm.MidStreamWatchdog(
+                proseGuard = watchdogProse && role in setOf("agent", "editor", "escalation"),
+                diffToolAvailable = toolSpecs.any { it.name == "github_apply_diff" },
+                largeFiles = large,
+            )
+        } else null
         var opts = CallOptions(
             thinkingLevel = thinking?.takeIf { it != "minimal" },
             maxOutputTokens = maxOut,
             minimalThinking = thinking == "minimal",
-            serviceTier = if (flex) "flex" else null,
+            serviceTier = tier,
             jsonMode = jsonMode,
             temperature = temperature,
+            watchdog = dog,
+            priceSort = economic.supported && economic.priceSort,
         )
         var send = full
         if (useCache && client is GeminiClient) {
@@ -782,6 +817,22 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             if (!resp.truncated && role in ADAPTIVE_ROLES) runCatching { outputStats?.add(role, resp.usage.output + resp.usage.thoughts) }
             onUsage?.invoke(costOf(history.last() as ChatMessage.UsageRecord))
             if (client is GeminiClient) cache.recordUsage(ref.model, resp.usage, o.cachedContent != null)
+            if (resp.usage.cached > 0 || o.cachedContent != null) {
+                val explicit = o.cachedContent != null
+                val ttl = com.suarez.coder.cost.FinOpsArbitrageEngine.defaultTtlSec(ref.provider.name, explicit, settings.cacheTtlMinutes)
+                cacheTtl.note(ref.provider.name, ttl)
+            }
+        }
+
+        fun noteCut(e: com.suarez.coder.llm.WatchdogCut, maxTokens: Int?) {
+            val consumed = e.usage.output.takeIf { it > 0 } ?: (e.consumedChars / 4L).coerceAtLeast(1)
+            val saved = Pricing.savedOutputTokens(consumed, maxTokens)
+            val row = Pricing.recordStreamCut(ref.model, consumed, saved, price(ref.model))
+            history += ChatMessage.UsageRecord(ref.model, role, Usage(output = consumed), label = "watchdog")
+            history += ChatMessage.Notice(
+                "Akış devre kesicisi: ${e.reason.label}. kurtarılanToken=$saved kurtarılanUsd=${String.format(java.util.Locale.US, "%.6f", row.savedUsd)}",
+                e.partialText.take(400),
+            )
         }
 
         suspend fun timed(o0: CallOptions): com.suarez.coder.llm.LlmResponse {
@@ -810,6 +861,9 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             )
             return try {
                 once(o)
+            } catch (e: com.suarez.coder.llm.WatchdogCut) {
+                noteCut(e, o.maxOutputTokens)
+                throw e
             } catch (e: GeminiClient.StallException) {
                 throw com.suarez.coder.llm.LlmException(
                     "${ref.model}: ${e.message}; istek takıldı. Tekrar deneyin; sürerse düşünme seviyesini düşürün veya başka model seçin."
@@ -957,19 +1011,23 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                 history.add(requestIndex + 1, block)
             }
             // Scoped rules follow the files of this turn. They stay out of the cached system prefix.
+            // A Turn-0 pack, when it is used, carries the same rules inside the first task message.
+            var ruleText: String? = null
             if (!isEvolutionSession && requestIndex >= 0) {
                 val mentioned = Regex("[\\w./-]+\\.[A-Za-z0-9]{1,8}").findAll(request?.text.orEmpty()).map { it.value }.toList()
                 val rulePaths = (autoPaths + settings.contextFiles + mentioned).map { it.trim().removePrefix("./") }.filter { it.isNotBlank() }.distinct()
                 val repoForRules = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) }
-                if (!repoForRules.isNullOrBlank() && rulePaths.isNotEmpty()) {
-                    context.matchingRulesBlock(repoForRules, rulePaths)?.let { rules ->
-                        val at = (requestIndex + 1 until history.size).lastOrNull { history[it] is ChatMessage.ContextBlock }
-                        if (at != null) {
-                            val b = history[at] as ChatMessage.ContextBlock
-                            history[at] = b.copy(text = b.text.trimEnd() + "\n\n" + rules)
-                        } else history.add(requestIndex + 1, ChatMessage.ContextBlock(rules, "proje kuralları"))
-                    }
-                }
+                if (!repoForRules.isNullOrBlank() && rulePaths.isNotEmpty()) ruleText = context.matchingRulesBlock(repoForRules, rulePaths)
+            }
+            val packed = if (request != null && requestIndex >= 0) {
+                prepareTurn0(history, requestIndex, request, route, autoPaths, ruleText)
+            } else false
+            if (!packed && ruleText != null && requestIndex >= 0) {
+                val at = (requestIndex + 1 until history.size).lastOrNull { history[it] is ChatMessage.ContextBlock }
+                if (at != null) {
+                    val b = history[at] as ChatMessage.ContextBlock
+                    history[at] = b.copy(text = b.text.trimEnd() + "\n\n" + ruleText)
+                } else history.add(requestIndex + 1, ChatMessage.ContextBlock(ruleText, "proje kuralları"))
             }
             // Learned model choice for this run (the user's pool; otherwise their fixed models).
             lastRoute = (route ?: if (settings.architectMode) Route.COMPLEX_ARCHITECT else Route.SIMPLE_EDIT).name
@@ -1014,6 +1072,65 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             roleOverrides = emptyMap()
             ui.update()
         }
+    }
+
+    /**
+     * Builds a Turn-0 pack from the local graph (and a short GitHub read) and appends it as a context block
+     * on the first task message. Returns false for questions, a blank repo, or when nothing relevant was indexed.
+     * The system prompt is not touched.
+     */
+    private suspend fun prepareTurn0(
+        history: MutableList<ChatMessage>,
+        requestIndex: Int,
+        request: ChatMessage.User,
+        route: Route?,
+        ranked: List<String>,
+        rules: String?,
+    ): Boolean {
+        if (!settings.turn0Pack || isEvolutionSession || route == Route.QUESTION_ONLY || request.isHarnessInternal) return false
+        val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return false
+        try {
+            kotlinx.coroutines.withTimeout(8_000) {
+                val tree = runCatching { tools.filteredTree(repo, context.ref) }.getOrDefault(emptyList())
+                val code = tree.filter { e ->
+                    val ext = e.path.substringAfterLast('.', "").lowercase()
+                    ext in setOf("kt", "kts", "java", "py", "gd") && e.size in 1..250_000
+                }
+                val order = (ranked + com.suarez.coder.decision.RouterLogic.rank(request.text, code.map { it.path })).distinct()
+                for (path in order.take(10)) {
+                    val sha = code.firstOrNull { it.path == path }?.sha?.ifBlank { null } ?: path
+                    if (!tools.dependencyGraph.needs(path, sha)) continue
+                    val text = runCatching { tools.github.readFileRaw(repo, path, context.ref) }.getOrNull() ?: continue
+                    tools.dependencyGraph.update(path, sha, text)
+                }
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            // The pack is optional.
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A missing tree must not block the task.
+        }
+        val sources = tools.dependencyGraph.sources().map { com.suarez.coder.context.Turn0ContextPacker.Source(it.key, it.value) }
+        if (sources.isEmpty()) return false
+        val ruleLines = rules?.lines()?.map { it.removePrefix("-").trim() }?.filter { line ->
+            line.isNotBlank() && !line.startsWith("[")
+        }.orEmpty()
+        val pack = com.suarez.coder.context.Turn0ContextPacker.pack(
+            com.suarez.coder.context.Turn0ContextPacker.Request(
+                task = request.text,
+                taskKind = com.suarez.coder.context.Turn0ContextPacker.TaskKind.WRITE,
+                sources = sources,
+                graph = tools.dependencyGraph,
+                ranked = ranked,
+                rules = ruleLines,
+                charCap = settings.turn0CharCap,
+            ),
+        )
+        if (!pack.used) return false
+        val at = (requestIndex + 1 until history.size).lastOrNull { history[it] is ChatMessage.ContextBlock } ?: requestIndex
+        history.add(at + 1, ChatMessage.ContextBlock(pack.block, "TURN-0 BAĞLAM PAKETİ"))
+        return true
     }
 
     /** True for a vague change request when the user has not just answered our questions. */
@@ -1263,6 +1380,9 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         var consecutiveFailures = 0
         var reads = 0
         var cur = ref
+        var watchdogStrikes = 0
+        var swappedImplementer = false
+        watchdogProse = !readOnly && role in setOf("agent", "editor", "escalation")
         val ci = CiController.CiState()
         // Yetki kurtarma: yazma niyetli görevde salt okunur yanıt gelirse oturumu bir kez READ_WRITE'a yükselt.
         var ro = readOnly
@@ -1291,9 +1411,12 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             history += ChatMessage.Notice(ReadOnlyMismatchRecovery.phaseLine())
             ui.update()
         }
+        try {
         for (step in 1..settings.maxSteps) {
             // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
-            HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->
+            val pace = com.suarez.coder.cost.FinOpsArbitrageEngine.pace(cacheTtl, cacheProviderKey())
+            val tail = if (pace.preferCompactAndTurn0) minOf(settings.compactTailChars, 24_000) else settings.compactTailChars
+            HistoryPruner.checkpointIndex(history, settings.keepTurns, tail)?.let { idx ->
                 history.add(idx, ChatMessage.CompactMark)
                 snapshots.clear()
                 history += ChatMessage.Notice("🗜 Geçmiş toplu sıkıştırıldı; önbellek bu adımda bir kez yenilenecek.")
@@ -1302,7 +1425,25 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
+            val reply = try {
+                callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
+            } catch (e: com.suarez.coder.llm.WatchdogCut) {
+                watchdogStrikes++
+                history += ChatMessage.User(com.suarez.coder.llm.MidStreamWatchdog.CONSTRAINT, isHarnessInternal = true)
+                ui.update()
+                if (watchdogStrikes == 1) continue
+                val backup = if (!swappedImplementer && role !in setOf("architect", "planner")) backupImplementer(cur) else null
+                if (backup != null) {
+                    history += ChatMessage.Notice("Yedek uygulayıcıya geçildi (${backup.model}). Kilitli mimar modeli değişmedi.")
+                    cur = backup
+                    swappedImplementer = true
+                    watchdogStrikes = 1
+                    ui.update()
+                    continue
+                }
+                history += ChatMessage.Notice("Akış devre kesicisi ikinci kez durdurdu.", e.partialText.take(300), isError = true)
+                return null
+            }
             history += reply
             ui.update()
             if (reply.toolCalls.isEmpty()) {
@@ -1408,6 +1549,30 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         }
         history += ChatMessage.Notice("Adım sınırına (${settings.maxSteps}) ulaşıldı. Devam etmek için \"devam et\" yazın.")
         return null
+        } finally {
+            watchdogProse = false
+        }
+    }
+
+    /**
+     * Another implementer from the cost-to-green window, else the user's escalation model.
+     * The locked architect id is never returned.
+     */
+    private fun backupImplementer(current: ModelRef): ModelRef? {
+        val architect = architectRef()
+        val domain = com.suarez.coder.evolution.CostToGreenScorer.classify(emptyList(), "")
+        val ranked = costToGreen?.scores(domain).orEmpty().filter {
+            !it.modelId.equals(current.model, true) && !it.modelId.equals(architect.model, true) &&
+                !it.modelId.equals(architect.key, true) && !it.coolingDown && it.n > 0
+        }
+        val picked = ranked.maxByOrNull { costToGreen?.selectionScore(it) ?: 0.0 }?.modelId
+        val fromScore = picked?.let { ModelRef.parse(it) ?: ModelRef.parse("gemini/$it") }
+        val next = fromScore ?: escalationRef() ?: settings.modelCatalog.mapNotNull { ModelRef.parse(it) }.firstOrNull {
+            it.key != current.key && it.key != architect.key && settings.keyFor(it.provider).isNotBlank()
+        }
+        if (next == null || next.key == architect.key || next.key == current.key) return null
+        if (settings.keyFor(next.provider).isBlank()) return null
+        return next
     }
 
     /** Returns the result and whether the user rejected it. */

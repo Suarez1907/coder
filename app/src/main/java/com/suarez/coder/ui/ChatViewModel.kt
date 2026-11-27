@@ -1362,6 +1362,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Cost dashboard ----
 
+    suspend fun finOpsSummary(): com.suarez.coder.cost.FinOpsReport.Summary = withContext(Dispatchers.IO) {
+        com.suarez.coder.cost.FinOpsReport.summarize(evoStore.traces())
+    }
+
     suspend fun costBreakdown(): CostBreakdown = withContext(Dispatchers.IO) {
         // Evolution runs bill outside the chat; they appear as their own role.
         val evo = evoStore.log().filter { it.costUsd > 0 }.map {

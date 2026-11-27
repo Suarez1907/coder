@@ -1,5 +1,6 @@
 package com.suarez.coder.evolution
 
+import com.suarez.coder.cost.PriorityTier
 import com.suarez.coder.skills.Skill
 import com.suarez.coder.skills.SkillParser
 
@@ -9,6 +10,7 @@ import com.suarez.coder.skills.SkillParser
  * EvolutionWorker calls this on the isolated evolution path; the user activates the draft.
  */
 object SkillSynthesizer {
+    val priorityTier: PriorityTier = PriorityTier.BACKGROUND_FLEX
     const val MAX_BYTES = 6 * 1024
     const val MIN_TOOL_STEPS = 6
 

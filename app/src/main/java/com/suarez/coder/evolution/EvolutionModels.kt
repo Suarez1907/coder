@@ -49,6 +49,17 @@ data class SessionTrace(
     val prePushGateWarningsCount: Int = 0,
     /** Anonymized JSON windows (~40 lines around a real failure). Empty means no self-PR. */
     val failureWindows: List<String> = emptyList(),
+    /** Turn-0 pack was attached to the first task message. */
+    val turn0PackUsed: Boolean = false,
+    val turn0CharsPacked: Int = 0,
+    /** The first model turn of the run applied an edit without a prior read loop. */
+    val firstTurnEditSuccess: Boolean = false,
+    val watchdogCuts: Int = 0,
+    val estimatedSavedOutputTokens: Long = 0,
+    val watchdogSavedUsd: Double = 0.0,
+    val codeModFilesTouched: Int = 0,
+    val codeModSavedTokens: Long = 0,
+    val flexSavedUsd: Double = 0.0,
 ) {
     /** Problems that are worth learning from (a clean, cheap run teaches nothing). */
     val troubleScore get() = diffErrorCount + ciFailureCount * 2 + escalations.size + (if (stopped) 1 else 0) + (if (userCorrection) 2 else 0)
@@ -65,6 +76,9 @@ data class SessionTrace(
         .put("preflight", preflightBlocksCount).put("sr2", searchReplaceTier2Count).put("sr3", searchReplaceTier3Count)
         .put("osc", oscillationEscalationsCount).put("prepush", prePushGateWarningsCount)
         .put("windows", JSONArray(failureWindows))
+        .put("turn0", turn0PackUsed).put("turn0Chars", turn0CharsPacked).put("turn0Edit", firstTurnEditSuccess)
+        .put("watchCuts", watchdogCuts).put("watchSavedTok", estimatedSavedOutputTokens).put("watchSavedUsd", watchdogSavedUsd)
+        .put("codeModFiles", codeModFilesTouched).put("codeModSaved", codeModSavedTokens).put("flexSaved", flexSavedUsd)
 
     companion object {
         private fun list(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -79,6 +93,9 @@ data class SessionTrace(
             o.optNullableString("prop"), list(o.optJSONArray("steps")),
             o.optInt("preflight"), o.optInt("sr2"), o.optInt("sr3"), o.optInt("osc"), o.optInt("prepush"),
             list(o.optJSONArray("windows")),
+            o.optBoolean("turn0"), o.optInt("turn0Chars"), o.optBoolean("turn0Edit"),
+            o.optInt("watchCuts"), o.optLong("watchSavedTok"), o.optDouble("watchSavedUsd", 0.0),
+            o.optInt("codeModFiles"), o.optLong("codeModSaved"), o.optDouble("flexSaved", 0.0),
         )
     }
 }

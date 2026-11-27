@@ -191,6 +191,29 @@ class ToolRegistry(private val settings: Settings) {
             "tamamı gerekmiyorsa github_read_file yerine bunu kullan: çok daha az token. path verilmezse kod dizininden bulunur.",
         obj("repo" to str(repoDesc), "symbol" to str("Ad, ör. saveScore"), "path" to str("Dosya (biliniyorsa)"), "ref" to str("Branch (boşsa varsayılan)"),
             required = listOf("symbol")))
+    private val codeModRename = ToolSpec("code_mod_rename_symbol",
+        "Bir sembolü, string ve yorumlara dokunmadan, tam kelime sınırında yeniden adlandırır. Etkilenen .kt .java .py .gd dosyaları " +
+            "tek commit olur. Model çağrısı yapmaz. includeStrings true ise string literalleri de değişir.",
+        obj("oldName" to str("Eski sembol adı"), "newName" to str("Yeni sembol adı"),
+            "scopePaths" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Yalnızca bu yollar (boş = tüm indeks)"),
+            "includeStrings" to bool("String literallerini de değiştir (varsayılan false)"),
+            "repo" to str(repoDesc), "branch" to str("Hedef branch"), "base_branch" to str("Branch yoksa kaynağı"),
+            "message" to str("Commit mesajı"),
+            required = listOf("oldName", "newName", "branch")))
+    private val codeModImports = ToolSpec("code_mod_update_imports",
+        "Paket veya modül taşındıktan sonra import, from-import ve preload(\"res://...\") yollarını tek committe günceller. Model çağrısı yapmaz.",
+        obj("oldPrefix" to str("Eski paket veya yol ön eki"), "newPrefix" to str("Yeni ön ek"),
+            "scopePaths" to JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")).put("description", "Yalnızca bu yollar"),
+            "repo" to str(repoDesc), "branch" to str("Hedef branch"), "base_branch" to str("Branch yoksa kaynağı"),
+            "message" to str("Commit mesajı"),
+            required = listOf("oldPrefix", "newPrefix", "branch")))
+    private val codeModMove = ToolSpec("code_mod_move_file",
+        "Dosyayı yeni yola taşır, Kotlin/Java package bildirimini günceller ve istenirse import ile referansları aynı committe düzeltir. Model çağrısı yapmaz.",
+        obj("fromPath" to str("Eski dosya yolu"), "toPath" to str("Yeni dosya yolu"),
+            "updateReferences" to bool("Import ve yol referanslarını güncelle (varsayılan true)"),
+            "repo" to str(repoDesc), "branch" to str("Hedef branch"), "base_branch" to str("Branch yoksa kaynağı"),
+            "message" to str("Commit mesajı"),
+            required = listOf("fromPath", "toPath", "branch")))
     private val codemod = ToolSpec("codemod",
         "Çok dosyalı MEKANİK değişiklikleri (yeniden adlandırma, API göçü, kalıp değişimi) tek yapısal kuralla yapar: ast-grep GitHub Actions'ta " +
             "tüm repoya uygulanır, değişen dosyalar commit denetimlerinden geçip tek commit olur. Her dosyaya ayrı diff yazmaktan çok daha ucuz " +
@@ -233,6 +256,11 @@ class ToolRegistry(private val settings: Settings) {
         add(findImpact)
         add(findReferences)
         add(readSymbol)
+        if (writer) {
+            add(codeModRename)
+            add(codeModImports)
+            add(codeModMove)
+        }
         if (writer && cloudOps != null) { add(codemod); add(mutationTest) }
         if (settings.semanticSearch && semantic != null && settings.geminiKey.isNotBlank()) add(semanticSearch)
         if (writer && settings.todoList) add(updateTodos)
@@ -296,7 +324,8 @@ class ToolRegistry(private val settings: Settings) {
 
         /** Tools that change files, run things or change the repository. */
         val WRITE_TOOLS = setOf("github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-            "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool", "codemod", "mutation_test")
+            "github_merge_pull_request", "github_run_workflow", "ci_wait", "run_cloud_tool", "codemod", "mutation_test",
+            "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file")
 
         /** Hard guard for planning roles: only read tools, and github_api only with GET. */
         fun architectDenied(name: String, method: String?): String? {
@@ -327,7 +356,8 @@ class ToolRegistry(private val settings: Settings) {
 
     fun needsApproval(call: ToolCall): Boolean = when (call.name) {
         "github_write_files", "github_apply_diff", "github_create_branch", "github_create_pull_request",
-        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool", "codemod", "mutation_test" -> true
+        "github_merge_pull_request", "github_run_workflow", "run_cloud_tool", "codemod", "mutation_test",
+        "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file" -> true
         "github_api" -> call.args.optString("method", "GET").uppercase() != "GET"
         else -> false
     }
@@ -423,6 +453,15 @@ class ToolRegistry(private val settings: Settings) {
             "github_find_impact" -> findImpact(repo(), s("ref"), req("path"), s("symbolName") ?: s("symbol"))
             "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
             "read_symbol" -> readSymbol(repo(), s("ref"), req("symbol").trim(), s("path"))
+            "code_mod_rename_symbol" -> codeMod(repo(), req("branch"), s("base_branch"), s("message") ?: "code-mod rename") { engine ->
+                engine.rename(req("oldName"), req("newName"), Args.stringList(a, "scopePaths"), a.optBoolean("includeStrings", false))
+            }
+            "code_mod_update_imports" -> codeMod(repo(), req("branch"), s("base_branch"), s("message") ?: "code-mod imports") { engine ->
+                engine.updateImports(req("oldPrefix"), req("newPrefix"), Args.stringList(a, "scopePaths"))
+            }
+            "code_mod_move_file" -> codeMod(repo(), req("branch"), s("base_branch"), s("message") ?: "code-mod move") { engine ->
+                engine.move(req("fromPath"), req("toPath"), if (a.has("updateReferences")) a.optBoolean("updateReferences") else true)
+            }
             "codemod" -> (cloudOps ?: throw ToolException("Codemod bu oturumda kullanılamıyor.")).codemod(repo(), req("branch"), s("base_branch"), a)
             "mutation_test" -> (cloudOps ?: throw ToolException("Mutasyon testi bu oturumda kullanılamıyor.")).mutation(repo(), req("branch"), req("path"),
                 i("start_line"), i("end_line"), Args.stringList(a, "tests"))
@@ -442,10 +481,43 @@ class ToolRegistry(private val settings: Settings) {
             }
             else -> throw ToolException("Bilinmeyen araç: ${call.name}")
         }
-        if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request") ||
+        if (call.name in setOf("github_apply_diff", "github_write_files", "github_merge_pull_request",
+                "code_mod_rename_symbol", "code_mod_update_imports", "code_mod_move_file") ||
             (call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET")
         ) onRepoChanged()
         return result
+    }
+
+    private suspend fun codeMod(
+        repo: String,
+        branch: String,
+        base: String?,
+        message: String,
+        op: (com.suarez.coder.harness.StructuralRefactorEngine) -> com.suarez.coder.harness.StructuralRefactorEngine.Outcome,
+    ): String {
+        refreshGraph(repo, branch, limit = 200)
+        val own = listOf(settings.githubToken, settings.geminiKey, settings.deepseekKey, settings.openrouterKey, settings.context7Key)
+        val engine = com.suarez.coder.harness.StructuralRefactorEngine(dependencyGraph, ownKeys = own)
+        val outcome = op(engine)
+        if (!outcome.ok) return outcome.summary
+        val files = outcome.edits.map { e ->
+            GitHub.FileChange(e.path, e.after, delete = e.after == null)
+        }
+        val staged = outcome.edits.map { Triple(it.path, it.before, it.after) }
+        commitNotes.clear()
+        preCommit?.invoke(repo, branch, staged)
+        beforeWrite?.invoke(repo, branch)
+        val pushed = engine.commit(outcome) {
+            // The commit itself is the single git push below. This callback only marks that the gates passed.
+        }
+        if (!pushed.ok) return pushed.summary
+        return github.commitFiles(repo, branch, message, files, base).also { r ->
+            afterCommit?.invoke(repo, r, files.map { it.path }, files.count { it.content != null && dependencyGraph.source(it.path) == null })
+            outcome.edits.forEach { e ->
+                if (e.after == null) dependencyGraph.remove(e.path)
+                else dependencyGraph.update(e.path, e.after.hashCode().toString(), e.after)
+            }
+        } + "\n" + outcome.summary
     }
 
     private suspend fun listSymbols(repo: String, ref: String?, path: String): String {
@@ -458,12 +530,12 @@ class ToolRegistry(private val settings: Settings) {
         return dependencyGraph.formatImpact(path, symbol)
     }
 
-    private suspend fun refreshGraph(repo: String, ref: String?) {
+    private suspend fun refreshGraph(repo: String, ref: String?, limit: Int = 100) {
         val tree = runCatching { github.treeEntries(repo, ref) }.getOrNull() ?: return
         val wanted = tree.second.filter { e ->
             val ext = e.path.substringAfterLast('.', "").lowercase()
             ext in setOf("kt", "java", "py", "gd") && e.size in 1..200_000
-        }.take(100)
+        }.take(limit)
         for (e in wanted) {
             if (!dependencyGraph.needs(e.path, e.sha)) continue
             val text = runCatching { github.readFileRaw(repo, e.path, ref) }.getOrNull() ?: continue
