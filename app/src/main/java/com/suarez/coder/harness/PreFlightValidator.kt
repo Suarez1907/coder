@@ -236,9 +236,9 @@ object PreFlightValidator {
     }
 
     private fun checkStrictJson(path: String, text: String, issues: MutableList<Issue>) {
-        val result = StrictJson.validate(text)
-        if (!result.isValid) {
-            issues += Issue(path, result.line, result.error ?: "JSON sözdizimi hatası")
+        val err = StrictJson.error(text)
+        if (err != null) {
+            issues += Issue(path, 1, err)
         }
     }
 

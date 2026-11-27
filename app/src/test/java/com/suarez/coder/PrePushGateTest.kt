@@ -13,7 +13,15 @@ import org.junit.Test
 
 class PrePushGateTest {
     private fun staged(path: String, content: String = "class X") =
-        PreFlightValidator.StagedFile(path = path, content = content)
+        PreFlightValidator.StagedFile(path = path, before = null, after = content)
+
+    private fun choiceResult(choice: String, inputTokens: Long = 100L, model: String? = "gemini-decision-1") =
+        DecisionResult(
+            answers = mapOf("pre_push_gate" to DecisionAnswer(type = "choice", choice = choice, confidence = 1.0)),
+            inputTokens = inputTokens,
+            latencyMs = 10L,
+            model = model,
+        )
 
     @Test
     fun belowThresholdDoesNotTriggerDecide() = runBlocking {
@@ -22,7 +30,7 @@ class PrePushGateTest {
         val files = listOf(staged("app/src/main/java/A.kt"), staged("app/src/main/java/B.kt"))
         val res = gate.check("Small fix.", files, addedLines = 20, removedLines = 20) { _, _ ->
             called = true
-            DecisionResult(emptyList())
+            DecisionResult(emptyMap(), 0L, 0L)
         }
         assertFalse(called)
         assertFalse(res.triggered)
@@ -37,11 +45,7 @@ class PrePushGateTest {
         val longTask = "First sentence. Second sentence. " + "x".repeat(3000)
         val res = gate.check(longTask, files, addedLines = 10, removedLines = 5) { input, _ ->
             capturedInput = input
-            DecisionResult(
-                answers = listOf(DecisionAnswer("pre_push_gate", "APPROVE")),
-                inputTokens = 100,
-                model = "gemini-decision-1",
-            )
+            choiceResult("APPROVE")
         }
         assertTrue(res.triggered)
         assertTrue(capturedInput.length <= PrePushGate.MAX_INPUT_CHARS)
@@ -55,7 +59,7 @@ class PrePushGateTest {
         val files = listOf(staged("app/src/main/java/A.kt"))
         val res = gate.check("Refactor.", files, addedLines = 80, removedLines = 40) { _, _ ->
             called = true
-            DecisionResult(listOf(DecisionAnswer("pre_push_gate", "APPROVE")))
+            choiceResult("APPROVE")
         }
         assertTrue(called)
         assertTrue(res.triggered)
@@ -74,7 +78,7 @@ class PrePushGateTest {
             var called = false
             val res = gate.check("Update critical file.", listOf(staged(path)), 1, 0) { _, _ ->
                 called = true
-                DecisionResult(listOf(DecisionAnswer("pre_push_gate", "APPROVE")))
+                choiceResult("APPROVE")
             }
             assertTrue("Expected trigger for $path", called)
             assertTrue("Expected triggered=true for $path", res.triggered)
@@ -87,19 +91,19 @@ class PrePushGateTest {
         val files = listOf(staged("a.kt"), staged("b.kt"), staged("c.kt"))
 
         val w1 = gate.check("Task.", files, 10, 0) { _, _ ->
-            DecisionResult(listOf(DecisionAnswer("pre_push_gate", "WARN_SCOPE_DRIFT")))
+            choiceResult("WARN_SCOPE_DRIFT")
         }
         val w2 = gate.check("Task.", files, 10, 0) { _, _ ->
-            DecisionResult(listOf(DecisionAnswer("pre_push_gate", "WARN_SCOPE_DRIFT")))
+            choiceResult("WARN_SCOPE_DRIFT")
         }
         assertEquals(PrePushGate.Verdict.WARN_SCOPE_DRIFT, w1.verdict)
         assertEquals(PrePushGate.Verdict.APPROVE, w2.verdict)
 
         val r1 = gate.check("Task.", files, 10, 0) { _, _ ->
-            DecisionResult(listOf(DecisionAnswer("pre_push_gate", "REQUIRE_ARCHITECT_REVIEW")))
+            choiceResult("REQUIRE_ARCHITECT_REVIEW")
         }
         val r2 = gate.check("Task.", files, 10, 0) { _, _ ->
-            DecisionResult(listOf(DecisionAnswer("pre_push_gate", "REQUIRE_ARCHITECT_REVIEW")))
+            choiceResult("REQUIRE_ARCHITECT_REVIEW")
         }
         assertEquals(PrePushGate.Verdict.REQUIRE_ARCHITECT_REVIEW, r1.verdict)
         assertEquals(PrePushGate.Verdict.APPROVE, r2.verdict)
@@ -119,7 +123,7 @@ class PrePushGateTest {
 
         val timeoutRes = gate.check("Task.", files, 10, 0) { _, _ ->
             delay(5_000L)
-            DecisionResult(listOf(DecisionAnswer("pre_push_gate", "WARN_SCOPE_DRIFT")))
+            choiceResult("WARN_SCOPE_DRIFT")
         }
         assertTrue(timeoutRes.triggered)
         assertTrue(timeoutRes.timedOutOrFailed)

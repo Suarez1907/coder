@@ -223,18 +223,17 @@ class ArchitectEditor(private val agent: Agent) {
         if (changes.isEmpty()) return Outcome(false, "Uygulayıcı hiçbir değişiklik üretmedi.")
 
         val staged = changes.filter { !it.delete && it.content != null }
-            .map { PreFlightValidator.StagedFile(it.path, it.content!!) }
-        when (val pf = PreFlightValidator.validate(staged)) {
-            is PreFlightValidator.Result.Blocked -> {
-                history += ChatMessage.Notice(
-                    "Ön kontrol: ${pf.issues.size} sözdizimi hatası push öncesi yakalandı (\$0 CI)",
-                    pf.report,
-                    isError = true,
-                )
-                ui.update()
-                return Outcome(false, "Ön kontrol commit'i durdurdu, GitHub API çağrılmadı:\n${pf.report}", repairable = true)
-            }
-            PreFlightValidator.Result.Valid -> Unit
+            .map { PreFlightValidator.StagedFile(it.path, originals[it.path], it.content) }
+        val pf = PreFlightValidator.validate(staged)
+        if (!pf.ok) {
+            val report = pf.report()
+            history += ChatMessage.Notice(
+                "Ön kontrol: ${pf.issues.size} sözdizimi hatası push öncesi yakalandı (\$0 CI)",
+                report,
+                isError = true,
+            )
+            ui.update()
+            return Outcome(false, "Ön kontrol commit'i durdurdu, GitHub API çağrılmadı:\n$report", repairable = true)
         }
 
         if (!agent.settings.autoApprove) {
@@ -448,8 +447,8 @@ class ArchitectEditor(private val agent: Agent) {
                 state[path] = if (res.applied.isEmpty() && state[path] == null) null else res.content
                 if (res.applied.isNotEmpty()) {
                     touched += path
-                    tier2 += res.applied.count { it.tier.name == "WHITESPACE_NORMALIZED" }
-                    tier3 += res.applied.count { it.tier.name == "LINE_ANCHOR" }
+                    tier2 += res.applied.count { res.tiersUsed[it.index]?.name == "WHITESPACE_NORMALIZED" }
+                    tier3 += res.applied.count { res.tiersUsed[it.index]?.name == "LINE_ANCHOR" }
                 }
                 if (res.failures.isNotEmpty()) {
                     failedPaths += path
@@ -463,20 +462,18 @@ class ArchitectEditor(private val agent: Agent) {
             // Cheap local checks catch broken edits before they cost a CI round trip.
             val invalid = validate(touched, originals, state)
             invalid.forEach { (p, why) -> problems += "Yerel kontrol, $p: $why"; failedPaths += p }
-            val stagedTouched = touched.mapNotNull { p -> state[p]?.let { PreFlightValidator.StagedFile(p, it) } }
-            when (val pf = PreFlightValidator.validate(stagedTouched)) {
-                is PreFlightValidator.Result.Blocked -> {
-                    pf.issues.forEach { issue ->
-                        problems += "${issue.path}:${issue.line}: ${issue.reason}"
-                        failedPaths += issue.path
-                    }
-                    history += ChatMessage.Notice(
-                        "Ön kontrol: ${pf.issues.size} sözdizimi hatası yakalandı (\$0 CI)",
-                        pf.report,
-                        isError = true,
-                    )
+            val stagedTouched = touched.mapNotNull { p -> state[p]?.let { PreFlightValidator.StagedFile(p, originals[p], it) } }
+            val pf = PreFlightValidator.validate(stagedTouched)
+            if (!pf.ok) {
+                pf.issues.forEach { issue ->
+                    problems += "${issue.path}:${issue.line}: ${issue.reason}"
+                    failedPaths += issue.path
                 }
-                PreFlightValidator.Result.Valid -> Unit
+                history += ChatMessage.Notice(
+                    "Ön kontrol: ${pf.issues.size} sözdizimi hatası yakalandı (\$0 CI)",
+                    pf.report(),
+                    isError = true,
+                )
             }
 
             val label = Agent.roleLabel(step.role)
@@ -490,9 +487,9 @@ class ArchitectEditor(private val agent: Agent) {
             feedback = problems.joinToString("\n")
             val verdict = breaker.recordFailure(feedback.hashCode().toString(), feedback, "Uygulayıcı hatası")
             if (verdict.action == OscillationBreaker.Action.ESCALATE_TO_ARCHITECT) {
-                history += ChatMessage.Notice(verdict.userNotice, isError = true)
+                history += ChatMessage.Notice(verdict.userNotice ?: "Salınım kesici devreye girdi", isError = true)
                 ui.update()
-                return Outcome(false, verdict.internalMessage, repairable = true)
+                return Outcome(false, verdict.internalMessage ?: "Salınım tespit edildi, mimara yükseltildi.", repairable = true)
             }
             pending = group.filter { it.path in failedPaths || it.path in untouched }
             failedNow = (failedPaths + untouched).toSet()

@@ -75,7 +75,7 @@ class PrePushGate {
             .append(", -").append(removedLines).append('\n')
         sb.append("Files:\n")
         for (f in files) {
-            val line = "- ${f.path} (${f.content.length} chars)\n"
+            val line = "- ${f.path} (${(f.after ?: "").length} chars)\n"
             if (sb.length + line.length > MAX_INPUT_CHARS) break
             sb.append(line)
         }
@@ -84,12 +84,13 @@ class PrePushGate {
     }
 
     private fun gateQuestion(): DecisionQuestion = DecisionQuestion(
-        id = "pre_push_gate",
-        prompt = "Review staged changes for scope drift or architectural risk.",
-        options = listOf(
-            Verdict.APPROVE.name,
-            Verdict.WARN_SCOPE_DRIFT.name,
-            Verdict.REQUIRE_ARCHITECT_REVIEW.name,
+        key = "pre_push_gate",
+        type = "choice",
+        instructions = "Review staged changes for scope drift or architectural risk.",
+        criteria = mapOf(
+            Verdict.APPROVE.name to "Changes match task scope and carry low architectural risk",
+            Verdict.WARN_SCOPE_DRIFT.name to "Noticeable scope drift from task",
+            Verdict.REQUIRE_ARCHITECT_REVIEW.name to "High architectural risk requiring architect review",
         ),
     )
 
@@ -109,7 +110,7 @@ class PrePushGate {
             val result = withTimeout(TIMEOUT_MS) {
                 decide(input, listOf(gateQuestion()))
             }
-            val rawChoice = result.answers.firstOrNull()?.choice?.trim().orEmpty()
+            val rawChoice = result.answers["pre_push_gate"]?.choice?.trim().orEmpty()
             var verdict = runCatching { Verdict.valueOf(rawChoice) }.getOrDefault(Verdict.APPROVE)
             if (verdict == Verdict.WARN_SCOPE_DRIFT) {
                 if (warnedOnce) verdict = Verdict.APPROVE else warnedOnce = true

@@ -11,6 +11,7 @@ import com.suarez.coder.decision.PrePushGate
 import com.suarez.coder.evolution.Experiment
 import com.suarez.coder.evolution.WeeklyCycle
 import com.suarez.coder.harness.OscillationBreaker
+import com.suarez.coder.harness.PreFlightValidator
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
@@ -262,34 +263,31 @@ class ArchitectLockTest {
     @Test fun oscillationBreakerAndPrePushGateEscalationsKeepLockedArchitectModel() {
         val agent = Agent(settings)
         val lockedArchitect = settings.architectModel
+        val lockedRef = ModelRef.parse(lockedArchitect)!!
         assertEquals(lockedArchitect, agent.architectRef().key)
 
-        val breaker = OscillationBreaker()
-        repeat(OscillationBreaker.DEFAULT_THRESHOLD) {
-            breaker.recordFailure("A.kt", "SEARCH bloğu bulunamadı")
-        }
-        assertTrue(breaker.isTripped("A.kt"))
+        val breaker = OscillationBreaker(lockedRef)
+        breaker.recordFailure("h1", "SEARCH bloğu bulunamadı", "deneme 1")
+        val verdict = breaker.recordFailure("h1", "SEARCH bloğu bulunamadı", "deneme 2")
+        assertEquals(OscillationBreaker.Action.ESCALATE_TO_ARCHITECT, verdict.action)
+        assertEquals(lockedRef.key, verdict.targetModel?.key)
         assertEquals(lockedArchitect, settings.architectModel)
         assertEquals(lockedArchitect, agent.architectRef().key)
 
-        val gateVerdict = PrePushGate.evaluate(
-            PrePushGate.Input(
-                changedFiles = listOf("A.kt", "B.kt", "C.kt", "D.kt", "E.kt", "F.kt"),
-                totalDiffLines = 600,
-                hasArchitectReview = false,
-                oscillationTripped = true
-            )
-        )
-        assertEquals(PrePushGate.Action.REQUIRE_ARCHITECT_REVIEW, gateVerdict.action)
+        val files = (1..6).map { PreFlightValidator.StagedFile("F$it.kt", null, "class F$it") }
+        assertTrue(PrePushGate().shouldTrigger(files, addedLines = 400, removedLines = 200))
         assertEquals(lockedArchitect, settings.architectModel)
         assertEquals(lockedArchitect, agent.architectRef().key)
     }
 
     @Test fun escalationNeverSwapsTheLockedArchitectForARepairModel() {
         val locked = settings.architectModel
-        val breaker = OscillationBreaker()
-        repeat(OscillationBreaker.DEFAULT_THRESHOLD) { breaker.recordFailure("A.kt", "SEARCH bloğu bulunamadı") }
-        assertTrue(breaker.isTripped("A.kt"))
+        val lockedRef = ModelRef.parse(locked)!!
+        val breaker = OscillationBreaker(lockedRef)
+        breaker.recordFailure("h1", "SEARCH bloğu bulunamadı", "deneme 1")
+        val verdict = breaker.recordFailure("h1", "SEARCH bloğu bulunamadı", "deneme 2")
+        assertEquals(OscillationBreaker.Action.ESCALATE_TO_ARCHITECT, verdict.action)
+        assertEquals(lockedRef.key, verdict.targetModel?.key)
         val agent = Agent(settings)
         assertEquals("deepseek/arch", locked)
         assertEquals(locked, agent.architectRef().key)
@@ -302,18 +300,12 @@ class ArchitectLockTest {
         val locked = ModelRef.parse(lockedKey)!!
         assertEquals(lockedKey, agent.architectRef().key)
 
-        // Salınım kesici tetiklenir ve PrePushGate mimar incelemesi ister.
-        val breaker = OscillationBreaker()
-        repeat(OscillationBreaker.DEFAULT_THRESHOLD) { breaker.recordFailure("A.kt", "SEARCH bloğu bulunamadı") }
-        val verdict = PrePushGate.evaluate(
-            PrePushGate.Input(
-                changedFiles = listOf("A.kt", "B.kt", "C.kt", "D.kt", "E.kt", "F.kt"),
-                totalDiffLines = 600,
-                hasArchitectReview = false,
-                oscillationTripped = breaker.isTripped("A.kt")
-            )
-        )
-        assertEquals(PrePushGate.Action.REQUIRE_ARCHITECT_REVIEW, verdict.action)
+        // Salınım kesici tetiklenir ve kilitli mimara eskalasyon ister.
+        val breaker = OscillationBreaker(locked)
+        breaker.recordFailure("h1", "SEARCH bloğu bulunamadı", "deneme 1")
+        val verdict = breaker.recordFailure("h1", "SEARCH bloğu bulunamadı", "deneme 2")
+        assertEquals(OscillationBreaker.Action.ESCALATE_TO_ARCHITECT, verdict.action)
+        assertEquals(locked.key, verdict.targetModel?.key)
 
         // Onarım merdiveni asla kilitli mimar modeliyle ya da "architect" rolüyle çağırmaz.
         val ladder = ArchitectEditor.executorLadder(
