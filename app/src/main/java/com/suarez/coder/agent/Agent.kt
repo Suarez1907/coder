@@ -1099,8 +1099,21 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
                     val ext = e.path.substringAfterLast('.', "").lowercase()
                     ext in setOf("kt", "kts", "java", "py", "gd") && e.size in 1..250_000
                 }
-                val order = (ranked + com.suarez.coder.decision.RouterLogic.rank(request.text, code.map { it.path })).distinct()
-                for (path in order.take(10)) {
+                val paths = code.map { it.path }
+                val order = (ranked + com.suarez.coder.decision.RouterLogic.rank(request.text, paths))
+                    .map { it.trim().removePrefix("./") }.distinct()
+                val targets = order.filter { p ->
+                    val ext = p.substringAfterLast('.', "").lowercase()
+                    ext in setOf("kt", "kts", "java", "py", "gd") && !com.suarez.coder.context.Turn0ContextPacker.isTestPath(p)
+                }.take(com.suarez.coder.context.Turn0ContextPacker.MAX_FILES)
+                val tests = targets.flatMap { t ->
+                    val base = t.substringAfterLast('/').substringBeforeLast('.')
+                    paths.filter { p ->
+                        com.suarez.coder.context.Turn0ContextPacker.isTestPath(p) &&
+                            p.substringAfterLast('/').contains(base, ignoreCase = true)
+                    }
+                }.distinct()
+                for (path in (targets + tests).distinct()) {
                     val sha = code.firstOrNull { it.path == path }?.sha?.ifBlank { null } ?: path
                     if (!tools.dependencyGraph.needs(path, sha)) continue
                     val text = runCatching { tools.github.readFileRaw(repo, path, context.ref) }.getOrNull() ?: continue

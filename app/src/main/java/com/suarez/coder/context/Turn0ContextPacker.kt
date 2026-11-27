@@ -95,12 +95,9 @@ object Turn0ContextPacker {
         val local = RouterLogic.rank(task, paths)
         val preferred = ranked.map { it.trim().removePrefix("./") }.filter { it in known }
         val merged = (preferred + local).distinct()
-        val code = merged.filter { codeExt(it) in CODE_EXT || isTestPath(it) }
-        val pool = if (code.isNotEmpty()) code else merged
-        val cap = MAX_FILES.coerceAtMost(pool.size)
-        val floor = MIN_FILES.coerceAtMost(pool.size)
-        val n = cap.coerceAtLeast(floor)
-        return pool.take(n)
+        // 3–6 hedef dosya. Test dosyaları bu sayıya girmez; eşleşen test ayrıca eklenir.
+        val targets = merged.filter { codeExt(it) in CODE_EXT && !isTestPath(it) }
+        return targets.take(MAX_FILES)
     }
 
     private fun appendTarget(out: StringBuilder, file: Source, task: String, graph: RepoDependencyGraph) {
@@ -231,6 +228,9 @@ object Turn0ContextPacker {
             }
             return last
         }
+        if (!first.contains('{') && !first.trimEnd().let { it.endsWith("=") || it.endsWith("(") || it.endsWith(",") }) {
+            return def
+        }
         var depth = 0
         var opened = false
         val stop = minOf(lines.size, def + 220)
@@ -240,8 +240,11 @@ object Turn0ContextPacker {
                 if (c == '{') { depth++; opened = true } else if (c == '}') depth--
             }
             if (opened && depth <= 0) return i
+            if (!opened && i > def && !raw.trimEnd().let { it.endsWith("=") || it.endsWith("(") || it.endsWith(",") || it.endsWith("{") }) {
+                return i
+            }
         }
-        return (def + 40).coerceAtMost(lines.lastIndex)
+        return if (opened) (def + 40).coerceAtMost(lines.lastIndex) else def
     }
 
     private fun stripStrings(line: String): String {

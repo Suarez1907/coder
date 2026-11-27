@@ -179,13 +179,16 @@ class OpenAiCompatClient(
                                 }
                                 val prefix = src.peek().readByte()
                                 if (prefix == '{'.code.toByte() || prefix == '['.code.toByte()) {
-                                    val text = src.readUtf8()
-                                    val json = JSONObject(text)
-                                    val message = parse(json)
-                                    val verdict = dog.observe(message.text, message.toolCalls.isNotEmpty())
-                                    if (verdict.cut) {
-                                        throw WatchdogCut(verdict.reason!!, verdict.consumedChars, dog.captured().ifBlank { message.text }, usageOf(json))
+                                    val watched = JsonBodyWatch.read(src, dog, cancel = { call.cancel() })
+                                    if (watched.cut != null) {
+                                        throw WatchdogCut(
+                                            watched.cut.reason!!,
+                                            watched.cut.consumedChars,
+                                            dog.captured().ifBlank { watched.text },
+                                        )
                                     }
+                                    val json = JSONObject(watched.raw)
+                                    val message = parse(json)
                                     if (cont.isActive) cont.resume(responseOf(json, message))
                                     return
                                 }

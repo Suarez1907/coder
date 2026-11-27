@@ -125,4 +125,35 @@ class Turn0ContextPackerTest {
         assertEquals(pack.block.length, trace.turn0CharsPacked)
         assertTrue(trace.firstTurnEditSuccess)
     }
+
+    @Test fun selectsThreeToSixTargetsPlusTheMatchingTestAndAtMostFiveRules() {
+        val files = LinkedHashMap<String, String>()
+        for (i in 1..8) files["src/F$i.kt"] = "package app\n\nfun f$i() = $i\n"
+        files["src/F1Test.kt"] = "package app\n\nclass F1Test {\n    fun checks() = f1()\n}\n"
+        val huge = bigFile() + "\nOUTSIDE_SYMBOL_TAIL\n"
+        files["app/Score.kt"] = huge
+        files["app/Play.kt"] = caller()
+        val rules = (1..8).map { "kural-$it benzersiz" }
+        val pack = Turn0ContextPacker.pack(
+            Turn0ContextPacker.Request(
+                task = "saveScore ve f1 fonksiyonunu düzelt",
+                taskKind = Turn0ContextPacker.TaskKind.WRITE,
+                sources = files.map { Turn0ContextPacker.Source(it.key, it.value) },
+                graph = graph(files),
+                ranked = listOf("app/Score.kt", "app/Play.kt", "src/F1.kt"),
+                rules = rules,
+                charCap = 14_000,
+            ),
+        )
+        val targets = pack.paths.filter { !Turn0ContextPacker.isTestPath(it) }
+        assertTrue(targets.size in 3..6)
+        assertTrue(pack.paths.any { Turn0ContextPacker.isTestPath(it) })
+        assertTrue(pack.block.contains("fun saveScore"))
+        assertTrue(pack.block.contains("s.saveScore(1)"))
+        assertFalse(pack.block.contains("OUTSIDE_SYMBOL_TAIL"))
+        val kept = pack.block.lines().count { it.startsWith("- kural-") }
+        assertTrue(kept in 1..5)
+        assertFalse(pack.block.contains("kural-6"))
+        assertTrue(pack.charsPacked <= 14_000)
+    }
 }
