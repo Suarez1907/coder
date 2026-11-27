@@ -66,9 +66,34 @@ class EvalWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
 class WeeklyWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
-        runCatching { setForeground(foreground(applicationContext, "Coder kendini sınıyor")) }
+        val ctx = applicationContext
+        runCatching { setForeground(foreground(ctx, "Coder kendini sınıyor")) }
         runCatching {
-            WeeklyCycle(applicationContext) { s -> runCatching { setForegroundAsync(foreground(applicationContext, s)) } }.run()
+            WeeklyCycle(ctx) { s -> runCatching { setForegroundAsync(foreground(ctx, s)) } }.run()
+        }
+        runCatching {
+            val settings = com.suarez.coder.data.Settings(ctx)
+            val store = EvolutionEngine.storeFor(ctx)
+            if (settings.metaHarnessMode == "weekly") {
+                val compressor = MetaHarnessCompressor()
+                val spentToday = store.spentSince(WeeklyCycle.dayStart(System.currentTimeMillis()))
+                if (compressor.isWithinBudget(settings.metaHarnessBudgetUsd, settings.evolutionDailyBudget, spentToday, 0.05)) {
+                    store.log(EvoTier.INFO, "Meta-Harness haftalık sıkıştırma kontrolü hazır (autoMerge=false).")
+                }
+            }
+            val recentTraces = store.recentTraces(50)
+            val blueprintEngine = com.suarez.coder.skills.BlueprintEngine()
+            recentTraces.filter { it.success && it.codeModFilesTouched >= 3 }.forEach { trace ->
+                val draft = blueprintEngine.distillCandidate(
+                    name = "auto-${trace.id.take(8)}",
+                    steps = trace.steps,
+                    touchedFiles = trace.codeModFilesTouched,
+                    singlePassGreen = trace.ciFailureCount == 0 && trace.diffErrorCount == 0,
+                )
+                if (draft != null) {
+                    store.log(EvoTier.INFO, "Taslak blueprint önerisi oluşturuldu: ${draft.name}")
+                }
+            }
         }
         return Result.success()
     }
