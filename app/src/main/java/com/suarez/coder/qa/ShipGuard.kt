@@ -1,8 +1,8 @@
 package com.suarez.coder.qa
 
 /**
- * Stops an automatic merge after a visual defect or a critical critic finding.
- * Empty verdicts do not block: the GitHub path keeps working when neither check has run.
+ * Stops an automatic merge after a visual defect, a critical critic finding or a surviving mutant.
+ * Empty verdicts do not block: the GitHub path keeps working when no check has run.
  */
 class ShipGuard {
     @Volatile var visual: VisualQaGate.Result? = null

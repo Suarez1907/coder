@@ -109,7 +109,8 @@ class ContractDagOrchestrator(
                         val now = flight.incrementAndGet()
                         maxFlight.updateAndGet { m -> maxOf(m, now) }
                         try {
-                            val swarmResult = speculativeSwarm?.invoke(node, contract)
+                            val isImplementer = contract.implementers[node.id] != contract.architectModelId
+                            val swarmResult = if (isImplementer) speculativeSwarm?.invoke(node, contract) else null
                             if (swarmResult != null) {
                                 val notice = "SpeculativeSwarm: ${node.id} (Mimar kilitli: ${contract.architectModelId})"
                                 onNotice?.invoke(notice.replace('\n', ' ').replace('\r', ' '))
