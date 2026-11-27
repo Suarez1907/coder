@@ -7,8 +7,10 @@ import com.suarez.coder.agent.ArchitectEditor
 import com.suarez.coder.agent.PlanFile
 import com.suarez.coder.data.Provider
 import com.suarez.coder.data.Settings
+import com.suarez.coder.decision.PrePushGate
 import com.suarez.coder.evolution.Experiment
 import com.suarez.coder.evolution.WeeklyCycle
+import com.suarez.coder.harness.OscillationBreaker
 import com.suarez.coder.llm.ChatMessage
 import com.suarez.coder.llm.ModelRef
 import com.suarez.coder.llm.ToolCall
@@ -255,5 +257,31 @@ class ArchitectLockTest {
         assertTrue(WeeklyCycle.autoAdoptable(Experiment.model("editor", "deepseek/edit-2", "test")))
         // The lock holds: nothing touched the architect model.
         assertEquals(before, settings.architectModel)
+    }
+
+    @Test fun oscillationBreakerAndPrePushGateEscalationsKeepLockedArchitectModel() {
+        val agent = Agent(settings)
+        val lockedArchitect = settings.architectModel
+        assertEquals(lockedArchitect, agent.architectRef().key)
+
+        val breaker = OscillationBreaker()
+        repeat(OscillationBreaker.DEFAULT_THRESHOLD) {
+            breaker.recordFailure("A.kt", "SEARCH bloğu bulunamadı")
+        }
+        assertTrue(breaker.isTripped("A.kt"))
+        assertEquals(lockedArchitect, settings.architectModel)
+        assertEquals(lockedArchitect, agent.architectRef().key)
+
+        val gateVerdict = PrePushGate.evaluate(
+            PrePushGate.Input(
+                changedFiles = listOf("A.kt", "B.kt", "C.kt", "D.kt", "E.kt", "F.kt"),
+                totalDiffLines = 600,
+                hasArchitectReview = false,
+                oscillationTripped = true
+            )
+        )
+        assertEquals(PrePushGate.Action.REQUIRE_ARCHITECT_REVIEW, gateVerdict.action)
+        assertEquals(lockedArchitect, settings.architectModel)
+        assertEquals(lockedArchitect, agent.architectRef().key)
     }
 }

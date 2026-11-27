@@ -24,6 +24,10 @@ class ToolAccessTest {
 
     @Test fun questionModeIsReadOnly() {
         assertNull(accessError("github_api", "GET", readOnly = true, allowOps = false))
+        assertNull(accessError("github_list_symbols", null, readOnly = true, allowOps = false))
+        assertNull(accessError("github_read_range", null, readOnly = true, allowOps = false))
+        assertNull(accessError("github_list_symbols", null, readOnly = true, allowOps = true))
+        assertNull(accessError("github_read_range", null, readOnly = true, allowOps = true))
         assertNotNull(accessError("github_api", "POST", readOnly = true, allowOps = false))
         assertNotNull(accessError("github_merge_pull_request", null, readOnly = true, allowOps = false))
     }
@@ -69,5 +73,13 @@ class ToolAccessTest {
         // Faz kaydı da tek satır ve şeffaf olmalı.
         val phase = ReadOnlyMismatchRecovery.phaseLine()
         assertTrue(phase.contains("READ_ONLY") && phase.contains("Uygulayıcı") && !phase.contains("\n"))
+    }
+
+    @Test fun surgicalReadToolsWorkInReadOnlyAndWriteTaskKeepsReadWriteOnEscalation() {
+        assertNull(accessError("github_list_symbols", null, readOnly = true, allowOps = false))
+        assertNull(accessError("github_read_range", null, readOnly = true, allowOps = false))
+        assertFalse(ReadOnlyMismatchRecovery.readOnlyForRoute(Route.SIMPLE_EDIT, "salınım sonrası dosyayı düzelt"))
+        assertFalse(ReadOnlyMismatchRecovery.readOnlyForRoute(Route.QUESTION_ONLY, "hatayı düzelt ve commit et"))
+        assertNull(accessError("github_apply_diff", null, readOnly = false, allowOps = false))
     }
 }
