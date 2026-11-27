@@ -172,12 +172,6 @@ class ToolRegistry(private val settings: Settings) {
             "requirements" to str("toolbox/manim: pip gereksinim dosyası (isteğe bağlı)"),
             required = listOf("tool", "script_path")))
 
-    private val lookupDocs = ToolSpec("lookup_docs",
-        "Bir kütüphanenin GÜNCEL belgesini getirir (Context7, yoksa resmi site). Emin olmadığın bir API'yi, yeni bir sürümü veya " +
-            "hata veren bir çağrıyı kullanmadan ÖNCE çağır; projedeki sürümü (DEPENDENCIES satırı) version olarak ver.",
-        obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
-            "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
-            "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
     private val fetchLiveDocs = ToolSpec("fetch_live_docs",
         "İstenen kütüphane konusunun kompakt güncel API özetini getirir (en fazla 6000 karakter). Önce 7 günlük disk önbelleği, " +
             "sonra Context7 veya tanımlı llms.txt. Sürümü version olarak ver. Sonuç araç bağlamında kalır.",
@@ -239,10 +233,7 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
-        if (settings.docsLookup) {
-            add(lookupDocs)
-            add(fetchLiveDocs)
-        }
+        if (settings.docsLookup) add(fetchLiveDocs)
         add(listSymbols)
         add(findImpact)
         add(findReferences)
@@ -256,7 +247,6 @@ class ToolRegistry(private val settings: Settings) {
         }
     }
 
-    private val docs = DocsLookup(web) { settings.context7Key }
     /** Set by the Agent when it has app storage. */
     var semantic: com.suarez.coder.context.SemanticIndex? = null
 
@@ -449,8 +439,7 @@ class ToolRegistry(private val settings: Settings) {
             "github_search_code" -> github.searchCode(req("query"))
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
-            "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
-            "fetch_live_docs" -> liveDocs().fetch(req("library"), req("topic"), s("version"), settings.context7Key, settings.docsLlmsUrl.ifBlank { null })
+            "lookup_docs", "fetch_live_docs" -> liveDocs().fetch(req("library"), req("topic"), s("version"), settings.context7Key, settings.docsLlmsUrl.ifBlank { null })
             "github_list_symbols" -> listSymbols(repo(), s("ref"), req("path"))
             "github_find_impact" -> findImpact(repo(), s("ref"), req("path"), s("symbolName") ?: s("symbol"))
             "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
@@ -508,10 +497,7 @@ class ToolRegistry(private val settings: Settings) {
         val tx = com.suarez.coder.harness.StagedTransaction()
         changes.forEach { (path, before, after) -> tx.stage(path, before, after) }
         val gate = com.suarez.coder.harness.PreFlightValidator.securityGate(tx)
-        val hard = gate.hits.filter { it.kind != "secret" }
-        if (hard.isNotEmpty()) {
-            throw ToolException(com.suarez.coder.harness.SecurityScanner.Report(true, hard).repairPrompt())
-        }
+        if (gate.blocked) throw ToolException(gate.repairPrompt())
     }
 
     fun mcpRegistry(): com.suarez.coder.mcp.McpRegistry = com.suarez.coder.mcp.McpRegistry(

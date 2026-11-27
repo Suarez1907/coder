@@ -708,7 +708,7 @@ private fun ExecutionPage(vm: ChatViewModel) {
         Text("Kurulum: runner/Dockerfile imajını çalıştırın, SANDBOX_TOKEN verin, 8787 portunu açın. Sağlık kontrolü 2 saniyedir.", style = Mono.tiny, color = coder.muted)
     }
     Group {
-        Title("Cihaz-içi Tier-0", "Ağırlıklar APK'ya gömülmez. Dosya yoksa veya köprü yoksa HeuristicFallback devrededir.")
+        Title("Cihaz-içi Tier-0", "Ağırlıklar APK'ya gömülmez. .litertlm ve .task için NPU, GPU, sonra CPU. .gguf köprüsü yok. Köprü yoksa HeuristicFallback.")
         Text(vm.tier0Status(), style = Mono.tiny, color = coder.muted)
         Text(s.tier0ModelPath.ifBlank { "Model seçilmedi" }, style = Mono.tiny, color = coder.muted, maxLines = 2)
         OutlinedButton(onClick = { pick.launch(arrayOf("*/*")) }) { Text("Model dosyası seç") }

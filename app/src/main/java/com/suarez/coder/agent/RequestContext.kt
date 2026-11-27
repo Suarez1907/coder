@@ -43,7 +43,7 @@ internal class RequestContext(private val agent: Agent) {
             "@ " + ms.joinToString(", ") { when (it) { is Mentions.Mention.File -> it.path; Mentions.Mention.Ci -> "ci"; Mentions.Mention.Diff -> "diff"; is Mentions.Mention.Url -> it.url } })
     }
 
-    /** Library versions of the project, read once per repo (for lookup_docs and to avoid outdated APIs). */
+    /** Library versions of the project, read once per repo (for fetch_live_docs and to avoid outdated APIs). */
     internal suspend fun dependencies(): List<String> {
         val repo = context.repo.takeIf { it.isNotBlank() }?.let { tools.normalizeRepo(it) } ?: return emptyList()
         depCache[repo]?.let { return it }

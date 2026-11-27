@@ -19,6 +19,7 @@ object CrashLoopRecorder {
     @Volatile var screen: () -> String = { "" }
     @Volatile var repo: () -> String = { "" }
     @Volatile var version: () -> String = { "" }
+    @Volatile var versionCode: () -> Long = { version().filter { it.isDigit() }.toLongOrNull() ?: 0L }
     @Volatile private var installed = false
     @Volatile private var dir: File? = null
 
@@ -41,18 +42,23 @@ object CrashLoopRecorder {
     fun write(filesDir: File, thread: Thread, error: Throwable) {
         val sw = StringWriter()
         error.printStackTrace(PrintWriter(sw))
+        val trace = sw.toString().take(20_000)
+        val at = System.currentTimeMillis()
         val text = buildString {
-            append("at=").append(System.currentTimeMillis()).append('\n')
+            append("at=").append(at).append('\n')
             append("screen=").append(screen().replace('\n', ' ')).append('\n')
             append("repo=").append(repo().replace('\n', ' ')).append('\n')
             append("version=").append(version().replace('\n', ' ')).append('\n')
             append("thread=").append(thread.name).append('\n')
             append("---\n")
-            append(sw.toString().take(20_000))
+            append(trace)
         }
         val f = File(filesDir, FILE)
         f.parentFile?.mkdirs()
         f.writeText(text)
+        val legacy = File(filesDir, "crashes")
+        legacy.mkdirs()
+        File(legacy, "crash-$at-v${versionCode()}.txt").writeText("${thread.name}\n$trace")
     }
 
     fun pending(filesDir: File): Record? = read(File(filesDir, FILE))

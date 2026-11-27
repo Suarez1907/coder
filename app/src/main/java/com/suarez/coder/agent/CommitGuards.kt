@@ -25,11 +25,6 @@ internal class CommitGuards(private val agent: Agent) {
         val findings = changes.flatMap { (p, b, a) -> if (a == null) emptyList() else com.suarez.coder.security.Secrets.scan(p, b, a, own) }
         if (findings.isNotEmpty()) {
             val text = findings.joinToString("\n") { "${it.path}:${it.line} - ${it.kind}" }
-            if (!agent.unattended && !agent.isEvolutionSession) {
-                agent.liveUi?.confirm("Sır gibi görünen değer",
-                    "Commit edilecek değişiklikte gizli anahtar veya token olabilir:\n$text\n\nRepo herkese açıksa bu anahtar çalınabilir. Commit yapılmayacak.",
-                    "Anladım", "Durdur")
-            }
             agent.liveHistory?.add(ChatMessage.Notice("Güvenlik: değişiklikte sır bulundu, commit durdu", text, isError = true))
             throw com.suarez.coder.tools.ToolException("Güvenlik: değişiklikte gizli anahtar/token var, commit YAPILMADI:\n$text\n" +
                 "Değeri koddan çıkar; ortam değişkeni, GitHub secret veya git'e girmeyen yerel bir yapılandırma dosyası kullan.")
@@ -57,7 +52,7 @@ internal class CommitGuards(private val agent: Agent) {
         if (!ok) {
             agent.liveHistory?.add(ChatMessage.Notice("Bağımlılık denetimi commit'i durdurdu", text, isError = true))
             throw com.suarez.coder.tools.ToolException("Bağımlılık denetimi commit'i durdurdu:\n$text\n" +
-                "Doğru paket adını ve sürümünü doğrula (lookup_docs / web_search), sonra değişikliği düzeltip tekrar gönder.")
+                "Doğru paket adını ve sürümünü doğrula (fetch_live_docs / web_search), sonra değişikliği düzeltip tekrar gönder.")
         }
     }
 

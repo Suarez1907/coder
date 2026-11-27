@@ -97,6 +97,7 @@ class CrashTraceTest {
         assertEquals("sohbet", rec!!.screen)
         assertEquals("me/app", rec.repo)
         assertTrue(rec.trace.contains("boom"))
+        assertTrue(java.io.File(dir, "crashes").listFiles().orEmpty().any { it.name.startsWith("crash-") && it.name.contains("-v") })
         assertTrue(CrashLoopRecorder.prompt(rec).contains("ChatScreen.kt") || CrashLoopRecorder.prompt(rec).contains("boom"))
         CrashLoopRecorder.resolve(dir)
         assertNull(CrashLoopRecorder.pending(dir))

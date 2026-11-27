@@ -11,7 +11,7 @@ object SecurityScanner {
 
     data class Report(val blocked: Boolean, val hits: List<Hit>) {
         fun repairPrompt(): String = if (!blocked) "" else buildString {
-            append("Güvenlik taraması push'u durdurdu.\n")
+            append("Güvenlik taraması push'u durdurdu. Gizli anahtar commit edilmez.\n")
             hits.forEach { append(it.path).append(':').append(it.line).append(' ').append(it.kind).append(" — ").append(it.detail).append('\n') }
             append("Gizlileri kaldır, tehlikeli izin veya exported/cleartext ekleme, imza dosyalarına dokunma.")
         }
@@ -31,7 +31,7 @@ object SecurityScanner {
         val added = addedLines(before, after)
         for ((n, line) in added) {
             TOKEN.findAll(line).forEach { m ->
-                if (!isPlaceholder(m.value)) hits += Hit(path, n, "secret", "Bilinen anahtar kalıbı.")
+                if (!isPlaceholder(m.value)) hits += Hit(path, n, "secret", "gizli anahtar kalıbı")
             }
             if (line.contains("-----BEGIN PRIVATE KEY-----") && !isPlaceholder(line) && !isFixture(path)) {
                 hits += Hit(path, n, "secret", "Özel anahtar bloğu.")

@@ -17,33 +17,80 @@ class HeuristicFallbackBackend : LocalEdgeModelBackend {
 }
 
 /**
- * Looks for a user-picked .litertlm / .task / .gguf file. Native LiteRT is not packaged in the APK.
- * If the bridge class is absent the engine stays on [HeuristicFallbackBackend].
+ * LiteRT-LM bridge for a user-picked `.litertlm` or `.task` file.
+ * Tries NPU, then GPU, then CPU. Weights are never copied into the APK.
+ * `litertlm-android` 0.20.0 is Kotlin 2.4 and Java 25 bytecode, which this project's
+ * Kotlin 2.0 compiler and D8 cannot dex, so the classes are loaded by reflection.
+ * When they are absent, [complete] returns null and the heuristic runs.
+ * `.gguf` has no on-device runtime here (llama.cpp is not packaged).
  */
-class OptionalEdgeBackend(private val modelPath: String?) : LocalEdgeModelBackend {
-    override val available: Boolean = !modelPath.isNullOrBlank() && File(modelPath).exists() && bridgePresent()
-    override val accelerator: String = when {
-        modelPath.isNullOrBlank() -> "NONE"
-        !bridgePresent() -> "NONE"
-        else -> "CPU"
+class LiteRtLmBackend(private val modelPath: String?) : LocalEdgeModelBackend {
+    private val ext = modelPath?.substringAfterLast('.')?.lowercase().orEmpty()
+    private val fileOk = modelPath?.takeIf { it.isNotBlank() && ext in LITERT_EXT }?.let { File(it).isFile } == true
+
+    @Volatile private var chosen = "NONE"
+
+    override val available: Boolean = fileOk && enginePresent()
+    override val accelerator: String get() = if (available) chosen else "NONE"
+
+    override suspend fun complete(prompt: String): String? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        var out: String? = null
+        if (fileOk && modelPath != null && enginePresent()) {
+            for (name in ACCEL_ORDER) {
+                val text = runCatching { generate(modelPath, name, prompt) }.getOrNull()?.takeIf { it.isNotBlank() }
+                if (text != null) {
+                    chosen = name
+                    out = text
+                    break
+                }
+            }
+        }
+        out
     }
-
-    override suspend fun complete(prompt: String): String? = null
-
-    private fun bridgePresent(): Boolean = runCatching {
-        Class.forName("com.google.ai.edge.litert.Engine")
-        true
-    }.getOrDefault(false)
 
     fun status(): String = when {
         modelPath.isNullOrBlank() -> "Model seçilmedi · HeuristicFallback"
-        !modelPath.substringAfterLast('.').lowercase().let { it in EXTENSIONS } -> "Desteklenmeyen dosya · HeuristicFallback"
-        !bridgePresent() -> "Model dosyası hazır · NPU/GPU/CPU köprüsü yok · HeuristicFallback"
-        else -> "Yerel model · $accelerator"
+        ext == "gguf" -> "GGUF köprüsü yok (llama.cpp APK'ya gömülmez) · HeuristicFallback"
+        ext !in LITERT_EXT -> "Desteklenmeyen dosya · HeuristicFallback"
+        !File(modelPath).isFile -> "Model dosyası yok · HeuristicFallback"
+        !enginePresent() -> "LiteRT-LM sınıfı yok · HeuristicFallback"
+        else -> "LiteRT-LM · NPU → GPU → CPU"
     }
 
+    private fun enginePresent(): Boolean = runCatching {
+        Class.forName("com.google.ai.edge.litertlm.Engine")
+        true
+    }.getOrDefault(false)
+
     companion object {
-        val EXTENSIONS = setOf("litertlm", "task", "gguf")
+        val ACCEL_ORDER = listOf("NPU", "GPU", "CPU")
+        private val LITERT_EXT = setOf("litertlm", "task")
+
+        /** One completion. Throws if this accelerator cannot load the file; the caller tries the next. */
+        internal fun generate(modelPath: String, accelerator: String, prompt: String): String {
+            val backendClass = Class.forName("com.google.ai.edge.litertlm.Backend")
+            val backend = when (accelerator) {
+                "NPU" -> Class.forName("com.google.ai.edge.litertlm.Backend\$NPU").getDeclaredConstructor().newInstance()
+                "GPU" -> Class.forName("com.google.ai.edge.litertlm.Backend\$GPU").getDeclaredConstructor().newInstance()
+                else -> Class.forName("com.google.ai.edge.litertlm.Backend\$CPU").getDeclaredConstructor().newInstance()
+            }
+            val configClass = Class.forName("com.google.ai.edge.litertlm.EngineConfig")
+            val config = configClass.getConstructor(String::class.java, backendClass).newInstance(modelPath, backend)
+            val engineClass = Class.forName("com.google.ai.edge.litertlm.Engine")
+            val engine = engineClass.getConstructor(configClass).newInstance(config)
+            try {
+                engineClass.getMethod("initialize").invoke(engine)
+                val conversationConfig = Class.forName("com.google.ai.edge.litertlm.ConversationConfig").getDeclaredConstructor().newInstance()
+                val conversation = engineClass.getMethod("createConversation", conversationConfig.javaClass).invoke(engine, conversationConfig)
+                    ?: return ""
+                val send = conversation.javaClass.methods.first {
+                    it.name == "sendMessage" && it.parameterTypes.size == 1 && it.parameterTypes[0] == String::class.java
+                }
+                return send.invoke(conversation, prompt)?.toString().orEmpty()
+            } finally {
+                runCatching { (engine as? AutoCloseable)?.close() }
+            }
+        }
     }
 }
 

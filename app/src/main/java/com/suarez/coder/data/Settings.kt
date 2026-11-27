@@ -605,7 +605,7 @@ class Settings(context: Context) {
         get() = bool("learn_reviews", true)
         set(v) = putBool("learn_reviews", v)
 
-    /** lookup_docs: current library documentation (Context7, then the web). */
+    /** fetch_live_docs: current library documentation (Context7, then the web). lookup_docs is an unlisted alias. */
     var docsLookup: Boolean
         get() = bool("docs_lookup", true)
         set(v) = putBool("docs_lookup", v)

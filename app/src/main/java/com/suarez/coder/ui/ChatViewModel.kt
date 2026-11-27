@@ -701,16 +701,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun polishVoice(text: String): String = if (!settings.tier0Voice) text else tier0().structureVoiceNow(text)
 
-    fun tier0Status(): String = com.suarez.coder.edge.OptionalEdgeBackend(settings.tier0ModelPath.ifBlank { null }).status()
+    fun tier0Status(): String = com.suarez.coder.edge.LiteRtLmBackend(settings.tier0ModelPath.ifBlank { null }).status()
 
     fun clearDocsCache() {
         java.io.File(getApplication<Application>().filesDir, "live-docs").listFiles()?.forEach { it.delete() }
     }
 
     private fun tier0() = com.suarez.coder.edge.Tier0EdgeEngine(
-        com.suarez.coder.edge.HeuristicFallbackBackend(),
+        edgeBackend(),
         com.suarez.coder.edge.Tier0Flags(settings.tier0Redact, settings.tier0Voice, settings.tier0Classify),
     )
+
+    private fun edgeBackend(): com.suarez.coder.edge.LocalEdgeModelBackend {
+        val path = settings.tier0ModelPath
+        return if (path.isBlank()) com.suarez.coder.edge.HeuristicFallbackBackend()
+        else com.suarez.coder.edge.LiteRtLmBackend(path)
+    }
 
     private fun checkpoints() = com.suarez.coder.session.CheckpointManager(
         java.io.File(getApplication<Application>().filesDir, "checkpoints/$currentSessionId.json"),
@@ -758,17 +764,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Rewinds a branch to the checkpoint saved before the agent's first write (asks first; force update). */
+    /** Rewinds by opening a new branch at the saved commit. Never force-resets and never moves main. */
     fun rewind(p: com.suarez.coder.agent.Checkpoints.Point) {
         if (running) return
         viewModelScope.launch {
-            val what = if (p.sha == null) "${p.branch} dalı bu görevde oluşturuldu; SİLİNECEK." else
-                "${p.branch} dalı ${p.sha.take(7)} commit'ine zorla geri alınacak. Sonraki commit'ler daldan çıkar (GitHub'da sha ile hâlâ bulunabilir)."
-            val warn = if (p.branch == settings.defaultBranch || p.branch == "main" || p.branch == "master") "\n\nDİKKAT: bu varsayılan dal olabilir." else ""
-            if (!ui.confirm("Kontrol noktasına dön", "${p.repo}\n$what$warn", "Geri dön", "Vazgeç")) return@launch
-            val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.resetBranch(p.repo, p.branch, p.sha) } }
-            messages += ChatMessage.Notice(r.fold({ "Geri alındı: ${p.branch}" + (p.sha?.let { " → ${it.take(7)}" } ?: " silindi") },
-                { "Geri alınamadı: ${it.message?.take(200)}" }), isError = r.isFailure)
+            val sha = p.sha
+            if (sha.isNullOrBlank()) {
+                messages += ChatMessage.Notice("Bu noktanın commit'i yok. Dal silinmedi ve force-reset yapılmadı.")
+                save()
+                return@launch
+            }
+            val branch = "coder/rewind-${System.currentTimeMillis()}"
+            if (!ui.confirm("Kontrol noktasına dön", "${p.repo}\n$branch dalı ${sha.take(7)} üzerine açılacak. main hareket ettirilmez.", "Geri dön", "Vazgeç")) return@launch
+            val r = runCatching { withContext(Dispatchers.IO) { agent.tools.github.createBranchAt(p.repo, branch, sha) } }
+            messages += ChatMessage.Notice(
+                r.fold({ "Geri alma dalı: $branch" }, { "Dal oluşturulamadı: ${it.message?.take(200)}" }),
+                isError = r.isFailure,
+            )
             agent.invalidateSnapshot(); agent.context.invalidate()
             save()
         }

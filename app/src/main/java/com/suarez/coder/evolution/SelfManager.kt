@@ -5,8 +5,6 @@ import com.suarez.coder.data.Settings
 import com.suarez.coder.llm.ModelRef
 import org.json.JSONArray
 import java.io.File
-import java.io.PrintWriter
-import java.io.StringWriter
 import java.util.Locale
 
 /**
@@ -131,21 +129,19 @@ class SelfManager(private val settings: Settings, val store: EvolutionStore) {
     }
 }
 
-/** Records uncaught crashes to files; the next start reports them (a learning signal and the rollback trigger). */
+/** Weekly crash counts read the files [com.suarez.coder.qa.CrashLoopRecorder] writes. It does not install a second handler. */
 object CrashRecorder {
     private fun dir(context: Context) = File(context.filesDir, "crashes").apply { mkdirs() }
 
     fun install(context: Context) {
         val app = context.applicationContext
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, e ->
-            runCatching {
-                val sw = StringWriter(); e.printStackTrace(PrintWriter(sw))
-                val version = runCatching { app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode }.getOrDefault(0L)
-                File(dir(app), "crash-${System.currentTimeMillis()}-v$version.txt").writeText("${thread.name}\n$sw".take(20_000))
-            }
-            previous?.uncaughtException(thread, e)
+        com.suarez.coder.qa.CrashLoopRecorder.version = {
+            runCatching { app.packageManager.getPackageInfo(app.packageName, 0).versionName }.getOrNull().orEmpty()
         }
+        com.suarez.coder.qa.CrashLoopRecorder.versionCode = {
+            runCatching { app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode }.getOrDefault(0L)
+        }
+        com.suarez.coder.qa.CrashLoopRecorder.install(app.filesDir)
     }
 
     data class Crash(val at: Long, val version: Long, val text: String) {

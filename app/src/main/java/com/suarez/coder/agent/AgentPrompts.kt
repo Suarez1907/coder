@@ -55,7 +55,7 @@ internal class AgentPrompts(private val agent: Agent) {
             "item in_progress, and send the full updated list as you finish each step. Skip it for one-step work.")
         appendLine("Impact: before changing a function/class signature, name or behavior, call find_references and update every caller in the same commit.")
         if (settings.docsLookup) appendLine("Library APIs: when you are not sure an API exists in the version the project uses (see DEPENDENCIES), " +
-            "or a build error points at a library call, call lookup_docs or fetch_live_docs before writing the code. " +
+            "or a build error points at a library call, call fetch_live_docs before writing the code. " +
             "Fetched documentation stays in the tool result, not in this prefix.")
         if (settings.semanticSearch && tools.semantic != null && settings.geminiKey.isNotBlank()) appendLine("Finding code: if you do not know which file holds something, use semantic_search (by meaning) before reading files one by one.")
         agent.implementerTactic?.let { appendLine(it) }
