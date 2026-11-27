@@ -580,7 +580,8 @@ private fun MotorTab(vm: ChatViewModel) {
     }
     EvoCard {
         CardTitle("Strateji A/B ve Gölge Simülasyon")
-        MonoSwitch("Uygulayıcı A/B", "Mimar modeli değişmez. Kontrol %70, varyant %30.", s.abEnabled) { vm.setAbEnabled(it) }
+        Text("Kapalı başlar. Açılınca varyant önce github_list_symbols zorunluluğu uygular. Mimar modeli değişmez.", style = Mono.tiny, color = Mono2.weak)
+        MonoSwitch("Uygulayıcı A/B", "Kontrol %70, varyant %30. Oturum başında sabitlenir.", s.abEnabled) { vm.setAbEnabled(it) }
         val ab = vm.evoAb
         if (ab == null) Text("Kayıt yok.", style = Mono.tiny, color = Mono2.weak)
         else {

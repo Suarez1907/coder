@@ -62,6 +62,7 @@ class ShadowReplayAndAbTest {
 
     @Test fun failingVariantRollsBackAndArchitectStays() {
         val opt = StrategyAbOptimizer(tmp.newFile("ab.json"), "gemini/architect-lock")
+        assertTrue(StrategyAbOptimizer.TACTICS.first { it.id == "list_symbols" }.hint.contains("github_list_symbols"))
         assertTrue(opt.start("list_symbols"))
         assertTrue(opt.start("compact_diff"))
         assertFalse(opt.start("test_first"))

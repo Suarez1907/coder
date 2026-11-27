@@ -23,26 +23,48 @@ class ContractDagOrchestrator(
     fun retarget(@Suppress("UNUSED_PARAMETER") modelId: String): Boolean = false
 
     fun lock(nodes: List<DagNode>): TaskContract {
+        val problems = ArrayList<String>()
         val seen = HashMap<String, String>()
-        var overlap = false
-        for (n in nodes) for (f in n.ownedFiles) {
-            if (seen.put(f, n.id) != null) overlap = true
+        for (n in nodes) {
+            if (n.ownedFiles.isEmpty()) problems += "${n.id}: ownedFiles boş"
+            for (f in n.ownedFiles) {
+                val prev = seen.put(f, n.id)
+                if (prev != null) problems += "$f: $prev ve ${n.id} çakışıyor"
+            }
         }
-        val cycle = cycle(nodes)
+        cycle(nodes)?.let { problems += "döngü: $it" }
+        val signatures = derive(nodes, SIGNATURE)
+        val models = derive(nodes, MODEL)
+        val tests = nodes.flatMap { n ->
+            n.acceptanceChecks.filter { it.contains("test", ignoreCase = true) } +
+                n.ownedFiles.filter { isTestPath(it) }
+        }.distinct()
+        if (signatures.isEmpty()) problems += "paylaşılan imza yok"
+        if (tests.isEmpty()) problems += "test beklentisi yok"
         val impl = nodes.associate { n ->
             val picked = implementerFor(n)
             n.id to if (picked.equals(architectModelId, true)) "implementer" else picked
         }
-        val signatures = nodes.flatMap { n -> n.acceptanceChecks.filter { "(" in it || it.contains("fun ") || it.contains("class ") } }
-            .ifEmpty { nodes.map { n -> "${n.id}: ${n.ownedFiles.joinToString()}" } }
         return TaskContract(
             architectModelId = architectModelId,
             signatures = signatures,
+            models = models,
             ownership = nodes.associate { it.id to it.ownedFiles },
             acceptance = nodes.flatMap { it.acceptanceChecks },
+            testExpectations = tests,
             implementers = impl,
-            conflict = overlap || cycle != null,
+            conflict = problems.isNotEmpty(),
+            problems = problems,
         )
+    }
+
+    private fun derive(nodes: List<DagNode>, kind: Regex): List<String> =
+        nodes.flatMap { n -> (n.acceptanceChecks + listOf(n.instructions, n.title)).flatMap { line -> kind.findAll(line).map { it.value.trim() } } }
+            .distinct()
+
+    private fun isTestPath(path: String): Boolean {
+        val name = path.substringAfterLast('/')
+        return "/test/" in path || name.endsWith("Test.kt") || name.endsWith("Test.java") || name.startsWith("test_")
     }
 
     suspend fun execute(
@@ -144,6 +166,11 @@ class ContractDagOrchestrator(
         return wave.ifEmpty { listOf(ready.first()) }
     }
 
+    companion object {
+        private val SIGNATURE = Regex("""(?:fun|def|func|class|interface|object)\s+[A-Za-z_][A-Za-z0-9_]*""")
+        private val MODEL = Regex("""(?:data\s+class|class|interface|object)\s+[A-Za-z_][A-Za-z0-9_]*""")
+    }
+
     private fun cycle(nodes: List<DagNode>): String? {
         val byId = nodes.associateBy { it.id }
         val state = HashMap<String, Int>()
@@ -172,10 +199,13 @@ data class DagNode(
 data class TaskContract(
     val architectModelId: String,
     val signatures: List<String>,
+    val models: List<String>,
     val ownership: Map<String, List<String>>,
     val acceptance: List<String>,
+    val testExpectations: List<String>,
     val implementers: Map<String, String>,
     val conflict: Boolean,
+    val problems: List<String> = emptyList(),
 )
 
 data class FileEdit(val path: String, val before: String?, val after: String?)

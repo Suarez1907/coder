@@ -41,7 +41,12 @@ class RepoDependencyGraph {
         files.keys.toList().filter { it !in keep }.forEach { files.remove(it); texts.remove(it) }
     }
 
-    fun symbol(path: String, name: String): Symbol? = files[path]?.symbols?.firstOrNull { it.name == name }
+    fun symbol(path: String, name: String): Symbol? = files[resolve(path) ?: path]?.symbols?.firstOrNull { it.name == name }
+
+    fun symbolsOf(path: String): List<Symbol> {
+        val key = resolve(path) ?: return emptyList()
+        return files[key]?.symbols.orEmpty()
+    }
 
     fun impact(path: String, symbolName: String?): List<Impact> {
         val key = resolve(path) ?: return emptyList()

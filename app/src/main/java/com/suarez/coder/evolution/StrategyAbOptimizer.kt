@@ -155,7 +155,7 @@ class StrategyAbOptimizer(
         const val CONTROL_SHARE = 0.70
         const val MIN_TASKS = 10
         val TACTICS = listOf(
-            Tactic("list_symbols", "Uygulayıcı taktiği: imza veya ada dokunmadan önce find_references ve github_find_impact çağır."),
+            Tactic("list_symbols", "Uygulayıcı taktiği: önce github_list_symbols zorunluluğu. İmza veya ada dokunmadan önce github_list_symbols çağır, sonra find_references ve github_find_impact."),
             Tactic("compact_diff", "Uygulayıcı taktiği: SEARCH/REPLACE bloklarını kısa tut, her blok en fazla 30 satır."),
             Tactic("test_first", "Uygulayıcı taktiği: önce başarısız testi yaz veya çalıştır, sonra düzelt."),
         )

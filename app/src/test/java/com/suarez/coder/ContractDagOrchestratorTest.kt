@@ -15,7 +15,7 @@ class ContractDagOrchestratorTest {
     private val architect = "gemini/architect-lock"
 
     private fun node(id: String, file: String, depends: List<String> = emptyList()) =
-        DagNode(id, depends, listOf(file), listOf("fun $id(): Unit"), id)
+        DagNode(id, depends, listOf(file), listOf("fun $id(): Unit", "test $id geçer"), id)
 
     @Test fun disjointNodesRunTogetherAndDependentsWait() = runBlocking {
         val orch = ContractDagOrchestrator(architect, 2) { architect }
@@ -77,5 +77,24 @@ class ContractDagOrchestratorTest {
         assertFalse(run.committed)
         assertTrue(run.staged.edits().isEmpty())
         assertEquals(architect, run.architectModelId)
+    }
+
+    @Test fun missingTestExpectationFallsBackAndArchitectStays() = runBlocking {
+        val orch = ContractDagOrchestrator(architect, 2)
+        val bare = listOf(DagNode("a", emptyList(), listOf("A.kt"), listOf("fun a(): Unit"), "a"))
+        val contract = orch.lock(bare)
+        assertTrue(contract.signatures.any { it.contains("fun a") })
+        assertTrue(contract.testExpectations.isEmpty())
+        assertTrue(contract.conflict)
+        assertTrue(contract.problems.any { it.contains("test") })
+        assertEquals(architect, contract.architectModelId)
+        val run = orch.execute(bare) { n, locked ->
+            assertEquals(architect, locked.architectModelId)
+            NodeResult.Ok(listOf(FileEdit(n.ownedFiles.single(), "", "x")))
+        }
+        assertEquals("sequential", run.mode)
+        assertTrue(run.fellBack)
+        assertEquals(architect, run.architectModelId)
+        assertFalse(orch.retarget("other"))
     }
 }

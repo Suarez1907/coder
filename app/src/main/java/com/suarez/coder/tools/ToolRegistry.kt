@@ -172,6 +172,10 @@ class ToolRegistry(private val settings: Settings) {
         obj("library" to str("Kütüphane adı, ör. 'jetpack compose', 'remotion', 'godot', 'react'"),
             "topic" to str("Aranan konu, ör. 'LazyColumn sticky header', 'interpolate easing'"),
             "version" to str("Projedeki sürüm, ör. 1.7.5 (isteğe bağlı)"), required = listOf("library", "topic")))
+    private val listSymbols = ToolSpec("github_list_symbols",
+        "Bir dosyanın üst düzey sembollerini (class, interface, object, fun, def, func) satır ve zorunlu parametre sayısıyla listeler. " +
+            "İmza değişikliğinden önce çağır. Yerel SHA indeksinden okur; model çağrısı yapmaz.",
+        obj("repo" to str(repoDesc), "path" to str("Dosya yolu"), "ref" to str("Branch (boşsa varsayılan)"), required = listOf("path")))
     private val findImpact = ToolSpec("github_find_impact",
         "Bir dosyanın (ve isteğe bağlı bir sembolün) doğrudan çağıranlarını ve import edenlerini dosya:satır olarak listeler. " +
             "İmza değiştirmeden önce çağır. Yerel grafikten okur; model çağrısı yapmaz.",
@@ -225,6 +229,7 @@ class ToolRegistry(private val settings: Settings) {
     /** Optional tools, in a fixed order so the tool list (part of the cached prefix) only changes with the settings. */
     private fun extraSpecs(writer: Boolean): List<ToolSpec> = buildList {
         if (settings.docsLookup) add(lookupDocs)
+        add(listSymbols)
         add(findImpact)
         add(findReferences)
         add(readSymbol)
@@ -239,6 +244,7 @@ class ToolRegistry(private val settings: Settings) {
 
     /** Local import/call graph. Signature checks read it; they do not call a model. */
     val dependencyGraph = com.suarez.coder.context.RepoDependencyGraph()
+    val symbolIndex = com.suarez.coder.context.SymbolIndexer(dependencyGraph)
 
     /** Runs before a commit with (path, before, after); throws ToolException to block it (self-review). */
     var preCommit: (suspend (repo: String, branch: String, changes: List<Triple<String, String?, String?>>) -> Unit)? = null
@@ -302,7 +308,7 @@ class ToolRegistry(private val settings: Settings) {
         val OPS_TOOLS = setOf("github_create_branch", "github_create_pull_request", "github_merge_pull_request", "github_run_workflow", "ci_wait", "github_api")
         private val READ_TOOLS = setOf("web_search", "web_fetch", "github_list_repos", "github_get_tree", "github_read_file",
             "github_read_files", "github_search_code", "ci_errors", "github_releases", "github_api", "submit_plan", "load_skill",
-            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact")
+            "lookup_docs", "semantic_search", "update_todos", "find_references", "read_symbol", "github_find_impact", "github_list_symbols")
 
         /**
          * Access rule. Full access: everything. readOnly: read tools and GET requests only. readOnly + allowOps (architect):
@@ -413,6 +419,7 @@ class ToolRegistry(private val settings: Settings) {
             "github_api" -> github.raw(s("method") ?: "GET", req("path"), s("body"))
             "load_skill" -> skills?.load(req("name"), activeRepo(), s("file")) ?: "Yetenek sistemi bu oturumda kullanılamıyor."
             "lookup_docs" -> docs.lookup(req("library"), req("topic"), s("version"))
+            "github_list_symbols" -> listSymbols(repo(), s("ref"), req("path"))
             "github_find_impact" -> findImpact(repo(), s("ref"), req("path"), s("symbolName") ?: s("symbol"))
             "find_references" -> findReferences(repo(), s("ref"), req("symbol").trim())
             "read_symbol" -> readSymbol(repo(), s("ref"), req("symbol").trim(), s("path"))
@@ -439,6 +446,11 @@ class ToolRegistry(private val settings: Settings) {
             (call.name == "github_api" && (s("method") ?: "GET").uppercase() != "GET")
         ) onRepoChanged()
         return result
+    }
+
+    private suspend fun listSymbols(repo: String, ref: String?, path: String): String {
+        refreshGraph(repo, ref)
+        return symbolIndex.format(path)
     }
 
     private suspend fun findImpact(repo: String, ref: String?, path: String, symbol: String?): String {

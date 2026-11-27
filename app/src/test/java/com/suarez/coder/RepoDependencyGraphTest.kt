@@ -1,6 +1,7 @@
 package com.suarez.coder
 
 import com.suarez.coder.context.RepoDependencyGraph
+import com.suarez.coder.context.SymbolIndexer
 import com.suarez.coder.harness.PreFlightValidator
 import com.suarez.coder.harness.StagedTransaction
 import org.junit.Assert.assertEquals
@@ -84,5 +85,17 @@ class RepoDependencyGraphTest {
         val caller = "import demo.Box;\nclass Main { void m() { new Box().add(1, 2); } }\n"
         g.update("Main.java", "m", caller)
         assertTrue(g.impact("Box.java", "add").any { it.path == "Main.java" })
+    }
+
+    @Test fun symbolIndexerDelegatesAndSkipsUnchangedSha() {
+        val index = SymbolIndexer()
+        val text = "package demo\nfun add(a: Int, b: Int): Int = a + b\nclass Box\n"
+        assertTrue(index.update("lib.kt", "sha", text))
+        assertFalse(index.update("lib.kt", "sha", "fun gone() = 0\n"))
+        val listed = index.format("lib.kt")
+        assertTrue(listed.contains("fun add:2 zorunlu=2"))
+        assertTrue(listed.contains("class Box:3"))
+        assertEquals(index.graph.symbolsOf("lib.kt"), index.symbols("lib.kt"))
+        assertEquals("Sembol yok: missing.kt", index.format("missing.kt"))
     }
 }
