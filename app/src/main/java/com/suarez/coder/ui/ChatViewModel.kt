@@ -196,6 +196,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         a.lessonsFor = { repo -> if (settings.evoEnabled && settings.evoMemory) evoStore.lessons(repo) else null }
         a.context.ruleStore = evoStore.scopedRules
         a.context.rulesEnabled = { settings.evoEnabled && settings.evoMemory }
+        a.ciLessons = com.suarez.coder.evolution.CiLessonLearner(evoStore.scopedRules)
+        a.tools.attachNotes = { repo, branch, files ->
+            if (!settings.syncProjectNotes || a.isEvolutionSession) files
+            else com.suarez.coder.evolution.NotesSync.attachFromGitHub(a.tools.github, a.context.ruleStore, repo, branch, files, enabled = true)
+        }
         a.modelPicker = { route, ctx, paths, intent -> manager.pick(route, ctx, paths, intent) }
         a.promptOverrides = { if (settings.evoEnabled) evoStore.promptOverrides() else emptyMap() }
         a.policyText = { manager.policyText() }
@@ -960,7 +965,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val run = work.drop(runStart)
         val request = (work.take(runStart).lastOrNull { it is ChatMessage.User } as? ChatMessage.User)?.text.orEmpty()
         val trace = SessionTraceRecorder.record(run, request, sid, a.tools.normalizeRepo(repoNow()),
-            a.isEvolutionSession, a::costOf)?.copy(arm = a.lastArm, route = a.lastRoute, ctx = a.lastCtx?.toList(), prop = a.lastProp,
+            a.isEvolutionSession, a::costOf, oscillationEscalations = a.tools.oscillation.escalations)?.copy(arm = a.lastArm, route = a.lastRoute, ctx = a.lastCtx?.toList(), prop = a.lastProp,
             baseSha = base?.first, branch = base?.second?.ifBlank { null }) ?: return
         if (sid == currentSessionId) canRate = true
         viewModelScope.launch(Dispatchers.IO) {

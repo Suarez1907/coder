@@ -176,6 +176,10 @@ private fun SummaryTab(vm: ChatViewModel) {
             MonoSwitch("Adaptif yönlendirme (K2)", "Sınırlı ve geri alınabilir eşik ve ipuçları.", k2, enabled) { k2 = it; s.evoRouting = it }
             MonoSwitch("Kendi koduna PR aç (K3)", "Küme eşiği dolunca test önce, CI yeşilse PR; merge her zaman sizin onayınızla.", k3, enabled) { k3 = it; s.evoSelfPr = it }
             MonoSwitch("Sadece Wi-Fi'de çalıştır", null, wifi, enabled) { wifi = it; s.evoWifiOnly = it }
+            var notesSync by remember { mutableStateOf(s.syncProjectNotes) }
+            MonoSwitch("NOTES.md sonraki commite eklensin", "Kapalıyken hiçbir NOTES commit'i yok. Açıkken yalnızca senin istediğin commite eklenir; merge edilmez.", notesSync, enabled) {
+                notesSync = it; s.syncProjectNotes = it
+            }
             var sessions by remember { mutableStateOf(s.clusterMinSessions.toString()) }
             var floor by remember { mutableStateOf(s.clusterMinCostUsd.toString()) }
             OutlinedTextField(sessions, {

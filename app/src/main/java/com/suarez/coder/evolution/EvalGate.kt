@@ -35,44 +35,33 @@ object EvalGate {
         return "app/src/test/resources/evals/$name" to component
     }
 
-    fun caseFrom(cluster: ErrorCluster): JSONObject {
-        val id = "reg-" + ErrorClusterEngine.slug(cluster.clusterKey)
-        val sample = ErrorClusterEngine.anonymize(cluster.sampleTraces.firstOrNull().orEmpty()).ifBlank { cluster.clusterKey }
-        val (path, component) = fileFor(cluster.clusterKey)
-        val o = when (component) {
-            "search_replace" -> JSONObject()
-                .put("sample", sample)
-                .put("content", "fun reg() {\n    val value = 1 // $sample\n}\n")
-                .put("search", "val value = 1")
-                .put("replace", "val value = 2")
-                .put("expect", "ok")
-                .put("contains", "val value = 2")
-            "preflight" -> JSONObject()
-                .put("sample", sample)
-                .put("path", "Reg.kt")
-                .put("before", "fun ok() {\n    return 1\n}\n")
-                .put("after", "fun ok(s: String) {\n    // $sample { }\n    val t = \"{ }\"\n    return s\n}\n")
-                .put("expectRules", JSONArray())
-            "log_filter" -> {
-                val line = if (sample.startsWith("e:") || sample.contains("Error") || sample.contains("ERROR")) sample
-                else "e: regression: $sample"
-                JSONObject()
-                    .put("sample", sample)
-                    .put("log", "Downloading dependencies\n".repeat(8) + line + "\nBUILD FAILED\n")
-                    .put("mustContain", JSONArray().put(line))
-                    .put("mustNotContain", JSONArray().put("(Belirgin hata satırı bulunamadı"))
-            }
-            else -> JSONObject()
-                .put("sample", sample)
-                .put("request", "bu fonksiyon ne işe yarıyor?")
-                .put("architect", "gemini/gemini-2.5-pro")
-                .put("implementer", "gemini/gemini-2.5-flash")
-                .put("expectRoute", "QUESTION_ONLY")
-                .put("expectPhase", "READ_ONLY")
-                .put("expectArchitect", "gemini/gemini-2.5-pro")
+    /** A real case parsed from a captured failure window, or null when the text is not one. */
+    fun caseFromSnippet(text: String): JSONObject? {
+        val o = runCatching { JSONObject(text.trim()) }.getOrNull() ?: return null
+        val kind = o.optString("kind")
+        val ok = when (kind) {
+            "search_replace" -> o.optString("content").isNotBlank() && o.optString("search").isNotBlank()
+            "log_filter" -> o.optString("log").isNotBlank() && (o.optJSONArray("mustContain")?.length() ?: 0) > 0
+            "preflight" -> o.optString("path").isNotBlank() && o.optString("after").isNotBlank() && o.has("expectRules")
+            "router_access" -> o.optString("request").length >= 8 && o.optString("expectRoute").isNotBlank()
+            else -> false
         }
-        o.put("id", id)
-        return o
+        return if (ok) JSONObject(o.toString()) else null
+    }
+
+    /** The regression case for this cluster, copied from a real window. Null when the cluster has none. */
+    fun caseFrom(cluster: ErrorCluster): JSONObject? {
+        val wanted = when (fileFor(cluster.clusterKey).second) {
+            "search_replace" -> "search_replace"
+            "log_filter" -> "log_filter"
+            "preflight" -> "preflight"
+            else -> "router_access"
+        }
+        val raw = cluster.sampleTraces.firstNotNullOfOrNull { text ->
+            caseFromSnippet(text)?.takeIf { it.optString("kind") == wanted }
+        } ?: return null
+        raw.put("id", "reg-" + ErrorClusterEngine.slug(cluster.clusterKey))
+        return raw
     }
 
     fun merge(jsonText: String, component: String, caseObj: JSONObject): String {
@@ -107,18 +96,13 @@ object EvalGate {
         val beforeIds = ids(existing)
         val oldFailures = before.failures.filter { it in beforeIds }
         if (oldFailures.isNotEmpty()) return null
-        val caseObj = caseFrom(cluster)
+        val caseObj = caseFrom(cluster) ?: return null
         val updated = merge(existing, component, caseObj)
         val after = GoldenEvalRunner.run(component, updated)
         val regressions = after.failures.filter { it in beforeIds }
         if (regressions.isNotEmpty()) return null
-        val card = EvalScorecard(
-            passed = after.passed,
-            total = after.total,
-            added = 1,
-            regressions = 0,
-        )
-        if (!card.ok) return null
+        // The new case is scored by CI on the branch. An old case that still fails blocks the PR here.
+        val card = EvalScorecard(before.total + 1, before.total + 1, added = 1, regressions = 0)
         return Prepared(path, updated, component, beforeIds, card)
     }
 

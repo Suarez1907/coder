@@ -380,6 +380,14 @@ class Settings(context: Context) {
         get() = str("pinned_implementer", "")
         set(v) = put("pinned_implementer", v.trim())
 
+    /**
+     * When on, the next commit the user already asked for also updates `.coder/NOTES.md`.
+     * Off by default: nothing is committed on its own, and nothing is merged.
+     */
+    var syncProjectNotes: Boolean
+        get() = bool("sync_project_notes", false)
+        set(v) = putBool("sync_project_notes", v)
+
     /** Vague change requests get 1-3 short clarifying questions before any expensive planning. */
     var clarifyFirst: Boolean
         get() = bool("clarify_first", true)

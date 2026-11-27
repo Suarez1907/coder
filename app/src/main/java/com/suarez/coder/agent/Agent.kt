@@ -475,6 +475,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
 
     /** Runs of the evolution engine: never recorded as traces, so they can never start another evolution. */
     var isEvolutionSession = false
+    /** Red-then-green CI lessons for the active repo. Null outside the app shell. */
+    var ciLessons: com.suarez.coder.evolution.CiLessonLearner? = null
     /** Evolution runs use one isolated model for every role, independent of the chat models. */
     var modelOverride: ModelRef? = null
     /** Called with the cost of every model call (evolution budget accounting). */
@@ -832,6 +834,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         flexDisabledForRun = false
         lastArm = null
         lastRoute = null
+        tools.oscillation.reset()
         // Repo skills (.coder/skills/*/SKILL.md), cached for minutes so the catalog line stays stable.
         tools.skills?.let { s -> runCatching { kotlinx.coroutines.withTimeout(8_000) { s.refreshRepo(tools.activeRepo()) } } }
         architectOverride = null

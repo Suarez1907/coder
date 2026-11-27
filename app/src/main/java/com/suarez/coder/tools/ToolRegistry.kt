@@ -39,6 +39,15 @@ class ToolRegistry(private val settings: Settings) {
 
     var ciListener: CiListener? = null
 
+    /** Edit loop for one run. Counts A-B-A oscillations; the trace copies [OscillationBreaker.escalations]. */
+    val oscillation = com.suarez.coder.harness.OscillationBreaker()
+
+    /**
+     * May append `.coder/NOTES.md` to a commit the caller is already making.
+     * Null, or a function that returns [files] unchanged, means no extra file and no extra commit.
+     */
+    var attachNotes: (suspend (repo: String, branch: String?, files: List<GitHub.FileChange>) -> List<GitHub.FileChange>)? = null
+
     /** Auto-Ship: yeşil build'in yayınlamadığı sürüme dair uyarı (CiController bir kez Notice ekler). */
     private var shipMissing: String? = null
 
@@ -369,9 +378,16 @@ class ToolRegistry(private val settings: Settings) {
                 }
                 if (problems.isNotEmpty()) throw ToolException("Yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n"))
                 commitNotes.clear()
+                files.forEach { f ->
+                    if (!f.delete && f.content != null) {
+                        val d = oscillation.observe(f.path, f.content)
+                        if (d.escalate) throw ToolException("Salınım eşiği aşıldı (${f.path}: aynı bölge A-B-A). Bu yazma uygulanmadı; farklı bir yama kullan.")
+                    }
+                }
                 preCommit?.invoke(repo, branch, files.map { Triple(it.path, befores[it.path], if (it.delete) null else it.content) })
                 beforeWrite?.invoke(repo, branch)
-                github.commitFiles(repo, branch, req("message"), files, base).also { r ->
+                val withNotes = attachNotes?.invoke(repo, branch, files) ?: files
+                github.commitFiles(repo, branch, req("message"), withNotes, base).also { r ->
                     afterCommit?.invoke(repo, r, files.map { it.path }, files.count { !it.delete && befores[it.path] == null })
                 } + staleNote(files.map { it.path }) + notes()
             }
@@ -452,10 +468,17 @@ class ToolRegistry(private val settings: Settings) {
             throw ToolException("Diff uygulandı ama yerel kontrol başarısız, hiçbir şey yazılmadı:\n" + problems.joinToString("\n") +
                 "\nDüzeltilmiş blokları tekrar gönder.")
         }
+        changes.forEach { c ->
+            if (!c.delete && c.content != null) {
+                val d = oscillation.observe(c.path, c.content)
+                if (d.escalate) throw ToolException("Salınım eşiği aşıldı (${c.path}: aynı bölge A-B-A). Diff uygulanmadı; farklı bir yama kullan.")
+            }
+        }
         commitNotes.clear()
         preCommit?.invoke(repo, branch, changes.map { Triple(it.path, originals[it.path], it.content) })
         beforeWrite?.invoke(repo, branch)
-        return github.commitFiles(repo, branch, message, changes, base).also { r ->
+        val withNotes = attachNotes?.invoke(repo, branch, changes) ?: changes
+        return github.commitFiles(repo, branch, message, withNotes, base).also { r ->
             afterCommit?.invoke(repo, r, changes.map { it.path }, changes.count { originals[it.path] == null })
         } + "\n" + summary + staleNote(changes.map { it.path }) + notes()
     }

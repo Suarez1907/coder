@@ -17,13 +17,17 @@ class ErrorClusterEngineTest {
 
     private fun engine() = ErrorClusterEngine(File(tmp.newFolder(), "clusters.json"))
 
-    private fun trace(id: String, session: String, diff: Int = 0, ci: Int = 0, cost: Double = 0.01, rounds: Int = 0) = SessionTrace(
+    private val searchWindow = """{"kind":"search_replace","content":"fun a() {\n    val x = 1\n}\n","search":"    val x = 1","replace":"    val x = 2","expect":"ok","contains":"val x = 2"}"""
+    private val logWindow = """{"kind":"log_filter","log":"Downloading\ne: Unresolved reference 'Foo'\nBUILD FAILED\n","mustContain":["e: Unresolved reference 'Foo'"],"mustNotContain":["(Belirgin hata satırı bulunamadı"]}"""
+
+    private fun trace(id: String, session: String, diff: Int = 0, ci: Int = 0, cost: Double = 0.01, rounds: Int = 0, window: Boolean = true) = SessionTrace(
         id = id, sessionId = session, repo = "me/app", at = 1, request = "Skor tablosu", modelsUsed = listOf("m"),
         turnCount = 2, cacheHitPercent = null, totalCostUsd = cost, diffErrorCount = diff,
         diffErrorSamples = if (diff > 0) listOf("SEARCH metni dosyada bulunamadı") else emptyList(),
         ciFailureCount = ci, ciSignatures = if (ci > 0) listOf("e: Unresolved reference 'Foo'") else emptyList(),
         escalations = emptyList(), routing = null, upgradedToArchitect = false, stopped = false,
         oscillationEscalationsCount = rounds,
+        failureWindows = if (!window) emptyList() else if (ci > 0) listOf(logWindow) else listOf(searchWindow),
     )
 
     @Test fun oneOffStaysCollectingUntilASecondSessionOrTheCostFloor() {
@@ -62,5 +66,14 @@ class ErrorClusterEngineTest {
         val cluster = e.all().single { it.category == "ci" }
         assertEquals(ClusterStatus.READY_FOR_PR, cluster.status)
         assertTrue(cluster.failedFixRounds >= 3)
+    }
+
+    @Test fun withoutARealSnippetTheClusterStaysCollecting() {
+        val e = engine()
+        e.ingest(trace("t1", "s1", diff = 1, cost = 0.20, window = false))
+        e.ingest(trace("t2", "s2", diff = 1, cost = 0.20, window = false))
+        val cluster = e.all().single { it.clusterKey.startsWith("search_replace_miss") }
+        assertEquals(ClusterStatus.COLLECTING, cluster.status)
+        assertFalse(e.shouldOpen(cluster))
     }
 }

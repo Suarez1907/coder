@@ -39,12 +39,14 @@ internal class CiController(private val agent: Agent) {
                 agent.fixMemory?.record(FixMemory.Fix(st.pendingRepo, sig, fix, System.currentTimeMillis()))
                 agent.ciKnowledge?.record(st.pendingRepo, sig, fix)
             }
+            if (!agent.isEvolutionSession) agent.ciLessons?.onGreen(repo)
             st.pendingSig = null; st.fixes.clear()
             // Auto-Ship: yeşil build sürüm yayınlamadıysa kullanıcıya tek satır uyarı.
             if (!agent.isEvolutionSession) tools.takeShipNotice()?.let { history += it }
             return result to cur
         }
         if (!text.contains("\nHatalar (")) return result to cur
+        if (!agent.isEvolutionSession) agent.ciLessons?.onRed(repo, text)
         val sig = com.suarez.coder.evolution.SessionTraceRecorder.signature(text)
         st.failures++; st.lastFailed = true
         val repeated = st.seen.any { ErrorSig.similar(it, sig) }

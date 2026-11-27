@@ -81,7 +81,9 @@ class SelfPrOrchestrator(private val agent: Agent, private val onStatus: (String
         val (evalPath, _) = EvalGate.fileFor(cluster.clusterKey)
         val existingEval = runCatching { gh.readFileRaw(repo, evalPath, base) }.getOrNull()
         val prepared = EvalGate.prepare(cluster, existingEval)
-            ?: return Outcome(null, "Golden eval geriledi veya yeni vaka geçmedi; PR açılmadı.")
+            ?: return Outcome(null, if (EvalGate.caseFrom(cluster) == null)
+                "Kümede gerçek dosya parçası yok; PR açılmadı."
+            else "Golden eval geriledi; PR açılmadı.")
         val files = si.files.map { it.trim().removePrefix("./") }.filter { !EvolutionGuard.isProtected(it) }.take(EvolutionGuard.MAX_PR_FILES)
         if (files.isEmpty()) return Outcome(null, "Aday dosyalar korumalı veya boş; PR açılmadı.")
         onStatus("Coder dosyaları okunuyor")

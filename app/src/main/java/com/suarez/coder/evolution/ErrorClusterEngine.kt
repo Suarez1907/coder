@@ -70,7 +70,7 @@ class ErrorClusterEngine(private val file: File) {
             )
             val status = when (next.status) {
                 ClusterStatus.DISMISSED, ClusterStatus.PR_OPEN, ClusterStatus.RESOLVED -> next.status
-                else -> if (ready(next, thresholds)) ClusterStatus.READY_FOR_PR else ClusterStatus.COLLECTING
+                else -> if (ready(next, thresholds) && hasRealSnippet(next)) ClusterStatus.READY_FOR_PR else ClusterStatus.COLLECTING
             }
             val saved = next.copy(status = status)
             clusters = clusters.filter { it.clusterKey != hit.key } + saved
@@ -108,30 +108,30 @@ class ErrorClusterEngine(private val file: File) {
             val lang = languageOf(t)
             if (t.diffErrorCount > 0 || t.searchReplaceTier2Count > 0 || t.searchReplaceTier3Count > 0) {
                 val n = maxOf(t.diffErrorCount, 1)
-                out += Hit("search_replace_miss:$lang", "search_replace", n, maxOf(t.diffErrorCount, t.searchReplaceTier2Count + t.searchReplaceTier3Count, 1), sample(t))
+                out += Hit("search_replace_miss:$lang", "search_replace", n, maxOf(t.diffErrorCount, t.searchReplaceTier2Count + t.searchReplaceTier3Count, 1), sample(t, "search_replace"))
             }
             if (t.preflightBlocksCount > 0) {
                 val rule = Regex("ön kontrol \\(([^)]+)\\)").find(t.diffErrorSamples.joinToString(" "))?.groupValues?.get(1) ?: "unknown"
-                out += Hit("preflight_false_positive:$rule", "preflight", t.preflightBlocksCount, t.preflightBlocksCount, sample(t))
+                out += Hit("preflight_false_positive:$rule", "preflight", t.preflightBlocksCount, t.preflightBlocksCount, sample(t, "preflight"))
             }
             if (t.ciFailureCount > 0) {
                 val trunc = t.ciSignatures.any { s -> s.contains("kısaltıldı") || s.contains("truncat", true) }
                 val key = if (trunc) "ci_log_truncation_miss" else "ci_failure:" + slug(t.ciSignatures.firstOrNull() ?: "unknown")
-                out += Hit(key, "ci", t.ciFailureCount, t.ciFailureCount, sample(t))
+                out += Hit(key, "ci", t.ciFailureCount, t.ciFailureCount, sample(t, "log_filter"))
             }
             if (t.oscillationEscalationsCount > 0) {
                 val cat = t.route?.substringBefore('_')?.lowercase() ?: "general"
-                out += Hit("oscillation_loop:$cat", "oscillation", t.oscillationEscalationsCount, t.oscillationEscalationsCount, sample(t))
+                out += Hit("oscillation_loop:$cat", "oscillation", t.oscillationEscalationsCount, t.oscillationEscalationsCount, sample(t, "search_replace"))
             }
             if (t.prePushGateWarningsCount > 0) {
-                out += Hit("prepush_gate:warning", "prepush", t.prePushGateWarningsCount, t.prePushGateWarningsCount, sample(t))
+                out += Hit("prepush_gate:warning", "prepush", t.prePushGateWarningsCount, t.prePushGateWarningsCount, sample(t, "preflight"))
             }
             if (t.escalations.any { e -> e.contains("salt okunur", true) || e.contains("READ_ONLY") || e.contains("yetki", true) }) {
-                out += Hit("readonly_mismatch", "access", 1, 1, sample(t))
+                out += Hit("readonly_mismatch", "access", 1, 1, sample(t, "router_access"))
             }
             if (t.upgradedToArchitect) {
                 val cat = (t.route ?: "simple").lowercase()
-                out += Hit("router_underestimation:$cat", "router", 1, 1, sample(t))
+                out += Hit("router_underestimation:$cat", "router", 1, 1, sample(t, "router_access"))
             }
             return out
         }
@@ -146,7 +146,11 @@ class ErrorClusterEngine(private val file: File) {
             }
         }
 
-        fun sample(t: SessionTrace): String {
+        fun hasRealSnippet(c: ErrorCluster) = c.sampleTraces.any { EvalGate.caseFromSnippet(it) != null }
+
+        fun sample(t: SessionTrace, kind: String): String {
+            val window = t.failureWindows.firstOrNull { EvalGate.caseFromSnippet(it)?.optString("kind") == kind }
+            if (window != null) return window.take(4_000)
             val raw = (t.diffErrorSamples + t.ciSignatures + t.escalations).firstOrNull { it.isNotBlank() } ?: t.request
             return anonymize(raw).take(180)
         }

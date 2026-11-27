@@ -47,6 +47,8 @@ data class SessionTrace(
     val searchReplaceTier3Count: Int = 0,
     val oscillationEscalationsCount: Int = 0,
     val prePushGateWarningsCount: Int = 0,
+    /** Anonymized JSON windows (~40 lines around a real failure). Empty means no self-PR. */
+    val failureWindows: List<String> = emptyList(),
 ) {
     /** Problems that are worth learning from (a clean, cheap run teaches nothing). */
     val troubleScore get() = diffErrorCount + ciFailureCount * 2 + escalations.size + (if (stopped) 1 else 0) + (if (userCorrection) 2 else 0)
@@ -62,6 +64,7 @@ data class SessionTrace(
         .put("ctx", ctx?.let { JSONArray(it) } ?: JSONObject.NULL).put("prop", prop ?: JSONObject.NULL).put("steps", JSONArray(steps))
         .put("preflight", preflightBlocksCount).put("sr2", searchReplaceTier2Count).put("sr3", searchReplaceTier3Count)
         .put("osc", oscillationEscalationsCount).put("prepush", prePushGateWarningsCount)
+        .put("windows", JSONArray(failureWindows))
 
     companion object {
         private fun list(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
@@ -75,6 +78,7 @@ data class SessionTrace(
             o.optJSONArray("ctx")?.let { a -> (0 until a.length()).map { a.getDouble(it) } },
             o.optNullableString("prop"), list(o.optJSONArray("steps")),
             o.optInt("preflight"), o.optInt("sr2"), o.optInt("sr3"), o.optInt("osc"), o.optInt("prepush"),
+            list(o.optJSONArray("windows")),
         )
     }
 }

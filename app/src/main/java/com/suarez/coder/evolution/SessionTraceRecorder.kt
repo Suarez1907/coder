@@ -27,6 +27,7 @@ object SessionTraceRecorder {
         isEvolutionSession: Boolean,
         costOf: (ChatMessage.UsageRecord) -> Double,
         now: Long = System.currentTimeMillis(),
+        oscillationEscalations: Int = 0,
     ): SessionTrace? {
         val usage = run.filterIsInstance<ChatMessage.UsageRecord>()
         val tools = run.filterIsInstance<ChatMessage.ToolResult>()
@@ -73,8 +74,9 @@ object SessionTraceRecorder {
             preflightBlocksCount = marker("ön kontrol"),
             searchReplaceTier2Count = marker("SEARCH kademe 2"),
             searchReplaceTier3Count = marker("SEARCH kademe 3"),
-            oscillationEscalationsCount = marker("salınım"),
+            oscillationEscalationsCount = oscillationEscalations,
             prePushGateWarningsCount = marker("push öncesi"),
+            failureWindows = FailureWindows.from(run, request, routes.any { it.text.contains("yükseltildi") || it.text.contains("geçersiz kıldı") }),
         )
     }
 

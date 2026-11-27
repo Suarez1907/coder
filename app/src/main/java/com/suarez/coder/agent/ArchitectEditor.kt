@@ -236,7 +236,8 @@ class ArchitectEditor(private val agent: Agent) {
             return Outcome(false, "Commit denetimi değişikliği durdurdu, commit yapılmadı:\n${e.message}", repairable = true)
         }
         agent.tools.beforeWrite?.invoke(repo, branch)
-        val result = agent.tools.github.commitFiles(repo, branch, message, changes, base)
+        val withNotes = agent.tools.attachNotes?.invoke(repo, branch, changes) ?: changes
+        val result = agent.tools.github.commitFiles(repo, branch, message, withNotes, base)
         agent.tools.afterCommit?.invoke(repo, result, changes.map { it.path }, changes.count { !it.delete && originals[it.path] == null })
         agent.tools.onRepoChanged()
         val notes = agent.tools.commitNotes.joinToString("\n").also { agent.tools.commitNotes.clear() }
@@ -394,7 +395,9 @@ class ArchitectEditor(private val agent: Agent) {
         var feedback: String? = null
         var failedNow: Set<String> = emptySet()
         var convo = ArrayList<ChatMessage>()
+        var forceEscalation = false
         for ((attempt, step) in ladder.withIndex()) {
+            if (forceEscalation && step.role != "escalation") continue
             if (attempt > 0 && ladder[attempt - 1].ref.key != step.ref.key) {
                 history += ChatMessage.Notice("⤴️ Onarım denemesi ${attempt + 1}: ${Agent.roleLabel(step.role)} modeli (${step.ref.model}).")
                 ui.update()
@@ -432,7 +435,11 @@ class ArchitectEditor(private val agent: Agent) {
                 tier2 += res.tier2
                 tier3 += res.tier3
                 state[path] = if (res.applied.isEmpty() && state[path] == null) null else res.content
-                if (res.applied.isNotEmpty()) touched += path
+                if (res.applied.isNotEmpty()) {
+                    touched += path
+                    val body = state[path]
+                    if (body != null && agent.tools.oscillation.observe(path, body).escalate) forceEscalation = true
+                }
                 if (res.failures.isNotEmpty()) {
                     failedPaths += path
                     problems += SearchReplace.describeFailures(res.failures)
@@ -447,6 +454,7 @@ class ArchitectEditor(private val agent: Agent) {
             val preflight = invalid.values.sumOf { Regex("ön kontrol").findAll(it).count() }
             if (preflight > 0) history += ChatMessage.Notice("ön kontrol: $preflight")
             invalid.forEach { (p, why) -> problems += "Yerel kontrol, $p: $why"; failedPaths += p }
+            if (forceEscalation && step.role != "escalation") problems += "Salınım eşiği aşıldı; aynı dosya A-B-A döndü. Yükseltme modeli denenecek."
 
             val label = Agent.roleLabel(step.role)
             history += ChatMessage.Notice(
