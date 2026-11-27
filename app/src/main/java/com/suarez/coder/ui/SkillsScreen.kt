@@ -104,11 +104,37 @@ private const val NEW_SKILL = "---\nname: yeni-yetenek\ndescription: Bir satırl
 @Composable
 fun SkillsPage(vm: ChatViewModel) {
     LaunchedEffect(Unit) { vm.refreshSkills(fetchRepo = true); vm.refreshCloudTools() }
+    var selectedTab by remember { mutableStateOf(0) }
     var editing by remember { mutableStateOf<Pair<String, String>?>(null) } // (markdown, fallback name)
     var deleting by remember { mutableStateOf<Skill?>(null) }
     var importing by remember { mutableStateOf(false) }
     var warnings by remember { mutableStateOf<Pair<String, List<com.suarez.coder.skills.SkillSafety.Finding>>?>(null) }
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.statusBarsPadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("Yetenekler (Skills)", "Blueprint'ler").forEachIndexed { index, label ->
+                val selected = selectedTab == index
+                Surface(
+                    onClick = { selectedTab = index },
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (selected) strong else Color.Transparent,
+                    border = BorderStroke(1.dp, if (selected) strong else line),
+                ) {
+                    Text(
+                        label,
+                        style = Mono.tiny,
+                        color = if (selected) MaterialTheme.colorScheme.surface else strong,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+            }
+        }
+        if (selectedTab == 1) {
+            MonoCard {
+                Text("Blueprint'ler", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = strong)
+                Text("Çok-dosyalı başarılı turlardan kaydedilen parametrik şablonlar.", style = MaterialTheme.typography.bodySmall, color = weak)
+            }
+            return@Column
+        }
         MonoCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Yetenekler", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = strong, modifier = Modifier.weight(1f))

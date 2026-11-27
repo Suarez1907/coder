@@ -819,8 +819,78 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var skillsStatus by mutableStateOf<String?>(null)
         private set
 
+    private val blueprintStore by lazy {
+        com.suarez.coder.skills.BlueprintStore(File(getApplication<Application>().filesDir, "blueprints.json"))
+    }
+    var blueprints by mutableStateOf<List<com.suarez.coder.skills.Blueprint>>(emptyList())
+        private set
+    var contractWarning by mutableStateOf<com.suarez.coder.context.CrossRepoContractTwin.ContractWarning?>(null)
+        private set
+    var contractSyncBusy by mutableStateOf(false)
+        private set
+
     // Kotlin runs initializers in source order: this must come after the skill state above.
-    init { refreshSkills() }
+    init {
+        refreshSkills()
+        refreshBlueprints()
+    }
+
+    fun refreshBlueprints() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val list = runCatching { blueprintStore.all() }.getOrDefault(emptyList())
+            withContext(Dispatchers.Main) { blueprints = list }
+        }
+    }
+
+    fun approveBlueprint(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            blueprintStore.approve(id)
+            refreshBlueprints()
+        }
+    }
+
+    fun deleteBlueprint(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            blueprintStore.delete(id)
+            refreshBlueprints()
+        }
+    }
+
+    fun saveTurnAsBlueprint(name: String, files: List<String>, promptSummary: String) {
+        if (files.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val repo = repoNow().ifBlank { "local" }
+            val techTag = repo.substringAfterLast('/').ifBlank { "genel" }
+            val bp = com.suarez.coder.skills.BlueprintEngine.fromTurn(
+                name = name.ifBlank { "blueprint-${System.currentTimeMillis() % 10000}" },
+                techTag = techTag,
+                files = files.distinct(),
+                promptSummary = promptSummary,
+            )
+            blueprintStore.save(bp)
+            refreshBlueprints()
+            withContext(Dispatchers.Main) {
+                messages += ChatMessage.Notice("Blueprint taslak olarak kaydedildi: ${bp.name}")
+                save()
+            }
+        }
+    }
+
+    fun dismissContractWarning() {
+        contractWarning = null
+    }
+
+    fun prepareContractSyncPr() {
+        val warning = contractWarning ?: return
+        if (contractSyncBusy || running) return
+        contractSyncBusy = true
+        val targetRepos = warning.affectedRepos.joinToString(", ")
+        val prompt = "Çoklu-repo kontrat uyarısı algılandı (${warning.summary}). " +
+            "Etkilenen repolar ($targetRepos) için senkronize PR hazırla ve değişiklikleri doğrula."
+        contractWarning = null
+        contractSyncBusy = false
+        doSend(prompt)
+    }
 
     // ---- Importing skills from GitHub (starred repositories or a link) ----
 

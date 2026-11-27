@@ -275,7 +275,7 @@ private fun SummaryTab(vm: ChatViewModel) {
             vm.evoSummary().forEach { (k, v) ->
                 Row {
                     Text(k, style = MaterialTheme.typography.bodyMedium, color = Mono2.weak, modifier = Modifier.weight(1f))
-                    Text(v, style = Mono.small, color = Mono2.strong)
+                    Text(v, style = Mono.small.copy(fontFeatureSettings = "tnum"), color = Mono2.strong)
                 }
             }
         }
@@ -328,7 +328,14 @@ private fun PendingPrCard(vm: ChatViewModel, p: PendingSelfPr) {
                 if (p.evalTotal > 0) {
                     Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
                         Text("Eval: ${p.evalPassed}/${p.evalTotal} · +${p.evalAdded} yeni test · ${p.evalRegressions} gerileme",
-                            style = Mono.tiny, color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                            style = Mono.tiny.copy(fontFeatureSettings = "tnum"), color = Mono2.strong, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                    }
+                }
+                p.compressionReport?.takeIf { it.isNotBlank() }?.let { report ->
+                    Surface(shape = RoundedCornerShape(6.dp), border = BorderStroke(1.dp, Mono2.line), color = Color.Transparent) {
+                        Text(report,
+                            style = Mono.tiny.copy(fontFeatureSettings = "tnum"), color = Mono2.strong,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                     }
                 }
                 Text("${p.files.size} dosya · CI ${if (p.ciPassed) "Geçti" else "Bilinmiyor"} · " + Pricing.formatUsd(p.costUsd),

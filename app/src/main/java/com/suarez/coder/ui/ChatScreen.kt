@@ -232,7 +232,13 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 val turn = vm.messages.indexOfFirst { it === m }.let { idx ->
                                     if (idx < 0) 0 else vm.messages.take(idx + 1).count { it is ChatMessage.User } - 1
                                 }
-                                UserBubble(m.text, m.images, { vm.rewindToTurn(turn) }, { vm.forkFromTurn(turn) })
+                                UserBubble(
+                                    m.text,
+                                    m.images,
+                                    { vm.rewindToTurn(turn) },
+                                    { vm.forkFromTurn(turn) },
+                                    onSaveBlueprint = { vm.saveTurnAsBlueprint(turn) },
+                                )
                             }
                             is ChatMessage.Assistant -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 MarkdownText(m.text)
@@ -802,7 +808,13 @@ private fun CrashRecoveryBanner(onFix: () -> Unit) {
 }
 
 @Composable
-private fun UserBubble(text: String, images: List<String> = emptyList(), onRewind: () -> Unit = {}, onFork: () -> Unit = {}) {
+private fun UserBubble(
+    text: String,
+    images: List<String> = emptyList(),
+    onRewind: () -> Unit = {},
+    onFork: () -> Unit = {},
+    onSaveBlueprint: (() -> Unit)? = null,
+) {
     var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
         if (images.isNotEmpty()) {
@@ -831,6 +843,13 @@ private fun UserBubble(text: String, images: List<String> = emptyList(), onRewin
                     leadingIcon = { Icon(Icons.Outlined.AccountTree, null) },
                     onClick = { menu = false; onFork() },
                 )
+                if (onSaveBlueprint != null) {
+                    DropdownMenuItem(
+                        text = { Text("Blueprint Olarak Kaydet", style = Mono.small) },
+                        leadingIcon = { Icon(Icons.Outlined.Layers, null) },
+                        onClick = { menu = false; onSaveBlueprint() },
+                    )
+                }
             }
         }
     }
