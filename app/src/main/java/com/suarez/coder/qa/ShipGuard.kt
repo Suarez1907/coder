@@ -42,7 +42,7 @@ class ShipGuard {
             else "Bulgular bir düzeltme turuna aktarılabilir (${criticRounds}/${AdversarialCritic.MAX_FIX_ROUNDS})."
             return "Karşıt eleştirmen: BLOCK_CRITICAL. Otomatik merge durdu. $tail\n$sites"
         }
-        if (mutationOn && !mutationReport.isNullOrBlank()) {
+        if (mutationOn && blocksMutation(mutationReport)) {
             val summary = mutationSummary?.takeIf { it.isNotBlank() } ?: "Diff mutasyon testi: hayatta kalan mutant var."
             return "$summary Otomatik merge durdu.\n$mutationReport"
         }

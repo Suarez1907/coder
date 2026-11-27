@@ -162,7 +162,8 @@ class ContractDagOrchestrator(
         }
         val validation = if (pending.isEmpty()) validate(tx) else listOf("tamamlanmadı")
         if (validation.isNotEmpty()) errors += validation
-        val committed = pending.isEmpty() && validation.isEmpty() && errors.none { it.startsWith("durdu") }
+        val committed = pending.isEmpty() && validation.isEmpty() && crossRepoWarnings.isEmpty() &&
+            errors.none { it.startsWith("durdu") }
         if (!committed) tx.clear()
         return DagRun(
             architectModelId = architectModelId,
