@@ -63,5 +63,15 @@ class ShipGuard {
 
         /** Diff mutation gate: any surviving mutant report blocks the automatic merge. */
         fun blocksMutation(report: String?): Boolean = !report.isNullOrBlank()
+
+        /** One-line chat/PR summary for the mutation gate; empty when no mutant survived. */
+        fun mutationSummaryLine(
+            report: String?,
+            fallback: String = "Diff mutasyon testi: mantık değişikliğinde hayatta kalan mutant var.",
+        ): String = if (!blocksMutation(report)) "" else fallback
+
+        /** Full survivor feedback (line + mutant detail) for the chat/PR body. */
+        fun mutationDetail(report: String?): String =
+            if (!blocksMutation(report)) "" else report.orEmpty().trim()
     }
 }

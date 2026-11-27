@@ -25,7 +25,10 @@ class ContractDagOrchestrator(
     var cacheProvider: String = "gemini"
     val maxConcurrency: Int = maxConcurrency.coerceIn(1, 3)
 
-    /** Refuses every attempt to point the run at another architect. */
+    /**
+     * Refuses every attempt to point the run at another architect. The id stays locked for the whole run and no
+     * self-merge is ever triggered by this orchestrator: [DagRun.committed] only reports a clean staged transaction.
+     */
     fun retarget(@Suppress("UNUSED_PARAMETER") modelId: String): Boolean = false
 
     fun lock(nodes: List<DagNode>): TaskContract {
