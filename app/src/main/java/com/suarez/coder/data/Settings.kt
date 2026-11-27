@@ -863,4 +863,45 @@ class Settings(context: Context) {
         saveProfiles(rest)
         if (id == activeProfileId) activateProfile(rest.first().id)
     }
+
+    // ---- Phase 5B: Speculative Swarm, Diff Mutation, Meta-Harness & Cross-Repo ----
+
+    /** "off" | "after_ci_fail" | "hard_tasks" */
+    var speculativeSwarmMode: String
+        get() = str("speculative_swarm_mode", "off").let {
+            if (it == "after_ci_fail" || it == "hard_tasks") it else "off"
+        }
+        set(v) = put(
+            "speculative_swarm_mode",
+            if (v == "after_ci_fail" || v == "hard_tasks") v else "off",
+        )
+
+    var speculativeSwarmCandidates: Int
+        get() = prefs.getInt("speculative_swarm_candidates", 2).coerceIn(2, 3)
+        set(v) = prefs.edit().putInt("speculative_swarm_candidates", v.coerceIn(2, 3)).apply()
+
+    var speculativeSwarmBudgetUsd: Double
+        get() = str("speculative_swarm_budget_usd", "0.02").toDoubleOrNull()?.coerceIn(0.005, 0.50) ?: 0.02
+        set(v) = put("speculative_swarm_budget_usd", v.coerceIn(0.005, 0.50).toString())
+
+    var diffMutationEnabled: Boolean
+        get() = bool("diff_mutation_enabled", true)
+        set(v) = putBool("diff_mutation_enabled", v)
+
+    var diffMutationTimeoutSec: Int
+        get() = prefs.getInt("diff_mutation_timeout_sec", 60).coerceIn(10, 60)
+        set(v) = prefs.edit().putInt("diff_mutation_timeout_sec", v.coerceIn(10, 60)).apply()
+
+    /** "off" | "weekly" */
+    var metaHarnessMode: String
+        get() = str("meta_harness_mode", "off").let { if (it == "weekly") "weekly" else "off" }
+        set(v) = put("meta_harness_mode", if (v == "weekly") "weekly" else "off")
+
+    var metaHarnessBudgetUsd: Double
+        get() = str("meta_harness_budget_usd", "0.05").toDoubleOrNull()?.coerceIn(0.01, 0.50) ?: 0.05
+        set(v) = put("meta_harness_budget_usd", v.coerceIn(0.01, 0.50).toString())
+
+    var crossRepoContractsJson: String
+        get() = str("cross_repo_contracts_json", "[]")
+        set(v) = put("cross_repo_contracts_json", v.ifBlank { "[]" })
 }
