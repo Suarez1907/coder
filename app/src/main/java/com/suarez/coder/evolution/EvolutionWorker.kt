@@ -32,6 +32,7 @@ class EvolutionWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 .setInitialDelay(delayMinutes, TimeUnit.MINUTES)
                 .build()
             runCatching { WorkManager.getInstance(context).enqueueUniqueWork(NAME, ExistingWorkPolicy.KEEP, req) }
+            runCatching { RemDreamWorker.schedule(context, com.suarez.coder.data.Settings(context).remDreamModeEnabled) }
         }
     }
 }
