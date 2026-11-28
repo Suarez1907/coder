@@ -30,8 +30,8 @@ object RouterAccessPolicy {
 
     /** Negated write forms, e.g. "değiştirme" or "commit etme". */
     private val NEGATED_WRITE = Regex(
-        "(?i)\\b(değiştirm(?:e|eden)|düzeltm(?:e|eyen)|eklem(?:e|eyen)|güncellem(?:e|eyen)|" +
-            "oluşturm(?:a|ayan)|yazm(?:a|ayan)|commit(?: etm|iyor)|push(?: etm|iyor)|" +
+        "(?i)\\b(değiştir(?:me|meden|meden)|düzelt(?:me|meden|meden)|ekle(?:me|meden|meden)|güncelle(?:me|meden|meden)|" +
+            "oluştur(?:ma|madan|madan)|yaz(?:ma|madan|madan)|commit(?: etm|iyor)|push(?: etm|iyor)|" +
             "implement(?: etm|ing)|fix(?: etm|ing))\\b",
     )
 
