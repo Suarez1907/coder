@@ -1,15 +1,6 @@
-# Coder — Proje Notları
-
-Android (Kotlin + Jetpack Compose) sohbet/ajan uygulaması: GitHub ajanı, çok ajanlı orkestrasyon, evrim.
-
-## Yapı
-
-## Kurallar
-
-## Derleme/test
-
 <!-- coder-scoped-rules -->
 ## Proje kuralları
+- [*] Zero turns and empty steps[] for a routed COMPLEX_ARCHITECT task indicates the agent never executed — verify step execution before marking session complete
 - [*] Model escalation chain (gemini-4-hydrogen → deepseek-v4.1-flash-1017 → qwen/qwen3.8-flash) failed to resolve diff errors; upgraded=false confirms escalation did not produce a passing diff
 - [*] COMPLEX_ARCHITECT sessions with 0 turns and empty steps[] indicate the agent never executed despite routing; verify step execution before marking session complete
 - [*] Model escalation chain (gemini-4-hydrogen → deepseek-v4.1-flash-1017 → qwen/qwen3.8-flash) failed to resolve diff errors; upgraded=false confirms escalation did not produce a passing diff
