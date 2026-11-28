@@ -6,6 +6,22 @@ import com.suarez.coder.tools.GitHub
 class StagedTransaction {
     data class WriteItem(val path: String, val content: String?, val delete: Boolean = false)
 
+    /** Hafif düzenleme kaydı: `before`/`after` null olabilir (yeni dosya veya silme). */
+    data class StageEdit(val path: String, val before: String?, val after: String?)
+
+    private val staged = ArrayList<StageEdit>()
+
+    @Synchronized
+    fun stage(path: String, before: String?, after: String?) {
+        staged += StageEdit(path, before, after)
+    }
+
+    @Synchronized
+    fun edits(): List<StageEdit> = staged.toList()
+
+    @Synchronized
+    fun clear() = staged.clear()
+
     sealed class Outcome {
         data class DiffFailed(val message: String) : Outcome()
         data class PreFlightBlocked(val issues: List<PreFlightValidator.Issue>, val formattedReport: String) : Outcome()

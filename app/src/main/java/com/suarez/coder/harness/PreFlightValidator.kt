@@ -11,8 +11,15 @@ object PreFlightValidator {
     )
 
     data class Issue(val path: String, val line: Int, val reason: String) {
+        /** Kısa açıklama erişimcisi (eski adlandırma ile uyumluluk). */
+        val detail: String get() = reason
+
         override fun toString(): String = "$path:$line: $reason"
     }
+
+    /** Tek dosya için hızlı kontrol: sorun yoksa boş liste döner. */
+    fun check(path: String, before: String?, after: String?): List<Issue> =
+        validate(listOf(StagedFile(path = path, before = before, after = after, explicitDelete = after == null))).issues
 
     data class Result(val ok: Boolean, val issues: List<Issue>) {
         fun report(): String = issues.joinToString("\n") { it.toString() }
