@@ -93,6 +93,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         }
         tools.preCommit = { repo, branch, changes ->
             guards.supplyChain(repo, branch, changes) // no model call: cheapest first
+            guards.differentialVerify(changes)
+            guards.architecturalImmunity(changes)
             guards.selfReview(repo, branch, changes)
             guards.quickCheck(repo, branch, changes)
         }
@@ -623,6 +625,10 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         if (settings.projectNotes) context.loadNotes()?.let { parts += "PROJECT NOTES (.coder/NOTES.md):\n$it" }
         context.repo.takeIf { it.isNotBlank() }?.let { r -> lessonsFor?.invoke(tools.normalizeRepo(r))?.takeIf { it.isNotBlank() } }
             ?.let { parts += "LEARNED LESSONS (Coder's memory for this repo; follow them):\n$it" }
+        if (settings.multiRepoMeshEnabled && filesDir != null) runCatching {
+            val tags = com.suarez.coder.evolution.MultiRepoMesh.detectStackTags(context.files, context.repo)
+            com.suarez.coder.evolution.MultiRepoMesh(java.io.File(filesDir, "evolution/multi_repo_mesh.json")).formatContext(tags)?.let { parts += it }
+        }
         var hasMap = false
         if (kind == "architect") repoMapFor(history, ui)?.let { parts += "REPO MAP (paths, types, signatures; bodies removed):\n$it"; hasMap = true }
         context.load()?.let { parts += it.text }
@@ -1441,8 +1447,9 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
+            val compressed = if (settings.forensicDiffEnabled) com.suarez.coder.context.TokenBudgetCompressor.compress(prepared.messages) else prepared.messages
             val reply = try {
-                callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
+                callModel(history, compressed, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
             } catch (e: com.suarez.coder.llm.WatchdogCut) {
                 watchdogStrikes++
                 history += ChatMessage.User(com.suarez.coder.llm.MidStreamWatchdog.CONSTRAINT, isHarnessInternal = true)

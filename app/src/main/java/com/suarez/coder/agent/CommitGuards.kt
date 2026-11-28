@@ -71,6 +71,29 @@ internal class CommitGuards(private val agent: Agent) {
         const val SAFE_RISK = 0.12
     }
 
+    /** Phase 6A: deterministic structural diff verification before commit (zero model cost). */
+    internal fun differentialVerify(changes: List<Triple<String, String?, String?>>) {
+        if (!settings.differentialVerifyEnabled || agent.isEvolutionSession) return
+        val report = com.suarez.coder.validate.DifferentialVerifier.verifyAll(changes)
+        if (report.isClean) return
+        agent.liveHistory?.add(ChatMessage.Notice("Diferansiyel doğrulama (${report.issues.size} bulgu)", report.summary(), isError = report.hasBlocking))
+        if (report.hasBlocking) {
+            throw com.suarez.coder.tools.ToolException("Diferansiyel doğrulama commit'i durdurdu:\n${report.summary()}\nKırılan paket/import/parantez sorununu düzeltip tekrar gönder.")
+        }
+    }
+
+    /** Phase 6B: blocks known recurring architectural regressions before commit ($0). */
+    internal fun architecturalImmunity(changes: List<Triple<String, String?, String?>>) {
+        if (!settings.architecturalImmunityEnabled || agent.isEvolutionSession) return
+        val dir = agent.filesDirOrNull() ?: return
+        val store = com.suarez.coder.security.ArchitecturalImmunity.Store(java.io.File(dir, "evolution/immunity_rules.json"))
+        val matches = store.checkAll(changes)
+        if (matches.isEmpty()) return
+        val msg = com.suarez.coder.security.ArchitecturalImmunity.formatBlockMessage(matches)
+        agent.liveHistory?.add(ChatMessage.Notice("Mimari Bağışıklık commit'i durdurdu (${matches.size} antikor)", msg, isError = true))
+        throw com.suarez.coder.tools.ToolException(msg)
+    }
+
     /** A new run: every change may be reviewed again, every branch gets a fresh checkpoint. */
     fun startRun() { reviewedOnce.clear(); runCheckpoints.clear() }
 
