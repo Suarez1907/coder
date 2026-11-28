@@ -86,9 +86,16 @@ object HistoryPruner {
         var pos = if (users.size > keepTurns) users[users.size - keepTurns] else -1
         if (pos <= tailStart) {
             val results = tailIdx.filter { all[it] is ChatMessage.ToolResult }
-            if (results.size <= KEEP_RESULTS_IN_HUGE_TURN) return null
-            val keepFrom = results[results.size - KEEP_RESULTS_IN_HUGE_TURN]
-            pos = (keepFrom downTo tailStart).firstOrNull { all[it] is ChatMessage.Assistant } ?: return null
+            if (results.size > KEEP_RESULTS_IN_HUGE_TURN) {
+                val keepFrom = results[results.size - KEEP_RESULTS_IN_HUGE_TURN]
+                pos = (keepFrom downTo tailStart).firstOrNull { all[it] is ChatMessage.Assistant } ?: return null
+            } else if (tailSize > maxTailChars * 2 && results.size > MIN_FULL_RESULTS) {
+                // Cost & compaction guard: even with few tool results, prevent runaway prompt bloat.
+                val keepFrom = results[results.size - MIN_FULL_RESULTS]
+                pos = (keepFrom downTo tailStart).firstOrNull { all[it] is ChatMessage.Assistant } ?: return null
+            } else {
+                return null
+            }
         }
         // Everything kept full is billed fresh once right after the checkpoint, so keep at most a quarter of the threshold
         // (but always the last MIN_FULL_RESULTS tool results), and compact the rest in one go.
