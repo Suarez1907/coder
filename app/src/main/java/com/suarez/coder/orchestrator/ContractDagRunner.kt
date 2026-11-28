@@ -48,8 +48,10 @@ class ContractDagRunner(agent: Agent, hooks: OrchestratorHooks) : OrchestratorBa
         if (edits.isNotEmpty()) {
             val changes = edits.map { GitHub.FileChange(it.path, it.after, it.after == null) }
             try {
+                agent.tools.preCommit?.invoke(plan.repo, plan.branch, edits.map { Triple(it.path, it.before, it.after) })
                 agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
                 val res = agent.tools.github.commitFiles(plan.repo, plan.branch, plan.commitMessage, changes, plan.base)
+                agent.tools.afterCommit?.invoke(plan.repo, res, changes.map { it.path }, edits.count { it.after != null && it.before == null })
                 agent.tools.onRepoChanged()
                 history += ChatMessage.Notice("Kontratlı DAG tek commit", res)
             } catch (e: CancellationException) {

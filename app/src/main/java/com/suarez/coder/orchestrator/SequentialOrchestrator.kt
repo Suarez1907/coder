@@ -2,6 +2,7 @@ package com.suarez.coder.orchestrator
 
 import com.suarez.coder.agent.Agent
 import com.suarez.coder.agent.AgentUi
+import com.suarez.coder.ci.AutoHealer
 import com.suarez.coder.llm.ChatMessage
 import kotlinx.coroutines.async
 
@@ -25,7 +26,8 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             history += ChatMessage.Notice(if (failed) "❌ $id: CI başarısız" else "🟢 $id: CI", report, isError = failed)
             ui.update()
             if (!failed) return true
-            plan.task(id)?.let { pt -> plan = save(plan.withTask(pt.copy(status = TaskStatus.FAILED, error = "CI başarısız:\n" + report.takeLast(1_500))), ui) }
+            val sig = AutoHealer.signature(report).takeIf { it.isNotBlank() }?.let { "[$it]\n" } ?: ""
+            plan.task(id)?.let { pt -> plan = save(plan.withTask(pt.copy(status = TaskStatus.FAILED, error = "CI başarısız: $sig" + report.takeLast(1_500))), ui) }
             plan = save(plan.copy(state = PlanState.PAUSED, note = "$id başarısız oldu (CI); Devam Et aynı alt görevi hatasıyla birlikte yeniden dener."), ui)
             return false
         }
@@ -65,7 +67,10 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                 else {
                     val (failed, report) = waitCi(plan)
                     history += ChatMessage.Notice(if (failed) "❌ ${t.id}: CI başarısız" else "🟢 ${t.id}: CI", report, isError = failed)
-                    if (failed) result = result.copy(status = TaskStatus.FAILED, error = "CI başarısız:\n" + report.takeLast(1_500))
+                    if (failed) {
+                        val sig = AutoHealer.signature(report).takeIf { it.isNotBlank() }?.let { "[$it]\n" } ?: ""
+                        result = result.copy(status = TaskStatus.FAILED, error = "CI başarısız: $sig" + report.takeLast(1_500))
+                    }
                 }
             }
             val cost = costSince(history, from)
@@ -85,8 +90,10 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
         val (changes, summary) = editor.changesFor(t.files.map { it.path to (it.action == "delete") }, originals, state)
         if (changes.isEmpty()) return t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, "değişiklik gerekmedi"))
         return try {
+            agent.tools.preCommit?.invoke(plan.repo, plan.branch, changes.map { Triple(it.path, originals[it.path], if (it.delete) null else it.content) })
             agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
             val res = agent.tools.github.commitFiles(plan.repo, plan.branch, "${plan.commitMessage} — ${t.title}", changes, plan.base)
+            agent.tools.afterCommit?.invoke(plan.repo, res, changes.map { it.path }, changes.count { !it.delete && originals[it.path] == null })
             agent.tools.onRepoChanged()
             history += ChatMessage.Notice("✅ ${t.id} commit edildi", "$res\n$summary")
             t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, summary))

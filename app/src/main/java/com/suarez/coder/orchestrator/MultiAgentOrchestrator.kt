@@ -98,8 +98,10 @@ class MultiAgentOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             val (changes, summary) = editor.changesFor(paths, originals, state)
             if (changes.isNotEmpty()) {
                 try {
+                    agent.tools.preCommit?.invoke(plan.repo, plan.branch, changes.map { Triple(it.path, originals[it.path], if (it.delete) null else it.content) })
                     agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
                     val res = agent.tools.github.commitFiles(plan.repo, plan.branch, plan.commitMessage, changes, plan.base)
+                    agent.tools.afterCommit?.invoke(plan.repo, res, changes.map { it.path }, changes.count { !it.delete && originals[it.path] == null })
                     agent.tools.onRepoChanged()
                     history += ChatMessage.Notice("✅ Tek commit: ${changes.size} dosya", "$res\n$summary")
                 } catch (e: CancellationException) {
