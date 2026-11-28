@@ -307,6 +307,13 @@ class GitHub(private val token: () -> String) {
             return "(Bu bir klasör)\n" + entries.joinToString("\n") { e -> (e as JSONObject).let { "${it.getString("type")}: ${it.getString("path")}" } }
         }
 
+        /** Pure formatter so the step-aware error format can be unit tested. */
+        fun logErrorMessage(code: Int, jobName: String, stepName: String): String {
+            val job = jobName.ifBlank { "?" }
+            val step = stepName.ifBlank { "?" }
+            return "Log alınamadı (HTTP $code) · $job · $step"
+        }
+
         /** Releases JSON -> short Turkish summary: tag, date, draft/pre-release flags, assets with download links. */
         fun releaseSummary(body: String, limit: Int): String {
             val arr = runCatching { JSONArray(body) }.getOrNull() ?: return "Sürüm listesi okunamadı."
@@ -663,13 +670,6 @@ class GitHub(private val token: () -> String) {
             throw ToolException(logErrorMessage(code, jobName, stepName))
         }
         throw ToolException(logErrorMessage(r.code, jobName, stepName))
-    }
-
-    /** Pure formatter so the step-aware error format can be unit tested. */
-    fun logErrorMessage(code: Int, jobName: String, stepName: String): String {
-        val job = jobName.ifBlank { "?" }
-        val step = stepName.ifBlank { "?" }
-        return "Log alınamadı (HTTP $code) · $job · $step"
     }
 
     suspend fun searchCode(query: String): String {
