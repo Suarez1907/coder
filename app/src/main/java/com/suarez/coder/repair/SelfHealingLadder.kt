@@ -84,9 +84,10 @@ class SelfHealingLadder(
         }
 
         // Tier 1 ($0): ZeroCostWaterfall / local Tier-0
-        if (!oscillationDetected && tier1FreeRepair != null) {
+        val tier1 = tier1FreeRepair
+        if (!oscillationDetected && tier1 != null) {
             llmCalls++
-            val cand = runCatching { tier1FreeRepair.invoke(errorLog, files) }.getOrNull()
+            val cand = runCatching { tier1.invoke(errorLog, files) }.getOrNull()
             if (cand != null) {
                 validateTx(cand)?.let { tx ->
                     return HealingResult(true, Tier.TIER_1_FREE_QUOTA, tx, llmCalls, 0.0, lockedArchitectModelId, "Ücretsiz kota/yerel katman ile çözüldü")
@@ -95,9 +96,10 @@ class SelfHealingLadder(
         }
 
         // Tier 2 (low cost): Paid Implementer (skipped directly to Tier 3 on oscillation)
-        if (!oscillationDetected && tier2PaidImplementer != null) {
+        val tier2 = tier2PaidImplementer
+        if (!oscillationDetected && tier2 != null) {
             llmCalls++
-            val (cand, cost) = runCatching { tier2PaidImplementer.invoke(errorLog, files) }.getOrDefault(null to 0.0)
+            val (cand, cost) = runCatching { tier2.invoke(errorLog, files) }.getOrDefault(null to 0.0)
             totalCost += cost.coerceAtLeast(0.0)
             if (cand != null) {
                 validateTx(cand)?.let { tx ->
@@ -107,9 +109,10 @@ class SelfHealingLadder(
         }
 
         // Tier 3 (Final resolution): User's locked Architect model
-        if (tier3LockedArchitect != null) {
+        val tier3 = tier3LockedArchitect
+        if (tier3 != null) {
             llmCalls++
-            val (cand, cost) = runCatching { tier3LockedArchitect.invoke(lockedArchitectModelId, errorLog, files) }.getOrDefault(null to 0.0)
+            val (cand, cost) = runCatching { tier3.invoke(lockedArchitectModelId, errorLog, files) }.getOrDefault(null to 0.0)
             totalCost += cost.coerceAtLeast(0.0)
             if (cand != null) {
                 validateTx(cand)?.let { tx ->
