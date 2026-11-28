@@ -44,7 +44,8 @@ internal class CiController(private val agent: Agent) {
             if (!agent.isEvolutionSession) tools.takeShipNotice()?.let { history += it }
             return result to cur
         }
-        if (!text.contains("\nHatalar (")) return result to cur
+        if (com.suarez.coder.evolution.ExamRunner.ciMissing(text)) return result to cur
+        // Failed: ciPassed is false and ciMissing is false
         val sig = com.suarez.coder.evolution.SessionTraceRecorder.signature(text)
         st.failures++; st.lastFailed = true
         val repeated = st.seen.any { ErrorSig.similar(it, sig) }
@@ -57,7 +58,14 @@ internal class CiController(private val agent: Agent) {
             com.suarez.coder.ci.LogFilter.extract(text), repo,
             if (settings.fixMemory) agent.ciKnowledge else null, round = st.failures
         )
-        if (!agent.isEvolutionSession) history += ChatMessage.Notice(com.suarez.coder.ci.AutoHealer.notice(heal), sig)
+        if (!agent.isEvolutionSession) {
+            if (heal.action == com.suarez.coder.ci.AutoHealer.Action.ESCALATE) {
+                val up = Escalation.next(agent.escalationChain(), cur)
+                history += ChatMessage.Notice(com.suarez.coder.ci.AutoHealer.notice(heal) + if(up != null) " — Yükseltme: ${up.model}" else "", sig)
+            } else {
+                history += ChatMessage.Notice(com.suarez.coder.ci.AutoHealer.notice(heal), sig)
+            }
+        }
         heal.hint?.let { h -> out = out.copy(content = out.content + "\n\n" + h) }
         var next: ModelRef? = cur
         if (settings.untilGreen && repeated && !agent.isEvolutionSession) {

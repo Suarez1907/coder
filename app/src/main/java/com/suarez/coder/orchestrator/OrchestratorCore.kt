@@ -201,7 +201,10 @@ abstract class OrchestratorBase(protected val agent: Agent, protected val hooks:
             agent.tools.execute(ToolCall("orch_ci", "ci_wait", JSONObject().put("repo", plan.repo).put("ref", plan.branch)),
                 readOnly = false, allowOps = true)
         }.getOrElse { "CI okunamadı: ${it.message}" }
-        return r.contains("\nHatalar (") to r
+        val failed = r.contains("\nHatalar (") || r.contains("exception") || r.contains("timeout") || 
+                     (!com.suarez.coder.evolution.ExamRunner.ciPassed(r) && !com.suarez.coder.evolution.ExamRunner.ciMissing(r)) || 
+                     r.isBlank()
+        return failed to r
     }
 
     protected suspend fun review(history: MutableList<ChatMessage>, ui: AgentUi, plan: OrchestratorPlan, diff: String, ci: String?): Review {

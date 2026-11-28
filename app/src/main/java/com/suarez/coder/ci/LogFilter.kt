@@ -18,13 +18,17 @@ object LogFilter {
      * error. Matched in capitals only, so real error lines that merely mention such words stay.
      */
     private val legal = Regex("\\b(WARRANTY|WARRANTIES|WARRANTED|LIABILITY|LIABLE|DAMAGES|INFRINGEMENT|NONINFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b")
-    private val noise = Regex("(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated)", RegexOption.IGNORE_CASE)
+    private val noise = Regex("(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated|continue-on-failure|GITHUB_DEPENDENCY_GRAPH|DEVELOCITY_|JAVA_HOME|GRADLE_USER_HOME|Run actions/|Run gradle/actions|##\\[group\\]|##\\[endgroup\\]|^env:)", RegexOption.IGNORE_CASE)
+    private val priorityRe = Regex("(^e: |Unresolved reference|Type mismatch|Execution failed for task|AssertionError|\\bFAILED\\b)", RegexOption.IGNORE_CASE)
 
     fun extract(log: String, context: Int = 2, maxChars: Int = 6_000): String {
         val lines = log.lines().map { it.replace(timestamp, "").trimEnd() }
         val keep = sortedSetOf<Int>()
+        val priority = sortedSetOf<Int>()
         lines.forEachIndexed { i, l ->
-            if (errorRe.containsMatchIn(l) && !noise.containsMatchIn(l) && !legal.containsMatchIn(l)) {
+            val isNoiseOrLegal = noise.containsMatchIn(l) || legal.containsMatchIn(l)
+            if (priorityRe.containsMatchIn(l) && !isNoiseOrLegal) priority += i
+            if (errorRe.containsMatchIn(l) && !isNoiseOrLegal) {
                 for (j in (i - context).coerceAtLeast(0)..(i + context).coerceAtMost(lines.size - 1)) keep += j
             }
         }
@@ -35,12 +39,26 @@ object LogFilter {
         val seen = HashSet<String>()
         val sb = StringBuilder()
         var prev = -2
-        for (i in keep) {
+        
+        // Add priority lines first
+        for (i in priority) {
+            if (i !in keep) keep += i
+        }
+        for (i in priority) {
             val l = lines[i]
             if (l.isBlank() || !seen.add(l.trim())) continue
             if (i != prev + 1 && sb.isNotEmpty()) sb.append("…\n")
             sb.append(l).append('\n')
             prev = i
+            if (sb.length > maxChars) { sb.append("…(kısaltıldı)\n"); return sb.toString() }
+        }
+        
+        for (i in keep) {
+            if (i in priority) continue // already added
+            val l = lines[i]
+            if (l.isBlank() || !seen.add(l.trim())) continue
+            if (sb.isNotEmpty()) sb.append("…\n")
+            sb.append(l).append('\n')
             if (sb.length > maxChars) { sb.append("…(kısaltıldı)\n"); break }
         }
         return sb.toString()

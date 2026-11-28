@@ -29,9 +29,8 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # Self-evolution branches must prove their test-first fix: run the unit tests there.
-      - name: Unit tests (evo and exam branches)
-        if: startsWith(github.ref_name, 'evo/') || startsWith(github.ref_name, 'coder-exam/')
+      # All branches must prove their fix: run the unit tests there.
+      - name: Unit tests
         run: ./gradlew testDebugUnitTest --no-daemon
 
       - name: Build release APK
@@ -49,7 +48,7 @@ jobs:
       # GitHub's release API occasionally returns 500 (service outages); the APK is already
       # uploaded as an artifact, so a release hiccup must not fail the whole build.
       - name: Publish release
-        if: ${{ !startsWith(github.ref_name, 'evo/') && !startsWith(github.ref_name, 'coder-exam/') }}
+        if: ${{ github.ref == 'refs/heads/main' }}
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:

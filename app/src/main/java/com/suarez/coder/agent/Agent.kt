@@ -330,7 +330,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     private var architectOverride: ModelRef? = null
     private var architectThinkingOverride: String? = null
 
-    fun architectRef() = modelOverride ?: roleOverrides["architect"] ?: architectOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
+    fun architectRef() = modelOverride ?: ModelRef.parse(settings.architectModel) ?: singleRef()
     fun lockedArchitectRef() = ModelRef.parse(settings.architectModel) ?: singleRef()
     fun architectThinking() = architectThinkingOverride ?: settings.thinkingArchitect
     fun editorRef() = modelOverride ?: roleOverrides["editor"] ?: ModelRef.parse(settings.editorModel) ?: singleRef()
@@ -690,9 +690,12 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
     }
 
     /** The output cap for a role: learned from real answers (adaptive budget) or the configured value. */
-    fun learnedMaxOut(role: String, configured: Int?): Int? {
+    fun learnedMaxOut(role: String, configured: Int?, thinking: String? = null): Int? {
         if (configured == null || !settings.adaptiveBudget || role !in ADAPTIVE_ROLES) return configured
-        return outputStats?.cap(role, configured) ?: configured
+        val learned = outputStats?.cap(role, configured) ?: configured
+        return if (thinking in setOf("medium", "high", "xhigh"))
+            minOf(maxOf(learned, maxOf(configured, 16_384)), Settings.MAX_OUTPUT)
+        else learned
     }
 
     private val outputStats: com.suarez.coder.cost.OutputStats? = filesDir?.let { com.suarez.coder.cost.OutputStats(java.io.File(it, "outstats.json")) }
@@ -712,7 +715,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         jsonMode: Boolean,
         temperature: Double? = null,
     ): ChatMessage.Assistant {
-        val maxOut = learnedMaxOut(role, maxOutConfigured)
+        val maxOut = learnedMaxOut(role, maxOutConfigured, thinking)
         beforeCall?.invoke()
         checkBudget(history, ui)
         val client = client(ref)
@@ -1235,6 +1238,8 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         var consecutiveFailures = 0
         var reads = 0
         var cur = ref
+        var emptyRetryDone = false
+        var maxOutEff = maxOut
         val ci = CiController.CiState()
         // Yetki kurtarma: yazma niyetli görevde salt okunur yanıt gelirse oturumu bir kez READ_WRITE'a yükselt.
         var ro = readOnly
@@ -1267,14 +1272,40 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             // Rare bulk compaction instead of re-shortening every step: the prefix changes once, then stays cacheable.
             HistoryPruner.checkpointIndex(history, settings.keepTurns, settings.compactTailChars)?.let { idx ->
                 history.add(idx, ChatMessage.CompactMark)
-                snapshots.clear()
-                history += ChatMessage.Notice("🗜 Geçmiş toplu sıkıştırıldı; önbellek bu adımda bir kez yenilenecek.")
+                history += ChatMessage.Notice("🗜 Geçmiş toplu sıkıştırıldı.")
                 maybeSummarize(history, ui)
                 ui.update()
             }
             val stable = stableKind?.let { stableContext(it, history, ui) }
             val prepared = HistoryPruner.prepare(history, settings.keepTurns)
-            val reply = callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOut, thinking = think, stable = stable)
+            val reply = callModel(history, prepared.messages, cur, role, system, specs, ui, maxOut = maxOutEff, thinking = think, stable = stable)
+            val emptyReply = reply.toolCalls.isEmpty() &&
+                (reply.text.isBlank() || reply.text.startsWith("(Model boş yanıt döndü"))
+            if (emptyReply) {
+                if (!emptyRetryDone) {
+                    emptyRetryDone = true
+                    think = when (think) {
+                        "xhigh" -> "high"
+                        "high" -> "medium"
+                        "medium" -> "low"
+                        else -> null
+                    }
+                    maxOutEff = minOf(maxOf(maxOut ?: 0, 16_384), Settings.MAX_OUTPUT)
+                    history += ChatMessage.Notice("Boş yanıt geldi; düşünme seviyesi düşürülüp çıktı sınırı artırılarak bir kez yeniden denenecek.")
+                    ui.update()
+                    continue
+                }
+                val up = Escalation.next(escalationChain(), cur)
+                if (up != null) {
+                    history += ChatMessage.Notice("Boş yanıt yinelendi; daha güçlü modele geçiliyor (${up.model})")
+                    cur = up
+                    emptyRetryDone = false
+                    ui.update()
+                    continue
+                }
+                throw com.suarez.coder.llm.LlmException("${cur.model} boş yanıt döndürdü; yeniden deneme ve model yükseltme tükendi.")
+            }
+            emptyRetryDone = false
             history += reply
             ui.update()
             if (reply.toolCalls.isEmpty()) {

@@ -2,6 +2,7 @@ package com.suarez.coder.llm
 
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import com.suarez.coder.llm.StreamProgress
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -70,24 +71,7 @@ class OpenAiCompatClient(
 
     override suspend fun complete(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions): LlmResponse {
         if (apiKey.isBlank()) throw LlmException("$name API anahtarı girilmemiş. Ayarlar'dan ekleyin.")
-        val body = JSONObject()
-            .put("model", model)
-            .put("messages", buildMessages(system, history))
-        options.maxOutputTokens?.let { body.put("max_tokens", it) }
-        options.temperature?.let { body.put("temperature", it) }
-        if (openRouter) body.put("usage", JSONObject().put("include", true))
-        if (json && options.jsonMode && tools.isEmpty()) body.put("response_format", JSONObject().put("type", "json_object"))
-        if (reasoning) OpenRouterCatalog.effortFor(options.thinkingLevel, options.minimalThinking)?.let {
-            body.put("reasoning", JSONObject().put("effort", it))
-        }
-        if (tools.isNotEmpty()) {
-            val arr = JSONArray()
-            tools.forEach {
-                arr.put(JSONObject().put("type", "function").put("function",
-                    JSONObject().put("name", it.name).put("description", it.description).put("parameters", it.parameters)))
-            }
-            body.put("tools", arr)
-        }
+        val body = buildBody(system, history, tools, options, stream = false)
         val req = Request.Builder()
             .url("$baseUrl/chat/completions")
             .withHeaders()
@@ -132,6 +116,50 @@ class OpenAiCompatClient(
 
     private fun errorMessage(body: String): String =
         runCatching { JSONObject(body).getJSONObject("error").getString("message") }.getOrDefault(body.take(500))
+
+    /** Shared request body for [complete] and [observe]; [stream] adds the SSE flag. */
+    private fun buildBody(system: String, history: List<ChatMessage>, tools: List<ToolSpec>, options: CallOptions, stream: Boolean): JSONObject {
+        val body = JSONObject()
+            .put("model", model)
+            .put("messages", buildMessages(system, history))
+        if (stream) body.put("stream", true)
+        options.maxOutputTokens?.let { body.put("max_tokens", it) }
+        options.temperature?.let { body.put("temperature", it) }
+        if (openRouter) body.put("usage", JSONObject().put("include", true))
+        if (json && options.jsonMode && tools.isEmpty()) body.put("response_format", JSONObject().put("type", "json_object"))
+        if (reasoning) OpenRouterCatalog.effortFor(options.thinkingLevel, options.minimalThinking)?.let {
+            body.put("reasoning", JSONObject().put("effort", it))
+        }
+        if (tools.isNotEmpty()) {
+            val arr = JSONArray()
+            tools.forEach {
+                arr.put(JSONObject().put("type", "function").put("function",
+                    JSONObject().put("name", it.name).put("description", it.description).put("parameters", it.parameters)))
+            }
+            body.put("tools", arr)
+        }
+        return body
+    }
+
+    /** SSE request with retry/backoff mirroring [send]; returns the streaming result. */
+    private suspend fun sendStream(req: Request): Http.StreamResult {
+        var attempt = 0
+        while (true) {
+            val res = try {
+                Http.executeStream(req)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: java.io.IOException) {
+                if (attempt >= backoffMs.size) throw LlmException("$name bağlantı hatası (${backoffMs.size} yeniden denemeden sonra): ${e.message}")
+                kotlinx.coroutines.delay(backoffMs[attempt++])
+                continue
+            }
+            if (!isTransient(res.code) || attempt >= backoffMs.size) return res
+            res.close()
+            kotlinx.coroutines.delay(retryAfterMs(res.retryAfter) ?: backoffMs[attempt])
+            attempt++
+        }
+    }
 
     private fun cachedText(text: String) = JSONArray().put(
         JSONObject().put("type", "text").put("text", text).put("cache_control", JSONObject().put("type", "ephemeral")))
@@ -230,5 +258,91 @@ class OpenAiCompatClient(
     override suspend fun listModels(): List<String> {
         val arr = JSONObject(modelsBody()).optJSONArray("data") ?: return emptyList()
         return (0 until arr.length()).map { arr.getJSONObject(it).getString("id") }.sorted()
+    }
+
+    /**
+     * Streaming call: collects text, reasoning, tool calls and usage from SSE deltas.
+     * Transient HTTP codes and dropped connections are retried exactly like [send].
+     * A 400 response whose body does not mention "stream" returns null (the caller then falls back to non-streaming).
+     */
+    override suspend fun observe(
+        system: String,
+        history: List<ChatMessage>,
+        tools: List<ToolSpec>,
+        options: CallOptions,
+    ): LlmResponse? {
+        val body = buildBody(system, history, tools, options, stream = true)
+        val req = Request.Builder()
+            .url("$baseUrl/chat/completions")
+            .withHeaders()
+            .post(body.toString().toRequestBody(Http.JSON))
+            .build()
+        val res = sendStream(req)
+        if (res.code == 400 && !errorMessage(res.bodyText()).contains("stream", ignoreCase = true)) {
+            res.close()
+            return null
+        }
+        if (res.code !in 200..299) {
+            val err = errorMessage(res.bodyText())
+            res.close()
+            val retried = if (isTransient(res.code)) " (${backoffMs.size} yeniden denemeden sonra; geçici sağlayıcı hatası)" else ""
+            throw LlmException("$name hatası (${res.code})$retried: $err")
+        }
+        options.stallTimeoutMs?.let { res.stallTimeoutMs = it }
+        val text = StringBuilder()
+        val reasoning = StringBuilder()
+        val calls = LinkedHashMap<String, ToolCall>()
+        var finish = ""
+        var input = 0L
+        var output = 0L
+        var cached = 0L
+        var cost: Double? = null
+        try {
+            while (true) {
+                val line = res.readLine() ?: break
+                if (!line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload == "[DONE]") break
+                val obj = runCatching { JSONObject(payload) }.getOrNull() ?: continue
+                obj.optJSONObject("usage")?.let { u ->
+                    input = u.optLong("prompt_tokens", input)
+                    output = u.optLong("completion_tokens", output)
+                    cached = u.optLong("prompt_cache_hit_tokens", cached)
+                    if (u.has("cost") && !u.isNull("cost")) u.optDouble("cost").takeIf { !it.isNaN() && it >= 0 }?.let { cost = it }
+                }
+                val choice = obj.optJSONArray("choices")?.optJSONObject(0) ?: continue
+                choice.optString("finish_reason").takeIf { it.isNotBlank() }?.let { finish = it }
+                val delta = choice.optJSONObject("delta") ?: continue
+                delta.optString("reasoning_content", delta.optString("reasoning")).takeIf { it.isNotEmpty() }?.let { reasoning.append(it) }
+                delta.optString("content").takeIf { it.isNotEmpty() }?.let {
+                    text.append(it)
+                    options.onProgress?.invoke(StreamProgress("", text.length, calls.size))
+                }
+                delta.optJSONArray("tool_calls")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val tc = arr.getJSONObject(i)
+                        val id = tc.optString("id").ifBlank { tc.optInt("index", i).toString() }
+                        val fn = tc.optJSONObject("function")
+                        val existing = calls[id]
+                        val name = fn?.optString("name").orEmpty().ifBlank { existing?.name.orEmpty() }
+                        val argFrag = fn?.optString("arguments").orEmpty()
+                        val args = runCatching { JSONObject((existing?.args?.toString().orEmpty().takeIf { it != "{}" } ?: "") + argFrag) }
+                            .getOrElse { JSONObject() }
+                        calls[id] = ToolCall(id, name, args)
+                    }
+                }
+                options.onProgress?.invoke(StreamProgress(reasoning.toString().takeLast(80), text.length, calls.size))
+            }
+        } finally {
+            res.close()
+        }
+        val assistant = ChatMessage.Assistant(
+            text = if (text.isEmpty() && calls.isEmpty()) "(Model boş yanıt döndü)" else text.toString(),
+            toolCalls = calls.values.toList(),
+            reasoning = reasoning.toString().ifBlank { null },
+            model = model,
+        )
+        return LlmResponse(assistant, Usage(input = input, output = output, cached = cached),
+            truncated = finish == "length", costUsd = cost)
     }
 }

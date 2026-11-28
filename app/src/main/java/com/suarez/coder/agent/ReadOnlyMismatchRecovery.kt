@@ -12,19 +12,24 @@ object ReadOnlyMismatchRecovery {
     const val MAX_UPGRADES = 1
 
     private val WRITE_INTENT = Regex(
-        "(?i)\\b(düzelt|düzeltir|ekle|yaz|oluştur|güncelle|değiştir|kaldır|sil|commit|push|apply|fix|implement|add|update|" +
-            "refactor|rename|merge|deploy|taşı|düzenle|refactor)\\b",
+        "(?iu)\\b(düzelt|düzeltir|düzeltin|ekle|yaz|oluştur|güncelle|değiştir|kaldır|sil|eşleştir|taşı|düzenle|onar|tamir|commit|push|apply|fix|implement|refactor|rename|merge|add|update|deploy|" +
+            "github_apply_diff|github_write_files|uygula)\\b"
     )
 
     private val NO_ACCESS = Regex(
         "(?i)(yetkim yok|yetki yok|yetkimiz yok|salt okunur|salt-okunur|read[- ]?only|yazma iznim yok|yazma yetkim yok|" +
-            "izin verilmedi|erişimim yok|not allowed to (write|edit)|cannot (write|edit|modify)|permission denied)",
+            "izin verilmedi|erişimim yok|kod değişikliği gerekmiyor|repoyu değiştirme|değişiklik yapma|kod yazma|push etme|" +
+            "not allowed to (write|edit)|cannot (write|edit|modify)|permission denied)",
+    )
+    
+    private val DENY = Regex(
+        "(?i)(sadece incele|repoyu değiştirme|kod yazma|push etme|değişiklik yapma|sadece bak|yalnızca incele)"
     )
 
     enum class Action { UPGRADE, HANDOFF }
 
     /** Görev metni yazma niyeti taşıyor mu? (Sorular ve analiz istekleri false.) */
-    fun hasWriteIntent(task: String): Boolean = WRITE_INTENT.containsMatchIn(task)
+    fun hasWriteIntent(task: String): Boolean = WRITE_INTENT.containsMatchIn(task) && !DENY.containsMatchIn(task)
 
     /** READ_ONLY yalnızca kesin bir QUESTION görevinde ve yazma niyeti yoksa anlamlıdır. */
     fun readOnlyForRoute(route: Route?, task: String): Boolean =
@@ -32,7 +37,7 @@ object ReadOnlyMismatchRecovery {
 
     /** Modelin "yetkim yok" / salt okunur yanıtı gerçek bir yetki çakışması mı? */
     fun isMismatch(text: String, writeIntent: Boolean, readOnly: Boolean): Boolean =
-        readOnly && writeIntent && NO_ACCESS.containsMatchIn(text)
+        readOnly && writeIntent && NO_ACCESS.containsMatchIn(text) && !DENY.containsMatchIn(text)
 
     /** Sıradaki adım: bir kez yükselt, tükendiyse Uygulayıcı'ya devret. */
     fun next(upgrades: Int): Action = if (upgrades < MAX_UPGRADES) Action.UPGRADE else Action.HANDOFF

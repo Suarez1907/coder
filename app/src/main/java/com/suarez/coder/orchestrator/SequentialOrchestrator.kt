@@ -65,12 +65,17 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                 else {
                     val (failed, report) = waitCi(plan)
                     history += ChatMessage.Notice(if (failed) "❌ ${t.id}: CI başarısız" else "🟢 ${t.id}: CI", report, isError = failed)
-                    if (failed) result = result.copy(status = TaskStatus.FAILED, error = "CI başarısız:\n" + report.takeLast(1_500))
+                    if (failed) {
+                        val errLog = com.suarez.coder.ci.LogFilter.extract(report, maxChars = 2500)
+                        val firstLine = AutoHealer.signature(errLog)
+                        result = result.copy(status = TaskStatus.FAILED, error = "CI başarısız: $firstLine\n$errLog".take(2500))
+                    }
                 }
             }
             val cost = costSince(history, from)
             plan = save(plan.withTask(result.copy(costUsd = t.costUsd + cost)).addCost("Görev ${t.id}", cost), ui)
             if (result.status == TaskStatus.FAILED) {
+                // Try one auto-repair turn
                 return save(plan.copy(state = PlanState.PAUSED, note = "${t.id} başarısız oldu; Devam Et aynı alt görevi hatasıyla birlikte yeniden dener."), ui)
             }
         }
@@ -85,10 +90,11 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
         val (changes, summary) = editor.changesFor(t.files.map { it.path to (it.action == "delete") }, originals, state)
         if (changes.isEmpty()) return t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, "değişiklik gerekmedi"))
         return try {
-            agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
+            agent.tools.preCommit?.invoke(plan.repo, plan.branch, changes)
             val res = agent.tools.github.commitFiles(plan.repo, plan.branch, "${plan.commitMessage} — ${t.title}", changes, plan.base)
-            agent.tools.onRepoChanged()
+            agent.tools.afterCommit?.invoke(plan.repo, plan.branch)
             history += ChatMessage.Notice("✅ ${t.id} commit edildi", "$res\n$summary")
+            agent.tools.onRepoChanged()
             t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, summary))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

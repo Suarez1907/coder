@@ -27,7 +27,7 @@ object PreFlightValidator {
             // 1) Accidental wipe protection (>50 lines down to <5 lines without explicit delete)
             val beforeLines = f.before?.lines()?.size ?: 0
             val afterLines = if (after.isNotEmpty()) after.lines().size else 0
-            if (!f.explicitDelete && beforeLines > 50 && afterLines < 5) {
+            if (!f.explicitDelete && beforeLines >= 120 && (beforeLines - afterLines) > beforeLines * 0.4) {
                 issues += Issue(
                     f.path,
                     1,
