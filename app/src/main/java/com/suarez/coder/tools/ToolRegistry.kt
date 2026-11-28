@@ -776,7 +776,8 @@ class ToolRegistry(private val settings: Settings) {
         if (failed.isEmpty()) return "Bu çalıştırmada başarısız iş yok."
         val sb = StringBuilder()
         for (j in failed) {
-            val log = try { LogFilter.extract(github.jobLog(repo, j.id)) } catch (e: Exception) { "(log alınamadı: ${e.message})" }
+            val step = j.steps.firstOrNull { s -> s.isNotBlank() } ?: ""
+            val log = try { LogFilter.extract(github.jobLog(repo, j.id, j.name, step)) } catch (e: Exception) { "(log alınamadı: ${e.message})" }
             sb.append("## ${j.name} (${j.conclusion})\n").append(log).append("\n\n")
         }
         return sb.toString()

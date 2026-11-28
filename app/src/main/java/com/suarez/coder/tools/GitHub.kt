@@ -601,7 +601,7 @@ class GitHub(private val token: () -> String) {
         }
     }
 
-    data class Job(val id: Long, val name: String, val conclusion: String?)
+    data class Job(val id: Long, val name: String, val conclusion: String?, val steps: List<String> = emptyList())
 
     /** Re-runs only the failed jobs of a run (same commit): the flaky-failure check. */
     suspend fun rerunFailedJobs(repo: String, runId: Long): Boolean {
@@ -613,7 +613,10 @@ class GitHub(private val token: () -> String) {
         val arr = json("GET", "/repos/$repo/actions/runs/$runId/jobs?per_page=50").optJSONArray("jobs") ?: return emptyList()
         return (0 until arr.length()).map { i ->
             val j = arr.getJSONObject(i)
-            Job(j.getLong("id"), j.optString("name"), j.optString("conclusion").takeIf { !j.isNull("conclusion") && it.isNotBlank() })
+            val steps = j.optJSONArray("steps")?.let { a ->
+                (0 until a.length()).map { a.getJSONObject(it).optString("name") }.filter { it.isNotBlank() }
+            }.orEmpty()
+            Job(j.getLong("id"), j.optString("name"), j.optString("conclusion").takeIf { !j.isNull("conclusion") && it.isNotBlank() }, steps)
         }
     }
 
@@ -642,10 +645,31 @@ class GitHub(private val token: () -> String) {
         return null
     }
 
-    suspend fun jobLog(repo: String, jobId: Long): String {
+    /** Downloads a job log, following the redirect to the signed log blob without leaking the API token. */
+    suspend fun jobLog(repo: String, jobId: Long, jobName: String = "", stepName: String = ""): String {
         val r = call("GET", "/repos/$repo/actions/jobs/$jobId/logs")
-        if (r.code !in 200..299) throw ToolException("Log alınamadı (HTTP ${r.code})")
-        return r.body
+        if (r.code in 200..299) return r.body
+        val location = r.location
+        if (r.code in 300..399 && !location.isNullOrBlank()) {
+            // The redirect target is a pre-signed blob URL: never send the Authorization header there.
+            val clean = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+                .build()
+            val req = Request.Builder().url(location).get().build()
+            val followed = runCatching { Http.execute(req, clean) }.getOrNull()
+            if (followed != null && followed.code in 200..299) return followed.body
+            val code = followed?.code ?: r.code
+            throw ToolException(logErrorMessage(code, jobName, stepName))
+        }
+        throw ToolException(logErrorMessage(r.code, jobName, stepName))
+    }
+
+    /** Pure formatter so the step-aware error format can be unit tested. */
+    fun logErrorMessage(code: Int, jobName: String, stepName: String): String {
+        val job = jobName.ifBlank { "?" }
+        val step = stepName.ifBlank { "?" }
+        return "Log alınamadı (HTTP $code) · $job · $step"
     }
 
     suspend fun searchCode(query: String): String {
