@@ -13,7 +13,7 @@ class ReflexCompilerAndExecutorTest {
         val prog = ReflexCompiler.ReflexProgram(
             id = "bump_ver",
             name = "Sürüm Güncelle",
-            intentMatchers = listOf("version\s+(\d+\.\d+\.\d+)"),
+            intentMatchers = listOf("""version\s+(\d+\.\d+\.\d+)"""),
             requiredParams = listOf("ver"),
             operations = listOf(
                 ReflexCompiler.ReflexOp(
