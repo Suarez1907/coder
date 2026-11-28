@@ -57,13 +57,25 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
         unitTests.isIncludeAndroidResources = true
-        unitTests.all { it.systemProperty("roborazzi.test.record", "true") }
+        unitTests.all { test ->
+            test.systemProperty("roborazzi.test.record", "true")
+            // Robolectric, android-all jar'ını test sırasında indirmeye çalışıp CI'da ağ hatasına düşüyordu.
+            // Jar build sırasında kopyalanır ve Robolectric offline modda çalışır.
+            test.systemProperty("robolectric.offline", "true")
+            test.systemProperty("robolectric.dependency.dir", layout.buildDirectory.dir("robolectric-deps").get().asFile.absolutePath)
+            test.dependsOn("copyRobolectricDeps")
+        }
     }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+val robolectricDeps: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
 }
 
 dependencies {
@@ -87,6 +99,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // Screenshot tests on the JVM (Robolectric + Roborazzi), used to check the UI without an emulator.
     testImplementation("org.robolectric:robolectric:4.14.1")
+    // Robolectric'in ihtiyaç duyduğu Android SDK imajı: testler ağ olmadan da çalışabilsin.
+    testImplementation("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
     testImplementation("io.github.takahirom.roborazzi:roborazzi:1.32.2")
     testImplementation("io.github.takahirom.roborazzi:roborazzi-compose:1.32.2")
     testImplementation("androidx.compose.ui:ui-test-junit4")
@@ -94,4 +108,11 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     // Real org.json on the JVM test classpath (Android's version is only a stub there).
     testImplementation("org.json:json:20240303")
+
+    robolectricDeps("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+}
+
+tasks.register<Copy>("copyRobolectricDeps") {
+    from(robolectricDeps)
+    into(layout.buildDirectory.dir("robolectric-deps"))
 }
