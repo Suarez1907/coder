@@ -146,11 +146,30 @@ class OpenAiCompatClient(
      * as a normal completion and still passed through the watchdog. Returns null when streaming itself is rejected,
      * so the caller retries the standard request.
      */
+    private class StreamTransientRetry(val waitMs: Long, val code: Int, val msg: String) : Exception(msg)
+
     private suspend fun observe(body: JSONObject, dog: MidStreamWatchdog): LlmResponse? {
         body.put("stream", true)
         body.put("stream_options", JSONObject().put("include_usage", true))
         val req = Request.Builder().url("$baseUrl/chat/completions").withHeaders()
             .post(body.toString().toRequestBody(Http.JSON)).build()
+        var attempt = 0
+        while (true) {
+            try {
+                return observeOnce(req, dog, attempt)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: StreamTransientRetry) {
+                if (attempt >= backoffMs.size) {
+                    throw LlmException("$name hatası (${e.code}) (${backoffMs.size} yeniden denemeden sonra; geçici sağlayıcı hatası): ${e.msg}")
+                }
+                kotlinx.coroutines.delay(e.waitMs)
+                attempt++
+            }
+        }
+    }
+
+    private suspend fun observeOnce(req: Request, dog: MidStreamWatchdog, attempt: Int): LlmResponse? {
         return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             suspendCancellableCoroutine { cont ->
                 val call = Http.client.newCall(req)
@@ -167,14 +186,18 @@ class OpenAiCompatClient(
                                     val text = r.body?.string().orEmpty()
                                     if (r.code == 400 && errorMessage(text).contains("stream", ignoreCase = true)) {
                                         if (cont.isActive) cont.resume(null)
+                                    } else if (isTransient(r.code) && attempt < backoffMs.size) {
+                                        val wait = retryAfterMs(r.header("Retry-After")) ?: backoffMs[attempt]
+                                        if (cont.isActive) cont.resumeWithException(StreamTransientRetry(wait, r.code, errorMessage(text)))
                                     } else if (cont.isActive) {
-                                        cont.resumeWithException(LlmException("$name hatası (${r.code}): ${errorMessage(text)}"))
+                                        val retried = if (isTransient(r.code)) " (${backoffMs.size} yeniden denemeden sonra; geçici sağlayıcı hatası)" else ""
+                                        cont.resumeWithException(LlmException("$name hatası (${r.code})$retried: ${errorMessage(text)}"))
                                     }
                                     return
                                 }
-                                val src = r.body!!.source()
-                                if (!src.request(1)) {
-                                    if (cont.isActive) cont.resume(LlmResponse(ChatMessage.Assistant("", model = model), Usage()))
+                                val src = r.body?.source()
+                                if (src == null || !src.request(1)) {
+                                    if (cont.isActive) cont.resume(LlmResponse(ChatMessage.Assistant("(Model boş yanıt döndü)", model = model), Usage()))
                                     return
                                 }
                                 val prefix = src.peek().readByte()
@@ -193,8 +216,11 @@ class OpenAiCompatClient(
                                     return
                                 }
                                 val acc = StringBuilder()
+                                val reasoningAcc = StringBuilder()
                                 val calls = java.util.TreeMap<Int, ToolPiece>()
                                 var usage = Usage()
+                                var costUsd: Double? = null
+                                var finishReason = ""
                                 var cut: MidStreamWatchdog.Verdict? = null
                                 while (true) {
                                     val line = src.readUtf8Line() ?: break
@@ -202,9 +228,22 @@ class OpenAiCompatClient(
                                     val data = line.removePrefix("data:").trim()
                                     if (data.isEmpty() || data == "[DONE]") continue
                                     val json = JSONObject(data)
-                                    json.optJSONObject("usage")?.let { usage = usageOf(json) }
-                                    val delta = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                                    json.optJSONObject("usage")?.let { u ->
+                                        usage = usageOf(json)
+                                        u.takeIf { it.has("cost") && !it.isNull("cost") }
+                                            ?.optDouble("cost")
+                                            ?.takeIf { !it.isNaN() && it >= 0 }
+                                            ?.let { costUsd = it }
+                                    }
+                                    val choice0 = json.optJSONArray("choices")?.optJSONObject(0) ?: continue
+                                    if (!choice0.isNull("finish_reason")) {
+                                        choice0.optString("finish_reason").takeIf { it.isNotBlank() }?.let { finishReason = it }
+                                    }
+                                    val delta = choice0.optJSONObject("delta") ?: continue
                                     val piece = if (delta.isNull("content")) "" else delta.optString("content")
+                                    val rPiece = listOf("reasoning_content", "reasoning")
+                                        .firstNotNullOfOrNull { k -> if (delta.isNull(k)) null else delta.optString(k).ifBlank { null } }
+                                    if (!rPiece.isNullOrEmpty()) reasoningAcc.append(rPiece)
                                     delta.optJSONArray("tool_calls")?.let { arr ->
                                         for (i in 0 until arr.length()) {
                                             val c = arr.optJSONObject(i) ?: continue
@@ -232,12 +271,14 @@ class OpenAiCompatClient(
                                     ToolCall(slot.id.ifBlank { "call_" + UUID.randomUUID().toString().take(8) }, slot.name, args)
                                 }
                                 val text = acc.toString()
+                                val reasoningText = reasoningAcc.toString().ifBlank { null }
                                 val message = ChatMessage.Assistant(
                                     text = if (text.isEmpty() && tools.isEmpty()) "(Model boş yanıt döndü)" else text,
                                     toolCalls = tools,
+                                    reasoning = reasoningText,
                                     model = model,
                                 )
-                                if (cont.isActive) cont.resume(LlmResponse(message, usage))
+                                if (cont.isActive) cont.resume(LlmResponse(message, usage, truncated = finishReason == "length", costUsd = costUsd))
                             } catch (e: WatchdogCut) {
                                 if (cont.isActive) cont.resumeWithException(e)
                             } catch (e: java.io.IOException) {
