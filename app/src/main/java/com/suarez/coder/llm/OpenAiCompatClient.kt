@@ -193,8 +193,11 @@ class OpenAiCompatClient(
                                     return
                                 }
                                 val acc = StringBuilder()
+                                val reasoningAcc = StringBuilder()
                                 val calls = java.util.TreeMap<Int, ToolPiece>()
                                 var usage = Usage()
+                                var truncated = false
+                                var costUsd: Double? = null
                                 var cut: MidStreamWatchdog.Verdict? = null
                                 while (true) {
                                     val line = src.readUtf8Line() ?: break
@@ -202,9 +205,19 @@ class OpenAiCompatClient(
                                     val data = line.removePrefix("data:").trim()
                                     if (data.isEmpty() || data == "[DONE]") continue
                                     val json = JSONObject(data)
-                                    json.optJSONObject("usage")?.let { usage = usageOf(json) }
-                                    val delta = json.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                                    json.optJSONObject("usage")?.let { u ->
+                                        usage = usageOf(json)
+                                        val c = u.takeIf { it.has("cost") && !it.isNull("cost") }
+                                            ?.optDouble("cost")?.takeIf { !it.isNaN() && it >= 0 }
+                                        if (c != null) costUsd = (costUsd ?: 0.0) + c
+                                    }
+                                    val choice = json.optJSONArray("choices")?.optJSONObject(0)
+                                    if (choice?.optString("finish_reason") == "length") truncated = true
+                                    val delta = choice?.optJSONObject("delta") ?: continue
                                     val piece = if (delta.isNull("content")) "" else delta.optString("content")
+                                    val reasoningPiece = listOf("reasoning_content", "reasoning")
+                                        .firstNotNullOfOrNull { k -> if (delta.isNull(k)) null else delta.optString(k).ifBlank { null } }
+                                    if (!reasoningPiece.isNullOrEmpty()) reasoningAcc.append(reasoningPiece)
                                     delta.optJSONArray("tool_calls")?.let { arr ->
                                         for (i in 0 until arr.length()) {
                                             val c = arr.optJSONObject(i) ?: continue
@@ -235,9 +248,10 @@ class OpenAiCompatClient(
                                 val message = ChatMessage.Assistant(
                                     text = if (text.isEmpty() && tools.isEmpty()) "(Model boş yanıt döndü)" else text,
                                     toolCalls = tools,
+                                    reasoning = reasoningAcc.toString().ifBlank { null },
                                     model = model,
                                 )
-                                if (cont.isActive) cont.resume(LlmResponse(message, usage))
+                                if (cont.isActive) cont.resume(LlmResponse(message, usage, truncated = truncated, costUsd = costUsd))
                             } catch (e: WatchdogCut) {
                                 if (cont.isActive) cont.resumeWithException(e)
                             } catch (e: java.io.IOException) {

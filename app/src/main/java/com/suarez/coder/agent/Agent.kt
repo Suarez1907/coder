@@ -1002,17 +1002,6 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             }
             // Request-specific files go into the conversation (the volatile end), not the stable prefix.
             // The (expensive) architect only gets their names: contents go to the (cheap) editor, which reads the planned files anyway.
-            auto?.let {
-                if (requestIndex < 0) return@let
-                val block = if (route == Route.COMPLEX_ARCHITECT || (route == null && settings.architectMode)) {
-                    ChatMessage.ContextBlock(
-                        "Decision 1'e göre bu istekle ilgili dosyalar: ${autoPaths.joinToString(", ")}. Yapıları repo haritasında; " +
-                            "içerikleri plan sonrası Uygulayıcı'ya verilir. Plan için gerçekten gerekirse oku.",
-                        autoPaths.joinToString(", ") + " (yalnızca adlar)",
-                    )
-                } else ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))
-                history.add(requestIndex + 1, block)
-            }
             // Scoped rules follow the files of this turn. They stay out of the cached system prefix.
             // A Turn-0 pack, when it is used, carries the same rules inside the first task message.
             var ruleText: String? = null
@@ -1025,6 +1014,17 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             val packed = if (request != null && requestIndex >= 0) {
                 prepareTurn0(history, requestIndex, request, route, autoPaths, ruleText)
             } else false
+            if (!packed) auto?.let {
+                if (requestIndex < 0) return@let
+                val block = if (route == Route.COMPLEX_ARCHITECT || (route == null && settings.architectMode)) {
+                    ChatMessage.ContextBlock(
+                        "Decision 1'e göre bu istekle ilgili dosyalar: ${autoPaths.joinToString(", ")}. Yapıları repo haritasında; " +
+                            "içerikleri plan sonrası Uygulayıcı'ya verilir. Plan için gerçekten gerekirse oku.",
+                        autoPaths.joinToString(", ") + " (yalnızca adlar)",
+                    )
+                } else ChatMessage.ContextBlock(it.text, autoPaths.joinToString(", "))
+                history.add(requestIndex + 1, block)
+            }
             if (!packed && ruleText != null && requestIndex >= 0) {
                 val at = (requestIndex + 1 until history.size).lastOrNull { history[it] is ChatMessage.ContextBlock }
                 if (at != null) {
@@ -1434,7 +1434,6 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
             val tail = if (pace.preferCompactAndTurn0) minOf(settings.compactTailChars, 24_000) else settings.compactTailChars
             HistoryPruner.checkpointIndex(history, settings.keepTurns, tail)?.let { idx ->
                 history.add(idx, ChatMessage.CompactMark)
-                snapshots.clear()
                 history += ChatMessage.Notice("🗜 Geçmiş toplu sıkıştırıldı; önbellek bu adımda bir kez yenilenecek.")
                 maybeSummarize(history, ui)
                 ui.update()

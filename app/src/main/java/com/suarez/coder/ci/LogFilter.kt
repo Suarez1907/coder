@@ -19,22 +19,34 @@ object LogFilter {
      * error. Matched in capitals only, so real error lines that merely mention such words stay.
      */
     private val legal = Regex("\\b(WARRANTY|WARRANTIES|WARRANTED|LIABILITY|LIABLE|DAMAGES|INFRINGEMENT|NONINFRINGEMENT|MERCHANTABILITY|FITNESS|PURPOSE)\\b")
-    private val noise = Regex("(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated)", RegexOption.IGNORE_CASE)
+    private val criticalRe = Regex("e: file://|Unresolved reference")
+    private val noise = Regex(
+        "(warning: \\[options\\]|^\\s*at (java|kotlin|org\\.gradle|jdk)\\.|Picked up JAVA_TOOL_OPTIONS|DeprecationWarning|deprecated|" +
+            "continue-on-failure|GITHUB_DEPENDENCY_GRAPH|DEVELOCITY_|JAVA_HOME|GRADLE_USER_HOME|Run actions/|Run gradle/actions|##\\[group\\]|env:)",
+        RegexOption.IGNORE_CASE,
+    )
 
     fun extract(log: String, context: Int = 2, maxChars: Int = 6_000): String {
         val lines = log.lines().map { it.replace(timestamp, "").trimEnd() }
         val keep = sortedSetOf<Int>()
+        val critical = sortedSetOf<Int>()
         lines.forEachIndexed { i, l ->
+            if (criticalRe.containsMatchIn(l)) critical += i
             if (errorRe.containsMatchIn(l) && !noise.containsMatchIn(l) && !legal.containsMatchIn(l)) {
                 for (j in (i - context).coerceAtLeast(0)..(i + context).coerceAtMost(lines.size - 1)) keep += j
             }
         }
-        if (keep.isEmpty()) {
+        if (keep.isEmpty() && critical.isEmpty()) {
             val tail = lines.takeLast(40).joinToString("\n")
             return "(Belirgin hata satırı bulunamadı; logun son 40 satırı)\n" + tail.takeLast(maxChars)
         }
         val seen = HashSet<String>()
         val sb = StringBuilder()
+        for (i in critical) {
+            val l = lines[i]
+            if (l.isBlank() || !seen.add(l.trim())) continue
+            sb.append(l).append('\n')
+        }
         var prev = -2
         for (i in keep) {
             val l = lines[i]
