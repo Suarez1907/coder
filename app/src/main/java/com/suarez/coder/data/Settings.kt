@@ -158,6 +158,68 @@ class Settings(context: Context) {
         get() = str("budget_usd", "1.00").toDoubleOrNull() ?: 1.0
         set(v) = put("budget_usd", v.toString())
 
+    // ---- Phase 6A: Forensic diff, differential verification, budgeted MCTS ----
+
+    var forensicDiffEnabled: Boolean
+        get() = bool("forensic_diff_enabled", true)
+        set(v) = putBool("forensic_diff_enabled", v)
+
+    var differentialVerifyEnabled: Boolean
+        get() = bool("differential_verify_enabled", true)
+        set(v) = putBool("differential_verify_enabled", v)
+
+    var budgetedMctsEnabled: Boolean
+        get() = bool("budgeted_mcts_enabled", false)
+        set(v) = putBool("budgeted_mcts_enabled", v)
+
+    var mctsMaxBudgetUsd: Double
+        get() = str("mcts_max_budget_usd", "0.10").toDoubleOrNull()?.coerceAtLeast(0.0) ?: 0.10
+        set(v) = put("mcts_max_budget_usd", v.coerceAtLeast(0.0).toString())
+
+    // ---- Phase 6B: Architectural immunity, REM dream mode, Multi-repo mesh ----
+
+    var architecturalImmunityEnabled: Boolean
+        get() = bool("architectural_immunity_enabled", true)
+        set(v) = putBool("architectural_immunity_enabled", v)
+
+    var remDreamModeEnabled: Boolean
+        get() = bool("rem_dream_mode_enabled", false)
+        set(v) = putBool("rem_dream_mode_enabled", v)
+
+    var remDailyBudgetUsd: Double
+        get() = str("rem_daily_budget_usd", "0.05").toDoubleOrNull()?.coerceAtLeast(0.0) ?: 0.05
+        set(v) = put("rem_daily_budget_usd", v.coerceAtLeast(0.0).toString())
+
+    var multiRepoMeshEnabled: Boolean
+        get() = bool("multi_repo_mesh_enabled", true)
+        set(v) = putBool("multi_repo_mesh_enabled", v)
+
+    // ---- Phases 7–9: Speculative prefetch, Co-evolution, Zero-cost waterfall & Output diet ----
+
+    var speculativePrefetchEnabled: Boolean
+        get() = bool("speculative_prefetch_enabled", true)
+        set(v) = putBool("speculative_prefetch_enabled", v)
+
+    var coEvolutionEnabled: Boolean
+        get() = bool("co_evolution_enabled", false)
+        set(v) = putBool("co_evolution_enabled", v)
+
+    var coEvolutionDailyBudgetUsd: Double
+        get() = str("co_evolution_daily_budget_usd", "0.05").toDoubleOrNull()?.coerceAtLeast(0.0) ?: 0.05
+        set(v) = put("co_evolution_daily_budget_usd", v.coerceAtLeast(0.0).toString())
+
+    var zeroCostWaterfallEnabled: Boolean
+        get() = bool("zero_cost_waterfall_enabled", true)
+        set(v) = putBool("zero_cost_waterfall_enabled", v)
+
+    var freeQuotaFallbackModels: String
+        get() = str("free_quota_fallback_models", "")
+        set(v) = put("free_quota_fallback_models", v.trim())
+
+    var outputDietEnabled: Boolean
+        get() = bool("output_diet_enabled", true)
+        set(v) = putBool("output_diet_enabled", v)
+
     var usdTry: Double
         get() = str("usd_try", "42.0").toDoubleOrNull() ?: 42.0
         set(v) = put("usd_try", v.toString())
