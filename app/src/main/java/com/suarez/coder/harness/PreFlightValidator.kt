@@ -24,10 +24,10 @@ object PreFlightValidator {
             if (f.after == null && f.explicitDelete) continue
             val after = f.after ?: ""
 
-            // 1) Accidental wipe protection (>50 lines down to <5 lines without explicit delete)
+            // 1) Accidental wipe protection (>50 lines down to <5 lines, or >=120 lines with >=40% deleted)
             val beforeLines = f.before?.lines()?.size ?: 0
             val afterLines = if (after.isNotEmpty()) after.lines().size else 0
-            if (!f.explicitDelete && beforeLines > 50 && afterLines < 5) {
+            if (isAccidentalDelete(beforeLines, afterLines, f.explicitDelete)) {
                 issues += Issue(
                     f.path,
                     1,
@@ -70,6 +70,13 @@ object PreFlightValidator {
             }
         }
         return Result(issues.isEmpty(), issues)
+    }
+
+    fun isAccidentalDelete(beforeLines: Int, afterLines: Int, explicitDelete: Boolean): Boolean {
+        if (explicitDelete) return false
+        if (beforeLines > 50 && afterLines < 5) return true
+        if (beforeLines >= 120 && (beforeLines - afterLines) * 100 >= beforeLines * 40) return true
+        return false
     }
 
     private fun checkConflictMarkers(path: String, text: String): Issue? {
