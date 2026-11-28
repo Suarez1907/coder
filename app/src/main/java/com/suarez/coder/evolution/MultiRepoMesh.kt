@@ -29,14 +29,13 @@ class MultiRepoMesh(private val file: File? = null) {
             val tags = LinkedHashSet<String>()
             for (raw in paths) {
                 val p = raw.lowercase()
-                when {
-                    p.endsWith(".kt") || p.endsWith(".kts") -> tags += "kotlin"
-                    p.endsWith(".gradle") || p.endsWith(".gradle.kts") || p.endsWith("settings.gradle") -> tags += "gradle"
-                    p.endsWith(".gd") || p.endsWith(".tscn") || p.endsWith("project.godot") -> tags += "gdscript"
-                    p.endsWith("appinfo.json") || p.contains("webos") || p.endsWith(".ipk") -> tags += "webos"
-                    p.endsWith(".ts") || p.endsWith(".tsx") || p.endsWith(".js") -> tags += "js"
-                    p.endsWith(".py") -> tags += "python"
-                }
+                // Gradle checked first and independently: `build.gradle.kts` is both `gradle` and `kotlin`.
+                if (p.endsWith("settings.gradle") || p.endsWith(".gradle.kts") || p.endsWith(".gradle")) tags += "gradle"
+                if (p.endsWith(".kt") || p.endsWith(".kts")) tags += "kotlin"
+                if (p.endsWith(".gd") || p.endsWith(".tscn") || p.endsWith("project.godot")) tags += "gdscript"
+                if (p.endsWith("appinfo.json") || p.contains("webos") || p.endsWith(".ipk")) tags += "webos"
+                if (p.endsWith(".ts") || p.endsWith(".tsx") || p.endsWith(".js")) tags += "js"
+                if (p.endsWith(".py")) tags += "python"
             }
             val lowerRepo = repoName.lowercase()
             if ("godot" in lowerRepo) tags += "gdscript"

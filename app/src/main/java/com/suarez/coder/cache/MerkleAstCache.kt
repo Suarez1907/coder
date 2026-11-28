@@ -94,16 +94,16 @@ class MerkleAstCache(private val maxEntries: Int = MAX_ENTRIES) {
     @Synchronized
     fun recordVerified(beforeCode: String, afterCode: String, nowMs: Long = System.currentTimeMillis()): CacheEntry {
         val normBefore = normalize(beforeCode)
-        // Canonicalize `afterCode` using `before`'s symbol table first so shared identifiers keep identical placeholders.
-        val fwd = LinkedHashMap(normBefore.forwardMap)
-        var extraVar = fwd.values.count { it.startsWith("\$V") }
-        var extraStr = fwd.values.count { it.startsWith("\$STR") }
+        // Canonicalize `afterCode` strictly with `before`'s symbol table: only identifiers already present in
+        // `normBefore.forwardMap` get a placeholder. Anything new in `afterCode` (e.g. newly added stdlib calls
+        // such as `coerceAtLeast`) stays literal so reverse alpha-renaming cannot mangle it.
+        val fwd = normBefore.forwardMap
         val canonicalAfter = TOKEN_RE.replace(afterCode.trim()) { m ->
             val strLit = m.groupValues[1]
             val ident = m.groupValues[2]
             when {
-                strLit.isNotEmpty() -> fwd.getOrPut(strLit) { "\$STR${extraStr++}" }
-                ident.isNotEmpty() && ident !in KEYWORDS -> fwd.getOrPut(ident) { "\$V${extraVar++}" }
+                strLit.isNotEmpty() -> fwd[strLit] ?: m.value
+                ident.isNotEmpty() && ident !in KEYWORDS -> fwd[ident] ?: m.value
                 else -> m.value
             }
         }
