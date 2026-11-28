@@ -26,7 +26,8 @@ object AutoHealer {
     /** İlk anlamlı hata satırı (özet satırları ve kısaltma işaretleri atlanır). */
     fun signature(log: String): String =
         log.lines().map { it.trim() }.firstOrNull { l ->
-            l.isNotBlank() && !l.startsWith("##") && !l.startsWith("…") && !l.startsWith("(")
+            l.isNotBlank() && !l.startsWith("##") && !l.startsWith("…") && !l.startsWith("(") &&
+                !l.startsWith("Commit ") && !l.startsWith("---") && !l.startsWith("Job:") && !l.startsWith("Run ")
         }.orEmpty().take(300)
 
     fun decide(

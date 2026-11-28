@@ -25,7 +25,7 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             history += ChatMessage.Notice(if (failed) "❌ $id: CI başarısız" else "🟢 $id: CI", report, isError = failed)
             ui.update()
             if (!failed) return true
-            plan.task(id)?.let { pt -> plan = save(plan.withTask(pt.copy(status = TaskStatus.FAILED, error = "CI başarısız:\n" + report.takeLast(1_500))), ui) }
+            plan.task(id)?.let { pt -> plan = save(plan.withTask(pt.copy(status = TaskStatus.FAILED, error = formatCiError(report))), ui) }
             plan = save(plan.copy(state = PlanState.PAUSED, note = "$id başarısız oldu (CI); Devam Et aynı alt görevi hatasıyla birlikte yeniden dener."), ui)
             return false
         }
@@ -41,7 +41,7 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
             history += ChatMessage.Notice("▶️ Alt görev ${t.id}: ${t.title}")
             ui.update()
             val from = history.size
-            val handoffs = plan.tasks.mapNotNull { it.handoff } + listOfNotNull(t.error?.let { "Önceki deneme başarısız oldu: ${it.take(400)}" })
+            val handoffs = plan.tasks.mapNotNull { it.handoff } + listOfNotNull(t.error?.let { "Önceki deneme başarısız oldu: ${it.take(2_500)}" })
             val originals = HashMap<String, String?>()
             val state = HashMap<String, String?>()
             var result = try {
@@ -65,7 +65,30 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
                 else {
                     val (failed, report) = waitCi(plan)
                     history += ChatMessage.Notice(if (failed) "❌ ${t.id}: CI başarısız" else "🟢 ${t.id}: CI", report, isError = failed)
-                    if (failed) result = result.copy(status = TaskStatus.FAILED, error = "CI başarısız:\n" + report.takeLast(1_500))
+                    if (failed) {
+                        val ciErr = formatCiError(report)
+                        history += ChatMessage.Notice("🔁 ${t.id}: CI hatasıyla yeniden deneniyor", ciErr)
+                        ui.update()
+                        val retryHandoffs = plan.tasks.mapNotNull { it.handoff } + listOf("Önceki deneme başarısız oldu: ${ciErr.take(2_500)}")
+                        val rOrig = HashMap<String, String?>()
+                        val rState = HashMap<String, String?>()
+                        result = try {
+                            agent.budgetDeferred = true
+                            val rOut = StringBuilder()
+                            val ro = work(history, ui, plan, t, retryHandoffs, rOrig, rState, rOut)
+                            if (!ro.ok) t.copy(status = TaskStatus.FAILED, error = ciErr)
+                            else {
+                                val committed = commit(history, plan, t, rOrig, rState)
+                                if (committed.status == TaskStatus.DONE) {
+                                    val (rFailed, rReport) = waitCi(plan)
+                                    history += ChatMessage.Notice(if (rFailed) "❌ ${t.id}: CI başarısız" else "🟢 ${t.id}: CI", rReport, isError = rFailed)
+                                    if (rFailed) committed.copy(status = TaskStatus.FAILED, error = formatCiError(rReport)) else committed
+                                } else committed
+                            }
+                        } finally {
+                            agent.budgetDeferred = false
+                        }
+                    }
                 }
             }
             val cost = costSince(history, from)
@@ -80,20 +103,33 @@ class SequentialOrchestrator(agent: Agent, hooks: OrchestratorHooks) : Orchestra
         return save(plan.copy(state = PlanState.DONE, note = null), ui)
     }
 
+    private fun formatCiError(report: String): String {
+        val filtered = com.suarez.coder.ci.LogFilter.extract(report).ifBlank { report.takeLast(1_500) }
+        val firstLine = com.suarez.coder.ci.AutoHealer.signature(filtered)
+            .ifBlank { com.suarez.coder.ci.AutoHealer.signature(report) }
+            .ifBlank { "bilinmeyen hata" }
+        return "CI başarısız: $firstLine\n$filtered".take(2_500)
+    }
+
     private suspend fun commit(history: MutableList<ChatMessage>, plan: OrchestratorPlan, t: SubTask,
                                originals: Map<String, String?>, state: Map<String, String?>): SubTask {
         val (changes, summary) = editor.changesFor(t.files.map { it.path to (it.action == "delete") }, originals, state)
         if (changes.isEmpty()) return t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, "değişiklik gerekmedi"))
-        return try {
-            agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
-            val res = agent.tools.github.commitFiles(plan.repo, plan.branch, "${plan.commitMessage} — ${t.title}", changes, plan.base)
-            agent.tools.onRepoChanged()
-            history += ChatMessage.Notice("✅ ${t.id} commit edildi", "$res\n$summary")
-            t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, summary))
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            t.copy(status = TaskStatus.FAILED, error = "Commit başarısız: ${e.message}")
-        }
+        val deletedPaths = t.files.filter { it.action == "delete" }.map { it.path }.toSet()
+        val pf = com.suarez.coder.harness.PreFlightValidator.validate(
+            changes.map { c ->
+                com.suarez.coder.harness.PreFlightValidator.StagedFile(
+                    c.path, originals[c.path], c.content, explicitDelete = c.path in deletedPaths
+                )
+            }
+        )
+        if (!pf.ok) return t.copy(status = TaskStatus.FAILED, error = "Pre-flight engeli:\n" + pf.report().take(1_500))
+        agent.tools.preCommit?.invoke(plan.repo, plan.branch, changes.map { Triple(it.path, originals[it.path], it.content) })
+        agent.tools.beforeWrite?.invoke(plan.repo, plan.branch)
+        val res = agent.tools.github.commitFiles(plan.repo, plan.branch, "${plan.commitMessage} — ${t.title}", changes, plan.base)
+        agent.tools.afterCommit?.invoke(plan.repo, res, changes.map { it.path }, changes.count { it.content != null && originals[it.path] == null })
+        agent.tools.onRepoChanged()
+        history += ChatMessage.Notice("✅ ${t.id} commit edildi", "$res\n$summary")
+        return t.copy(status = TaskStatus.DONE, handoff = OrchestratorTools.handoffFor(t, summary))
     }
 }

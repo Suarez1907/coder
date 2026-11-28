@@ -44,7 +44,6 @@ internal class CiController(private val agent: Agent) {
             if (!agent.isEvolutionSession) tools.takeShipNotice()?.let { history += it }
             return result to cur
         }
-        if (!text.contains("\nHatalar (")) return result to cur
         val sig = com.suarez.coder.evolution.SessionTraceRecorder.signature(text)
         st.failures++; st.lastFailed = true
         val repeated = st.seen.any { ErrorSig.similar(it, sig) }
@@ -60,16 +59,30 @@ internal class CiController(private val agent: Agent) {
         if (!agent.isEvolutionSession) history += ChatMessage.Notice(com.suarez.coder.ci.AutoHealer.notice(heal), sig)
         heal.hint?.let { h -> out = out.copy(content = out.content + "\n\n" + h) }
         var next: ModelRef? = cur
-        if (settings.untilGreen && repeated && !agent.isEvolutionSession) {
-            val up = Escalation.next(agent.escalationChain(), cur)
-            if (up != null) {
-                history += ChatMessage.Notice("Aynı CI hatası tekrarlandı: daha güçlü modele geçiliyor (${up.model})", sig)
-            } else if (!ui.confirm("Aynı CI hatası tekrarlıyor", "Yükseltme zincirinin sonundasın (${cur.model}).\n\n$sig\n\nDevam edilsin mi?", "Devam et", "Durdur")) {
-                next = null
+        when (heal.action) {
+            com.suarez.coder.ci.AutoHealer.Action.RERUN -> {
+                out = out.copy(content = out.content + "\n\nAutoHealer: geçici/flaky hata tespit edildi — workflow'u yeniden çalıştır.")
             }
-            if (up != null) next = up
+            com.suarez.coder.ci.AutoHealer.Action.USE_KNOWN_FIX -> Unit
+            com.suarez.coder.ci.AutoHealer.Action.ESCALATE -> {
+                if (settings.untilGreen && !agent.isEvolutionSession) {
+                    val up = Escalation.next(agent.escalationChain(), cur)
+                    if (up != null) {
+                        history += ChatMessage.Notice("CI hatası için daha güçlü modele geçiliyor (${up.model})", sig)
+                        next = up
+                    } else if (repeated && !ui.confirm("Aynı CI hatası tekrarlıyor", "Yükseltme zincirinin sonundasın (${cur.model}).\n\n$sig\n\nDevam edilsin mi?", "Devam et", "Durdur")) {
+                        next = null
+                    }
+                }
+            }
+            com.suarez.coder.ci.AutoHealer.Action.ASK -> {
+                if (!agent.isEvolutionSession &&
+                    !ui.confirm("${st.failures}. kırmızı CI turu", "CI hâlâ başarısız.\n\n$sig\n\nDüzeltmeye devam edilsin mi?", "Devam et", "Durdur")
+                ) next = null
+            }
         }
-        if (next != null && st.failures >= settings.ciMaxRounds && !agent.isEvolutionSession &&
+        if (next != null && heal.action != com.suarez.coder.ci.AutoHealer.Action.ASK &&
+            st.failures >= settings.ciMaxRounds && !agent.isEvolutionSession &&
             !ui.confirm("${st.failures}. kırmızı CI turu", "CI hâlâ başarısız.\n\n$sig\n\nDüzeltmeye devam edilsin mi?", "Devam et", "Durdur")
         ) next = null
         ui.update()
