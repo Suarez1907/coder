@@ -164,7 +164,10 @@ object ReflexExecutor {
             else {
                 val re = Regex("""(${Regex.escape(anchor)}\s*=\s*["']?)([^"'\n]+)(["']?)""")
                 if (!re.containsMatchIn(before)) null
-                else re.replaceFirst(before) { m -> m.groupValues[1] + payload + m.groupValues[3] }
+                else re.find(before)?.let { m ->
+                    before.substring(0, m.range.first) + m.groupValues[1] + payload + m.groupValues[3] +
+                        before.substring(m.range.last + 1)
+                }
             }
         }
     }

@@ -83,10 +83,14 @@ class SelfHealingLadder(
             return HealingResult(true, Tier.TIER_0_DETERMINISTIC, quick.staged, 0, 0.0, lockedArchitectModelId, "${quick.rulesApplied.size} mekanik düzeltme (${quick.rulesApplied.joinToString(", ")}) · CI geçti")
         }
 
+        val t1 = tier1FreeRepair
+        val t2 = tier2PaidImplementer
+        val t3 = tier3LockedArchitect
+
         // Tier 1 ($0): ZeroCostWaterfall / local Tier-0
-        if (!oscillationDetected && tier1FreeRepair != null) {
+        if (!oscillationDetected && t1 != null) {
             llmCalls++
-            val cand = runCatching { tier1FreeRepair.invoke(errorLog, files) }.getOrNull()
+            val cand = runCatching { t1.invoke(errorLog, files) }.getOrNull()
             if (cand != null) {
                 validateTx(cand)?.let { tx ->
                     return HealingResult(true, Tier.TIER_1_FREE_QUOTA, tx, llmCalls, 0.0, lockedArchitectModelId, "Ücretsiz kota/yerel katman ile çözüldü")
@@ -95,9 +99,9 @@ class SelfHealingLadder(
         }
 
         // Tier 2 (low cost): Paid Implementer (skipped directly to Tier 3 on oscillation)
-        if (!oscillationDetected && tier2PaidImplementer != null) {
+        if (!oscillationDetected && t2 != null) {
             llmCalls++
-            val (cand, cost) = runCatching { tier2PaidImplementer.invoke(errorLog, files) }.getOrDefault(null to 0.0)
+            val (cand, cost) = runCatching { t2.invoke(errorLog, files) }.getOrDefault(null to 0.0)
             totalCost += cost.coerceAtLeast(0.0)
             if (cand != null) {
                 validateTx(cand)?.let { tx ->
@@ -107,9 +111,9 @@ class SelfHealingLadder(
         }
 
         // Tier 3 (Final resolution): User's locked Architect model
-        if (tier3LockedArchitect != null) {
+        if (t3 != null) {
             llmCalls++
-            val (cand, cost) = runCatching { tier3LockedArchitect.invoke(lockedArchitectModelId, errorLog, files) }.getOrDefault(null to 0.0)
+            val (cand, cost) = runCatching { t3.invoke(lockedArchitectModelId, errorLog, files) }.getOrDefault(null to 0.0)
             totalCost += cost.coerceAtLeast(0.0)
             if (cand != null) {
                 validateTx(cand)?.let { tx ->

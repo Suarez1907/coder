@@ -626,7 +626,7 @@ class Agent(val settings: Settings, private val filesDir: java.io.File? = null) 
         context.repo.takeIf { it.isNotBlank() }?.let { r -> lessonsFor?.invoke(tools.normalizeRepo(r))?.takeIf { it.isNotBlank() } }
             ?.let { parts += "LEARNED LESSONS (Coder's memory for this repo; follow them):\n$it" }
         if (settings.multiRepoMeshEnabled && filesDir != null) runCatching {
-            val tags = com.suarez.coder.evolution.MultiRepoMesh.detectStackTags(context.files, context.repo)
+            val tags = com.suarez.coder.evolution.MultiRepoMesh.detectStackTags(settings.contextFiles, context.repo)
             com.suarez.coder.evolution.MultiRepoMesh(java.io.File(filesDir, "evolution/multi_repo_mesh.json")).formatContext(tags)?.let { parts += it }
         }
         var hasMap = false
